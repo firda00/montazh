@@ -1,0 +1,682 @@
+# Stage 4 renderer research (2026-10-10)
+
+## hyperframes-core
+
+### (1) Standalone root form
+A top-level index.html puts the root <div data-composition-id> directly in <body>, with no <template> wrapper. Wrapping it hides all content and is a lint error (standalone_composition_wrapped_in_template). The root CSS uses width/height:100% and never hardcodes pixels. The runtime stamps data-width/data-height onto the root.
+
+_Source: C:/Users/firda/.claude/skills/hyperframes-core/SKILL.md:40,48-50; references/minimal-composition.md:20-25,69_
+
+### (1) Required root attributes
+The runtime requires the root to have data-composition-id, data-width and data-height. data-start="0" is a convention that the runtime stamps if it is missing. A duration source is also required: root data-duration, a GSAP timeline, media, or an adapter. The root should be position:relative, use explicit frame dimensions and hide overflow.
+
+_Source: hyperframes-core/references/minimal-composition.md:62-65; references/data-attributes.md:11-19_
+
+### (1) data-duration is static and fixed at compile time
+The root data-duration (in seconds) is the render length, not the GSAP timeline length. It is read once at compile time, like width/height. A script or --variables value that rewrites it later is ignored. A timeline that runs longer is cut off; one that ends early holds its last frame. For Stage 4 the generator must write data-duration="19.9" literally into the HTML for each output.
+
+_Source: hyperframes-core/references/data-attributes.md:13; references/determinism-rules.md:41; SKILL.md:54_
+
+### (1) Minimal 1080x1920 30fps 19.9s composition with muted video and separate audio
+The skeleton below adapts minimal-composition.md and the media example in variables-and-media.md. Video must be muted and playsinline. Sound must come from a separate <audio> element even when it uses the same file, and that <audio> must have an id. Never put crossorigin on either element (lint error media_crossorigin_breaks_preview). Composition code must never call play(), pause() or seek; HyperFrames owns playback. class="clip" is omitted on <video>/<audio>, as data-attributes.md recommends, although the example in variables-and-media.md does include it on <video>.
+
+_Source: hyperframes-core/references/minimal-composition.md:5-58; references/variables-and-media.md:69-102; references/data-attributes.md:25_
+
+```
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      body { margin: 0; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+      #a-roll { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0"
+         data-width="1080" data-height="1920" data-duration="19.9" data-fps="30">
+      <video id="a-roll" src="rough_reel_1.mp4" data-start="0" data-duration="19.9"
+             data-track-index="0" muted playsinline></video>
+      <audio id="a-roll-audio" src="rough_reel_1.mp4" data-start="0" data-duration="19.9"
+             data-track-index="10" data-volume="1"></audio>
+      <!-- caption page clips go here -->
+    </div>
+    <script>
+      const tl = gsap.timeline({ paused: true });
+      /* tweens */
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>
+```
+
+### (1) Media timing rules
+Do not wrap the <video data-start> in an element that also has data-start. That is a lint error (video_nested_in_timed_element) and a real failure: wrong source frames, then the clip disappears. data-media-start sets the offset into the source. <video>/<audio> can omit data-duration when the intrinsic length is known. data-volume is the static gain (default 1, maximum 3.98 = +12 dB). For fades, tween `volume` on the timeline instead.
+
+_Source: hyperframes-core/references/variables-and-media.md:98-105; references/data-attributes.md:33-37_
+
+### (1) Video and audio decode path
+At render time video is decoded with FFmpeg: frames are pre-extracted and injected. The audio mixer selects audio[id][src], so an <audio> without an id is never mixed and the render is silent (lint media_missing_id). H.264 input such as rough_reel_1.mp4 needs no preview proxy.
+
+_Source: hyperframes-core/references/variables-and-media.md:101,107_
+
+### (2) What makes an element a timed clip
+data-start alone makes an element timed. class="clip" is a layout and tooling convention; lint warns with timed_element_missing_clip_class if it is missing. data-duration is required on a <div>. Direct children of the root that have data-start are automatically forced to position:absolute at top:0/left:0 and sized to 100% when they have no size. Nested timed elements get no automatic layout, and a timed ancestor clamps the visibility of its descendants.
+
+_Source: hyperframes-core/references/data-attributes.md:23-33,41_
+
+### (2) Half-open visibility window
+A clip is visible while start <= t < start + duration and is hidden at exactly start + duration. Back-to-back caption pages (b.start === a.start + a.duration) therefore never share a frame. An animation's end state must land slightly before data-duration, or its last frame is never rendered.
+
+_Source: hyperframes-core/references/data-attributes.md:39_
+
+### (2) Caption page structure
+Make one root-level timed <section class="clip"> per design.json page, with data-start = the page's first word start and data-duration = page end minus page start (output seconds). Put the word <span>s inside it with no data-start. The runtime then hides each page outside its window, so no exit tween is needed. Do not add a scene-exit tl.set(..., {visibility:'hidden'}). Each word span must be display:inline-block, because transforms do nothing on inline spans.
+
+_Source: hyperframes-core/SKILL.md:11; references/data-attributes.md:23-41; references/determinism-rules.md:52_
+
+```
+<style>
+  .clip.cap { position:absolute; inset:0; display:flex; align-items:flex-end; justify-content:center;
+              padding:0 80px 420px; box-sizing:border-box; }
+  .cap-line { max-width:920px; text-align:center; font-family:"Inter"; font-weight:800; font-size:84px; color:#fff; }
+  .w { display:inline-block; } /* NO CSS transform here */
+</style>
+<section id="cap-0" class="clip cap" data-start="0.00" data-duration="1.52" data-track-index="1">
+  <div class="cap-line"><span class="w" id="cap-0-w0">Привет</span> <span class="w" id="cap-0-w1">мир</span></div>
+</section>
+```
+
+### (2) Seek-safe GSAP word pop and highlight
+The pattern assembles documented rules. Use one paused timeline. Use position parameter = word.start in global output seconds (the main timeline runs on root time). Animate the inner spans only, never the .clip with autoAlpha, visibility or display (lint gsap_animates_clip_element). Set the initial state inside fromTo instead of a CSS transform (lint gsap_css_transform_conflict). Use only the transform aliases x, y, scale and rotation, plus opacity and color. Compute every timing and position before building the timeline; never call getBoundingClientRect at tween time. Register the timeline last.
+
+_Source: hyperframes-core/SKILL.md:10,52-54,60,64; references/determinism-rules.md:11-16,32; hyperframes-animation/SKILL.md:62-67; references/minimal-composition.md:52-54_
+
+```
+const tl = gsap.timeline({ paused: true });
+// pages: from design.json, word times already in OUTPUT seconds
+pages.forEach((p, pi) => p.words.forEach((w, wi) => {
+  const el = `#cap-${pi}-w${wi}`;
+  tl.fromTo(el, { scale: 0.6, opacity: 0, y: 24 },
+                { scale: 1, opacity: 1, y: 0, duration: 0.18, ease: "back.out(2)" }, w.start);
+  tl.to(el, { color: "#FFD400", duration: 0.05 }, w.start);          // highlight on
+  tl.to(el, { color: "#FFFFFF", duration: 0.05 }, Math.max(w.start + 0.05, w.end - 0.05)); // off
+}));
+window.__timelines["main"] = tl; // key === root data-composition-id
+```
+
+### (2) Alternative: each word as its own timed element
+Nested timed elements are allowed, and a timed ancestor clamps its descendants. A word could therefore carry its own data-start/data-duration to switch on and off with no JS. However, nested clips get no automatic layout, they produce timed_element_missing_clip_class warnings without class="clip", and the switch is binary with no pop. The GSAP pattern on non-timed spans is cleaner.
+
+_Source: hyperframes-core/references/data-attributes.md:25-27_
+
+### (2) Text fit helpers
+For dynamic caption text use max-width with wrapping, or window.__hyperframes.fitTextFontSize(text, { maxWidth, fontFamily, fontWeight }). window.__hyperframes.pretext.prepare(text, "800 84px Inter") followed by layout(prepared, maxWidth, lineHeight) returns {lineCount, height} without reflowing the page. measureNaturalWidth and measureLineStats return widths. Do not use <br> in body text.
+
+_Source: hyperframes-core/references/determinism-rules.md:46-51_
+
+### (3) Font rule and lint name
+A named CSS font-family needs an @font-face in the same file pointing to a shipped local file, or lint fires font_family_without_font_face. The @font-face snippet below is plain CSS written for this report, not copied from the docs, which contain no example. Inter-Variable.ttf should be copied into the composition project, e.g. assets/fonts/.
+
+_Source: hyperframes-core/SKILL.md:65_
+
+```
+@font-face {
+  font-family: "Inter";
+  src: url("assets/fonts/Inter-Variable.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+}
+```
+
+### (3) Building the timeline after fonts load
+The core docs support building the timeline inside document.fonts.ready. Assign window.__timelines[id] = tl at the end of the callback, after all tweens are added, and optionally call window.__hfForceTimelineRebind() afterwards. Registering an empty timeline early renders blank and is a lint error (gsap_timeline_registered_before_async_build).
+
+_Source: hyperframes-core/references/determinism-rules.md:13; SKILL.md:54_
+
+```
+document.fonts.ready.then(() => {
+  const tl = gsap.timeline({ paused: true });
+  /* ...all tweens... */
+  window.__timelines["main"] = tl;
+  window.__hfForceTimelineRebind?.();
+});
+```
+
+### (3) Conflict between the two skills on async build
+hyperframes-animation/SKILL.md lists "no timeline construction inside async / setTimeout / Promise" among the core non-negotiables. The core determinism-rules.md says building inside document.fonts.ready is supported and documented. The safest choice is a synchronous build, using fonts.ready only if needed.
+
+_Source: hyperframes-animation/SKILL.md:62 vs hyperframes-core/references/determinism-rules.md:13_
+
+### (4) Determinism bans
+Visual state must not depend on Date.now(), performance.now() or any render-time clock. Also banned: unseeded Math.random() (use a seeded PRNG), render-time network fetches of required assets (inline or pre-bundle them), hover/scroll/pointer/focus state, and repeat:-1. For repeats use repeat: Math.max(0, Math.floor(duration / cycle) - 1); `ceil` trips the gsap_repeat_ceil_overshoot lint. Do not call tl.play() for motion the render depends on, and do not create empty tweens just to set a duration.
+
+_Source: hyperframes-core/references/determinism-rules.md:15-28_
+
+### (4) Other rules that would break this render
+Never tween display, visibility or autoAlpha on a .clip. Never animate the same property on the same element from more than one timeline. Never call video/audio play, pause or seek. Never animate the dimensions of the timed <video>. No page-load gsap.set on clips of later scenes. Never measure the layout with getBoundingClientRect at tween time.
+
+_Source: hyperframes-core/references/determinism-rules.md:32-34; references/variables-and-media.md:95-97; hyperframes-animation/SKILL.md:62,66_
+
+### (4) Lint errors silently switch off audits
+While any lint error is present, `check` skips the layout and contrast audits and reports "0 sample(s)" and "0/0 text checks", which looks like a clean result. Clear lint errors first. The validation target is `npx hyperframes check` with 0 findings before `render`.
+
+_Source: hyperframes-core/SKILL.md:68,91-96_
+
+### (5) Frame rate declaration
+fps is declared with the optional root attribute data-fps, documented as an "Optional frame rate hint". CLI render flags can override the output fps. Write data-fps="30" on the root and also pass the CLI fps flag.
+
+_Source: hyperframes-core/references/data-attributes.md:14_
+
+### Timeline registry key
+Use exactly one paused gsap.timeline for each composition, at window.__timelines["<root data-composition-id>"]. The runtime creates window.__timelines before inline scripts run. A key that does not match the id is bound only when it is the sole registered timeline. With two or more, the render freezes at t=0.
+
+_Source: hyperframes-core/references/determinism-rules.md:11-14; SKILL.md:12,54_
+
+### Centering pitfall
+Center captions with flex or inset, not with CSS transform: translate(-50%,-50%) on a node that GSAP also moves with x/y; that triggers lint gsap_css_transform_conflict. If an offset is needed, use fromTo or xPercent/yPercent.
+
+_Source: hyperframes-core/SKILL.md:10,60_
+
+### Render-path diagnostics
+After `render`, the second line of the summary shows the capture mode (beginframe or screenshot), the GPU mode and the stage timings. The docs flag screenshot plus software GPU on Linux as the slow path; Windows is not discussed.
+
+_Source: hyperframes-core/SKILL.md:13_
+
+### Text-animation effects list location
+hyperframes-animation/SKILL.md only routes to the 24 named text-animation effects, through adapters/animate-text.md (an external animate-text skill); the list itself is not in SKILL.md. Its GSAP-specific notes are: GSAP is the default runtime, spatial motion uses x/y/scale/rotation only, opacity/color/backgroundColor/borderRadius are allowed, layout constants are computed beforehand, and never width/height/top/left for layout changes. Detailed GSAP API is in adapters/gsap*.md and rules/gsap-effects.md.
+
+_Source: hyperframes-animation/SKILL.md:34-46,50,64-67_
+
+### Unknowns
+- The exact @font-face form lint accepts is not shown in the files read: a variable-weight TTF, format('truetype'), and whether a path outside the project directory is allowed. Only the rule name font_family_without_font_face is documented.
+- The default fps when data-fps is missing, and the exact name of the CLI fps override flag (it is in hyperframes-cli, not read).
+- How 19.9 s at 30 fps is rounded to a frame count (597 expected).
+- The 'Caption hard-kills are a different rule' mentioned in hyperframes-core/SKILL.md:11 is not explained in the files read.
+- The 24 text-animation effect IDs are in hyperframes-animation/adapters/animate-text.md, an external animate-text skill outside the read scope.
+- Whether loading GSAP from cdn.jsdelivr.net (as minimal-composition.md does) counts as a banned render-time network fetch, or whether the renderer caches or bundles it. Vendoring gsap.min.js locally would be safer.
+- Which rule wins: hyperframes-animation/SKILL.md:62 ('no timeline construction inside async/Promise') or hyperframes-core determinism-rules.md:13 (building in fonts.ready is supported).
+- Whether a <video> should have class='clip': data-attributes.md:25 says omit it, while the variables-and-media.md:72-81 example includes it.
+- Whether the relative src 'rough_reel_1.mp4' must sit inside the composition project directory (assumed yes, not verified).
+- Whether several GSAP tweens on the same span's color/scale stay seek-correct when the renderer seeks frames in parallel (GSAP immediateRender/lazy start values). This is general GSAP behaviour, not covered by the docs. Needs a `hyperframes check`/snapshot test.
+- The Windows capture path (beginframe vs screenshot) and render speed on an i7-13700 without a discrete GPU; not documented.
+- No snippet was run through `npx hyperframes lint/check`; nothing was installed or executed.
+
+## remotion-captions
+
+### Caption type
+`Caption` comes from `@remotion/captions` and has existed since v4.0.216. Its fields are text (string), startMs (number), endMs (number), timestampMs (number | null), confidence (number | null, a 0..1 value) and an optional pageBreakAfter (boolean, from v4.0.517). For timestampMs, whisper.cpp output gives `t_dtw`; other sources give null. The text field is whitespace-sensitive: put a space BEFORE each word, and render with `white-space: pre`.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/captions/caption.mdx (the docs source for https://www.remotion.dev/docs/captions/caption; WebFetch of that site URL returned 404)_
+
+```
+type Caption = { text: string; startMs: number; endMs: number; timestampMs: number | null; confidence: number | null; pageBreakAfter?: boolean };
+```
+
+### createTikTokStyleCaptions input
+Signature: createTikTokStyleCaptions({captions: Caption[], combineTokensWithinMilliseconds: number, breakOnSilenceAfterMilliseconds?: number}) => {pages: TikTokPage[]}. Available since v4.0.216 and works in the browser, Node and Bun. When a page's duration exceeds combineTokensWithinMilliseconds, the next caption that starts with a space begins a new page. breakOnSilenceAfterMilliseconds (from v4.0.514) adds earlier breaks when the gap between caption timestamps is at least that long. A value of 0 gives word-by-word pages. Without leading spaces, all the text merges into one page.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/captions/create-tiktok-style-captions.mdx_
+
+### createTikTokStyleCaptions output
+Each page has text (string), startMs (number), durationMs (number, from v4.0.261; it extends until the next page starts) and tokens: Array<{text, fromMs, toMs, pageBreakAfter (from v4.0.517)}>. Token fromMs and toMs are ABSOLUTE times, not times relative to the page. In the official example, 4 captions with combine=1200 produce pages {text:"Using Remotion's", startMs:40, durationMs:860, tokens:[{text:'Using',fromMs:40,toMs:300},{text:" Remotion's",fromMs:300,toMs:900}]} and {text:'TikTok template,', startMs:900, durationMs:1050, ...}.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/captions/create-tiktok-style-captions.mdx_
+
+```
+type TikTokPage = { text: string; startMs: number; durationMs: number; tokens: { text: string; fromMs: number; toMs: number; pageBreakAfter?: boolean }[] };
+```
+
+### Mapping our design.json to TikTokPage (no grouping step needed)
+reel_1.design.json already contains pages[] = {start, end, words:[{w, start, end, clip, phrase}]} in OUTPUT seconds, and the first page runs 0 to 1.95 s. titles and captions settings are under timeline (timeline.titles[0] = {at:0.3, duration:2.5, text, style:'hero'}; timeline.captions.style = 'bold_pop'). Because the pages already exist, createTikTokStyleCaptions can be skipped: map each page to the TikTokPage shape by multiplying by 1000 and adding a leading space to every token except the first. Whether pageBreakAfter on the TikTokPage token type is required or optional is not stated in the docs; a local type avoids the question.
+
+_Source: C:/Users/firda/монтаж/workspace/_proto/reel_1.design.json (inspected locally)_
+
+```
+const toPage = (p) => ({ text: p.words.map((w,i)=>(i?' ':'')+w.w).join(''), startMs: p.start*1000, durationMs: (p.end-p.start)*1000, tokens: p.words.map((w,i)=>({ text:(i?' ':'')+w.w, fromMs: w.start*1000, toMs: w.end*1000 })) });
+```
+
+### Official page/Sequence rendering pattern
+The official guide renders each page inside a <Sequence from={startFrame} durationInFrames={endFrame-startFrame}>. startFrame = page.startMs/1000*fps. endFrame = min(next page's start frame, startFrame + SWITCH_MS/1000*fps), and the page is skipped when the duration is <= 0. Inside the page, useCurrentFrame() is RELATIVE to the Sequence, so the absolute time is page.startMs + frame/fps*1000. A token is active when token.fromMs <= absMs && token.toMs > absMs. The example uses whiteSpace:'pre' with fontSize 80 bold and highlight colour '#39E508'. For an outline it suggests WebkitTextStroke:'4px black' with paintOrder:'stroke'.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/captions/displaying.mdx_
+
+### Copyable TSX: active-word highlight with spring/interpolate
+This combines the official displaying.mdx CaptionPage with the documented spring() and interpolate() APIs. The page entry uses a spring with high damping (no bounce). The active word gets a scale pop driven by a spring whose frame is shifted to the token's start. It has not been compiled or rendered in this session, so treat the exact visual result as unverified.
+
+_Source: displaying.mdx + https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/spring.mdx + animating-properties.mdx + interpolate.mdx_
+
+```
+import {AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig} from 'remotion';
+import type {TikTokPage} from '@remotion/captions';
+export const CaptionPage: React.FC<{page: TikTokPage}> = ({page}) => {
+  const frame = useCurrentFrame(); // relative to <Sequence from>
+  const {fps} = useVideoConfig();
+  const absMs = page.startMs + (frame / fps) * 1000;
+  const enter = spring({frame, fps, config: {damping: 200}, durationInFrames: 6});
+  return (
+    <AbsoluteFill style={{justifyContent: 'flex-end', alignItems: 'center', paddingBottom: 380}}>
+      <div style={{fontFamily: 'Inter', fontWeight: 800, fontSize: 84, textAlign: 'center', whiteSpace: 'pre',
+        WebkitTextStroke: '10px black', paintOrder: 'stroke', opacity: enter,
+        transform: `scale(${interpolate(enter, [0, 1], [0.85, 1])})`}}>
+        {page.tokens.map((t, i) => {
+          const active = t.fromMs <= absMs && t.toMs > absMs;
+          const startF = ((t.fromMs - page.startMs) / 1000) * fps;
+          const pop = spring({frame: frame - startF, fps, config: {damping: 12, stiffness: 200}});
+          const scale = active ? interpolate(pop, [0, 1], [1, 1.15], {extrapolateRight: 'clamp'}) : 1;
+          return (<span key={`${t.fromMs}-${i}`} style={{display: 'inline-block', color: active ? '#FFE500' : '#FFFFFF', transform: `scale(${scale})`}}>{t.text}</span>);
+        })}
+      </div>
+    </AbsoluteFill>
+  );
+};
+```
+
+### spring() / interpolate() parameters
+spring({frame, fps, from=0, to=1, reverse=false, config:{mass=1, damping=10, stiffness=100, overshootClamping=false}, durationInFrames?, durationRestThreshold?, delay?}). The spring starts at frame 0, so delay it with frame - N or delay:N. The docs say to raise damping to remove the bounce. The order of operations is stretch (durationInFrames), then reverse, then delay. interpolate(value, inputRange, outputRange, {extrapolateLeft/Right: 'extend'|'clamp'|'identity'|'wrap', easing (a function, or an array per segment from v4.0.462)}). The docs require animations to be driven by useCurrentFrame(), and CSS transitions/animations cause flicker in renders.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/spring.mdx ; .../interpolate.mdx ; .../animating-properties.mdx_
+
+### Local font file (Inter-Variable.ttf)
+`@remotion/fonts` (guide from v4.0.164, API page from v4.0.165): put the font in the project's public/ folder and call loadFont({family, url: staticFile('file.ttf'), format?: 'woff2'|'woff'|'opentype'|'truetype' (otherwise taken from the file extension), weight?, style?, stretch?, unicodeRange?, display?, featureSettings?, ascent/descent/lineGapOverride?}). It 'Automatically blocks the render until the font is ready'. The manual alternative is FontFace + delayRender/continueRender. Captions then just use style fontFamily. The docs do not say whether a weight RANGE such as weight:'100 900' for a variable TTF works (it is valid CSS @font-face syntax), so that is unverified. The captions docs do not mention fonts specifically.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/fonts.mdx ; .../fonts-api/load-font.mdx_
+
+```
+import {loadFont} from '@remotion/fonts'; import {staticFile} from 'remotion';
+loadFont({family: 'Inter', url: staticFile('Inter-Variable.ttf'), format: 'truetype'});
+```
+
+### License: Free License eligibility (verbatim)
+From LICENSE.md: 'You are eligible to use Remotion for free if you are: an individual; a for-profit organization with up to 3 employees; a non-profit or not-for-profit organization; evaluating whether Remotion is a good fit, and are not yet using it in a commercial way'. Allowed: 'to use the software non-commercially or commercially for the purpose of creating videos and images and to modify the software'. Disallowed: 'copy or modify Remotion code for the purpose of selling, renting, licensing, relicensing, or sublicensing your own derivate of Remotion.'
+
+_Source: https://github.com/remotion-dev/remotion/blob/main/LICENSE.md (raw copy fetched 2026-10-10)_
+
+### License: threshold is headcount only, no revenue threshold
+The FAQ wording is 'an organization or team of individuals with up to 3 people' and 'as long as your total headcount is 3 or less'. The agency section refers to 'the 4-person threshold' (4 or more people means a Company License). No revenue threshold appears anywhere in LICENSE.md or the license FAQ. The Free License has no functional restrictions, and the FAQ says 'You don't have to contact us' and need not sign up on remotion.pro.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/license/faq.mdx (https://www.remotion.dev/docs/license/faq)_
+
+### License: Company License prices
+'Remotion for Creators ... costs $25/month per person who writes Remotion code themselves or using agentic coding tools.' 'Remotion for Automators ... costs $0.01 per render, with a minimum spend of $100/month.' The two can be combined, with a combined minimum of $100/month, and 'Developers working on automations do not require a "Remotion for Creators" seat.' Enterprise has the same baseline price with a $500 minimum. Both plans are bought at remotion.pro/license. There are no refunds. The license does not cover H.264/HEVC/AAC codec patent fees.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/license/faq.mdx_
+
+### License: our pipeline counts as an 'automation'
+The FAQ defines an automation as 'owning code that programmatically calls' renderMedia(), renderStill(), renderFrames(), `npx remotion render`, <Player>, and similar APIs. 1 render = 'the successful generation of a video, audio, GIF, still image or PDF', and Studio/Player previews do not count. A Node pipeline calling renderMedia() per output is therefore 'Remotion for Automators'. With 3 or fewer people this is still free ('If you are eligible for the Free License, you can also run an automation'). With 4 or more people it costs $0.01/render with at least $100/month.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/license/faq.mdx_
+
+### License: Remotion 5.0 changes
+LICENSE.md: 'In Remotion 5.0, the license will slightly change' (PR #3750). The 5.0 migration guide lists two effective changes: 'Contractors now also count towards team size' and the license 'is tied to our updated terms and conditions'. Also in 5.0, rendering APIs require a licenseKey ('If you are eligible for the free license, pass "free-license"'), and telemetry becomes mandatory for 'Remotion for Automators' while staying voluntary for Free and Creators. npm `remotion` latest is 4.0.534 (dist-tag alpha 4.1.0-alpha12), so v5 was not the latest release on 2026-10-10.
+
+_Source: LICENSE.md ; https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/5-0-migration.mdx ; .../telemetry.mdx ; `npm view remotion version dist-tags`_
+
+### Telemetry / source-available
+Server-side rendering in v4 sends telemetry only when the licenseKey option is set, and only for successful renders, with no domain name. Client-side rendering (renderMediaOnWeb) always sends telemetry. The FAQ states Remotion 'is source-available software, but it is not open source' under the OSI definition.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/telemetry.mdx ; license/faq.mdx_
+
+### Windows: Chrome Headless Shell download
+Windows x64 is supported. Remotion 'is automatically installing "Chrome Headless Shell" into your node_modules' at node_modules/.remotion/chrome-headless-shell/win64/chrome-headless-shell-win64, with a VERSION file from v4.0.415. A mismatched VERSION causes the browser to be deleted and re-downloaded. Remotion 4.0.534 pins Chrome 157.0.8080.0. To avoid downloading during the first render, run `npx remotion browser ensure` or `await ensureBrowser({onBrowserDownload: () => ({version: null, onProgress})})` from @remotion/renderer (v4.0.137+) beforehand.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/miscellaneous/chrome-headless-shell.mdx ; .../renderer/ensure-browser.mdx_
+
+### Windows: installed desktop Chrome is not used
+From v4.0.208 Remotion does 'not pick up an externally installed browser'. Overriding with browserExecutable or setBrowserExecutable is possible, but the docs warn it 'may be less deterministic' and recommend against an incompatible Chrome. So the user's installed Chrome does not remove the need for the Headless Shell download. Chrome for Testing mode is only recommended for GPU rendering on Linux. Shared-memory frame capture (v4.0.534) applies only to Apple Silicon and Linux, so Windows renders capture frames as JPEG/PNG screenshots.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/miscellaneous/chrome-headless-shell.mdx_
+
+### Windows troubleshooting page
+The docs tree (packages/docs/docs, 1214 .mdx files) has no troubleshooting/windows page. The general 'Failed to launch the browser process' page lists missing libraries, wrong OS or architecture, and debugging with `npx remotion render --log=verbose`.
+
+_Source: GitHub tree API listing of remotion-dev/remotion main ; https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/troubleshooting/browser-launch.mdx_
+
+### Remotion 5.0 font/layout change
+In 5.0, `validateFontIsLoaded` defaults to true in @remotion/layout-utils (measureText, fitText, fillTextBox, fitTextOnNLines), so custom fonts must be loaded before those helpers are called. @remotion/google-fonts loadFont must specify weights and subsets.
+
+_Source: https://raw.githubusercontent.com/remotion-dev/remotion/main/packages/docs/docs/5-0-migration.mdx_
+
+### Unknowns
+- Behaviour with non-ASCII (Cyrillic) project or node_modules paths on Windows (C:/Users/firda/монтаж/...) is not covered by any official Remotion doc. A web search found no Remotion-specific issue. It has to be tested empirically, for example by copying a minimal project to both an ASCII path and the Cyrillic path.
+- How long the first run takes on Windows (the size and time of the Chrome Headless Shell download and the first webpack bundle) is not stated in the docs.
+- Whether loadFont from @remotion/fonts accepts a weight range (e.g. '100 900') for a variable TTF is not documented.
+- Whether TikTokPage.tokens[].pageBreakAfter is required or optional in the TypeScript type is not stated in the docs (only 'from v4.0.517').
+- The live pricing calculator at https://www.remotion.dev/docs/license/pricing is a React component (@remotion/promo-pages Pricing.tsx) and was not rendered. Prices are taken from the license FAQ text instead.
+- WebFetch of https://www.remotion.dev/docs/captions/caption returned HTTP 404, so the content was read from the docs source on GitHub main. The live site may differ slightly from main.
+- When Remotion 5.0 will be released (npm latest = 4.0.534 on 2026-10-10), and so when the contractor-counting rule and mandatory licenseKey/telemetry take effect.
+- Whether a sub-3-person startup that later grows past 3 people must license retroactively is not addressed in the texts read.
+- The TSX example and how OffthreadVideo overlays captions on rough_reel_1.mp4 were not compiled or rendered in this session.
+
+## remotion-render
+
+### versions / provenance
+npm view returns 4.0.534 for remotion, @remotion/renderer, @remotion/fonts and @remotion/media (remotion time.modified 2026-10-07). WebFetch of remotion.dev only returned summaries with no code, because of a quote limit. So the docs text and snippets below come from the official docs source in the Remotion repo (packages/docs/docs/*.mdx on the main branch), which is what remotion.dev renders. Option defaults come from packages/renderer/src/options/*.tsx. The main branch can be slightly ahead of 4.0.534.
+
+_Source: npm view remotion version; https://github.com/remotion-dev/remotion/tree/main/packages/docs/docs_
+
+### (1) SSR flow
+The official example takes three steps: bundle() once (reuse it for many renders and set them up through inputProps), then selectComposition() with inputProps, then renderMedia() with the same inputProps. The example file is render.mjs and uses top-level await, so it works as ESM.
+
+_Source: https://www.remotion.dev/docs/ssr-node (packages/docs/docs/ssr-node.mdx)_
+
+```
+import {bundle} from '@remotion/bundler';
+import {renderMedia, selectComposition} from '@remotion/renderer';
+import path from 'path';
+
+const compositionId = 'HelloWorld';
+const bundleLocation = await bundle({
+  entryPoint: path.resolve('./src/index.ts'),
+  webpackOverride: (config) => config,
+});
+const inputProps = { foo: 'bar' };
+const composition = await selectComposition({
+  serveUrl: bundleLocation,
+  id: compositionId,
+  inputProps,
+});
+await renderMedia({
+  composition,
+  serveUrl: bundleLocation,
+  codec: 'h264',
+  outputLocation: `out/${compositionId}.mp4`,
+  inputProps,
+});
+```
+
+### (1) bundle()
+bundle() packs the project with Webpack (or Rspack when rspack:true) and returns Promise<string>, the output directory. That directory is the serveUrl. The docs call running bundle() for every video an anti-pattern: only re-bundle when the source code changes. entryPoint must be an absolute path. outDir defaults to a temp dir and rootDir defaults to the cwd. publicDir overrides the public/ folder. enableCaching, webpackOverride and onProgress (0–100) are also options. Only the public/ folder is copied into the bundle.
+
+_Source: https://www.remotion.dev/docs/bundle (bundle.mdx); https://www.remotion.dev/docs/miscellaneous/absolute-paths_
+
+### (1) selectComposition()
+selectComposition({serveUrl, id, inputProps}) evaluates the Remotion Root and runs calculateMetadata() for that one composition. It throws if the id does not exist. It returns the composition with id, width, height, fps and durationInFrames, which is what renderMedia expects. inputProps is optional in v4 and required from v5. Other options: chromiumOptions, browserExecutable, timeoutInMilliseconds (default 30000), port, puppeteerInstance (a browser from openBrowser(), reusable across calls), logLevel and onBrowserDownload.
+
+_Source: https://www.remotion.dev/docs/renderer/select-composition_
+
+### (1) calculateMetadata per output
+calculateMetadata is a prop of <Composition>. It may be async and can return durationInFrames, width, height, fps, props (transformed, must be JSON-serializable), defaultCodec, defaultOutName, defaultPixelFormat, defaultVideoImageFormat and defaultSampleRate. It runs once per render, independent of concurrency, in a separate tab during selectComposition(), and must resolve within the delayRender timeout. Returned fields take precedence over the static props on <Composition>, so per-output 1080x1920/30fps/duration can come from inputProps such as design.json's timeline.
+
+_Source: https://www.remotion.dev/docs/calculate-metadata_
+
+```
+import {CalculateMetadataFunction, Composition} from 'remotion';
+const calculateMetadata: CalculateMetadataFunction<MyComponentProps> = ({props, defaultProps, abortSignal, isRendering}) => {
+  return {
+    durationInFrames: props.duration,
+    props,
+    defaultCodec: 'h264',
+    defaultPixelFormat: 'yuv420p',
+  };
+};
+// <Composition id="MyComp" component={MyComponent} durationInFrames={300} fps={30} width={1920} height={1080} defaultProps={{...}} calculateMetadata={calculateMetadata} />
+// Adapted for this project (NOT from docs): return {fps: t.fps, width: t.width, height: t.height, durationInFrames: Math.round(t.duration * t.fps)} where t = props.timeline
+```
+
+### (2) OffthreadVideo src: staticFile vs absolute path
+src accepts a remote URL or a public/ file referenced with staticFile(). Absolute paths such as "C://Users/..." are explicitly not supported: the browser cannot read the filesystem and only public/ is copied into the bundle. public/ must sit next to the package.json that installs remotion. The documented workaround for large or out-of-project files is to serve the folder over HTTP (`npx serve --cors <dir>`, or serve-handler programmatically) and pass the URL. For this pipeline that means either copying rough_reel_1.mp4 into public/ (or publicDir) before bundle(), or serving workspace/<job>/ over local HTTP and passing the URL through inputProps.
+
+_Source: https://www.remotion.dev/docs/offthreadvideo; https://www.remotion.dev/docs/miscellaneous/absolute-paths; https://www.remotion.dev/docs/staticfile_
+
+```
+import {OffthreadVideo, staticFile} from 'remotion';
+export const MyVideo = () => <OffthreadVideo src={staticFile('video.webm')} />;
+```
+
+### (2) OffthreadVideo trimming
+trimBefore (frames, v4.0.319) cuts the start. durationInFrames (v4.0.530) picks that many source frames starting at trimBefore. trimAfter is deprecated in favour of durationInFrames, and startFrom/endAt are deprecated renames. Once the video ends, its last frame stays visible. There is no loop prop.
+
+_Source: https://www.remotion.dev/docs/offthreadvideo#trimbefore_
+
+```
+<OffthreadVideo src={staticFile('video.webm')} trimBefore={60} durationInFrames={60} />
+```
+
+### (2) OffthreadVideo audio
+The video's audio goes into the render unless the `muted` prop is set (the docs: you can drop the audio of the video by adding a muted prop). volume can be a number, or computed per frame with useCurrentFrame()+interpolate(). audioStreamIndex defaults to 0 and only applies during rendering. playbackRate keeps pitch during SSR. At the renderMedia level, muted:true renders no audio at all, and enforceAudioTrack forces an audio track.
+
+_Source: https://www.remotion.dev/docs/offthreadvideo#muted; https://www.remotion.dev/docs/renderer/render-media#muted_
+
+### (2) OffthreadVideo internals and options
+During rendering, FFmpeg extracts the exact frame outside the browser and shows it in an <img>. transparent defaults to false, which extracts BMP frames and is faster. toneMapped defaults to true, and setting it to false saves time. In renderMedia, offthreadVideoThreads defaults to 2 (source: DEFAULT_RENDER_FRAMES_OFFTHREAD_VIDEO_THREADS = 2). offthreadVideoCacheSizeInBytes defaults to null, meaning half of system memory.
+
+_Source: https://www.remotion.dev/docs/offthreadvideo; packages/renderer/src/options/offthreadvideo-threads.tsx, offthreadvideo-cache-size.tsx_
+
+### (2) Recommended alternative: <Video> from @remotion/media
+The docs now recommend <Video> from @remotion/media (Mediabunny, draws to <canvas>) for new code. The Performance page says Html5Video and OffthreadVideo "are not optimized". The video-tags comparison rates render speed as Video "Fastest" and OffthreadVideo "Fast". <Video> supports the same src/staticFile, trimBefore, durationInFrames, muted, volume and audioStreamIndex. When a video can't be embedded it falls back to OffthreadVideo by default; disallowFallbackToOffthreadVideo turns that off. One difference: playbackRate changes audio pitch in <Video>.
+
+_Source: https://www.remotion.dev/docs/media/video; https://www.remotion.dev/docs/performance; https://www.remotion.dev/docs/video-tags_
+
+```
+import {staticFile} from 'remotion';
+import {Video} from '@remotion/media';
+export const MyVideo = () => <Video src={staticFile('video.webm')} />;
+```
+
+### (3) loadFont() for a local TTF
+loadFont is in @remotion/fonts (docs say v4.0.164/165). Put the font in public/ and call loadFont({family, url: staticFile(...)}) at module level. It blocks the render with delayRender until the font has loaded. format is derived from the file extension (woff2/woff/opentype/truetype). Other options: weight, style, stretch, display, unicodeRange, featureSettings, and ascent/descent/lineGap overrides. The source passes weight etc. straight to the FontFace constructor and runs document.fonts.add(). There is no subset step, so Cyrillic coverage depends only on the TTF itself (Inter-Variable.ttf here). The font must be copied into public/; the C:/... path can't be used directly.
+
+_Source: https://www.remotion.dev/docs/fonts-api/load-font; https://www.remotion.dev/docs/fonts; packages/fonts/src/load-font.ts_
+
+```
+import { loadFont } from "@remotion/fonts";
+import { AbsoluteFill, staticFile } from "remotion";
+
+loadFont({
+  family: "Bangers",
+  url: staticFile("bangers.ttf"),
+}).then(() => console.log("Font loaded!"));
+// project use (adapted): loadFont({family: 'Inter', url: staticFile('fonts/Inter-Variable.ttf'), weight: '100 900'}) -- the weight range is a FontFace standard descriptor; that it works through loadFont is inferred, not documented
+```
+
+### (4) codec / crf / x264Preset
+h264 is the default codec. CRF for H264 runs from 1 (best) to 51, and the default is 18. crf can't be combined with hardwareAcceleration (use videoBitrate instead). x264Preset applies only to h264, takes superfast…placebo, and defaults to 'medium'. imageFormat defaults to 'jpeg', which is the fastest; png is slower and only needed for transparency. jpegQuality is left to the browser default (80).
+
+_Source: https://www.remotion.dev/docs/encoding#controlling-quality-using-the-crf-setting; https://www.remotion.dev/docs/renderer/render-media; packages/renderer/src/options/x264-preset.tsx (DEFAULT_PRESET='medium')_
+
+### (4) audioCodec
+The audioCodec default depends on codec. For h264 the default is 'aac' (lossless: 'pcm-16'), and the supported values are aac, pcm-16 and mp3. audioBitrate is available from v3.2.32. Passing audioCodec:'aac' explicitly is valid.
+
+_Source: https://www.remotion.dev/docs/renderer/render-media#audiocodec; packages/renderer/src/options/audio-codec.tsx (supportedAudioCodecs / defaultAudioCodecs)_
+
+### (4) concurrency
+concurrency accepts a number, a percentage string such as '50%', or null to let Remotion decide. The default is half of the available CPU threads, the minimum is 1 and the maximum is os.cpus().length. Use `npx remotion benchmark` to find the best value. An i7-13700 has 24 threads, so the default would be about 12 (thread count is from Intel's spec, not from Remotion docs).
+
+_Source: https://www.remotion.dev/docs/renderer/render-media#concurrency; packages/renderer/src/options/concurrency.tsx; https://www.remotion.dev/docs/performance_
+
+### (4) chromiumOptions
+chromiumOptions take effect at browser launch. Fields: disableWebSecurity (default false), ignoreCertificateErrors (default false), enableMultiProcessOnLinux (default true), headless (setting it to false only works with chromeMode 'chrome-for-testing'), gl (one of 'angle', 'egl', 'swiftshader', 'swangle', 'vulkan', 'angle-egl'; in v4 the default is null, so Chrome decides, and 'angle' becomes the default in v5), userAgent, and darkMode. All SSR APIs (selectComposition, renderMedia, renderStill) accept chromiumOptions, so pass the same values to each.
+
+_Source: https://www.remotion.dev/docs/chromium-flags; https://www.remotion.dev/docs/renderer/render-media#chromiumoptions; packages/renderer/src/options/gl.tsx_
+
+### (4) Chrome Headless Shell on Windows and first-run download
+Remotion installs Chrome Headless Shell into node_modules automatically. Windows x64 is supported, and the path is node_modules/.remotion/chrome-headless-shell/win64/chrome-headless-shell-win64 with a VERSION file. Remotion 4.0.534 pins Chrome 157.0.8080.0. From v4.0.208 Remotion does not pick up the system Chrome, so the installed Chrome is not used. If no browser is present, SSR APIs download one. To download it ahead of time, run `npx remotion browser ensure` or call ensureBrowser(), which takes an onBrowserDownload progress hook. Headless Shell is the faster mode for CPU-bound renders, and Chrome for Testing is only meant for Linux GPU setups. browserExecutable can point at another Chromium, but the docs discourage it because results are less deterministic.
+
+_Source: https://www.remotion.dev/docs/miscellaneous/chrome-headless-shell; https://www.remotion.dev/docs/renderer/ensure-browser_
+
+```
+import {ensureBrowser} from '@remotion/renderer';
+await ensureBrowser();
+```
+
+### (4) Windows-specific capture and HW encode
+Shared-memory frame capture is new in 4.0.534 but only works on Apple Silicon and Linux. Per the docs: on Windows, Intel Macs and older Linux, Remotion uses regular JPEG or PNG screenshots. hardwareAcceleration defaults to 'disable'. On Windows its only backend is NVENC, which needs an NVIDIA GPU (v4.0.484), so this machine without a discrete GPU will encode with libx264 on the CPU.
+
+_Source: https://www.remotion.dev/docs/shared-memory-capture; https://www.remotion.dev/docs/hardware-acceleration_
+
+### (4) other renderMedia options and return value
+outputLocation null returns a buffer instead of writing a file. frameRange accepts a number, [start,end] inclusive, or [start,null]. onProgress reports progress, renderedFrames, encodedFrames and stitch stage. timeoutInMilliseconds defaults to 30000. cancelSignal comes from makeCancelSignal(). Also: overwrite, scale, pixelFormat, colorSpace, binariesDirectory, licenseKey (v4.0.409). From v4 the call resolves to {buffer, slowestFrames (the 10 slowest frames), contentType}.
+
+_Source: https://www.remotion.dev/docs/renderer/render-media_
+
+### (5) renderStill() preview PNG
+renderStill({composition, serveUrl, output, inputProps, frame}) renders a single frame. frame is zero-indexed and defaults to 0. imageFormat defaults to 'png' (also jpeg, webp, pdf), and overwrite defaults to true. It takes the same chromiumOptions, browserExecutable, puppeteerInstance and timeoutInMilliseconds as renderMedia. For a preview PNG, reuse the composition returned by selectComposition and pass frame = Math.round(t*fps).
+
+_Source: https://www.remotion.dev/docs/renderer/render-still_
+
+```
+await renderStill({
+  composition,
+  serveUrl,
+  output: '/tmp/still.png',
+  inputProps: { custom: 'data' },
+});
+```
+
+### (6) render speed
+The official docs give no fps or seconds figure for rendering 1080x1920 or 30 s on a CPU. They only give qualitative guidance. Measure with `npx remotion benchmark`, with --log=verbose, or with renderMedia's slowestFrames, and expect the first frames on each thread to be slow. On a machine without a GPU, CSS such as text-shadow, box-shadow, filter: blur()/drop-shadow() and gradients, plus canvas and WebGL, run on the GPU and become bottlenecks. The docs suggest replacing them with precomputed images. This matters for caption styling.
+
+_Source: https://www.remotion.dev/docs/performance_
+
+### browser reuse
+selectComposition, renderStill and renderMedia all accept puppeteerInstance from openBrowser(). Reusing one browser across these calls can speed up rendering, but you must open and close it yourself. Without it, each call opens and closes its own browser.
+
+_Source: https://www.remotion.dev/docs/renderer/select-composition#puppeteerinstance; https://www.remotion.dev/docs/ssr-node_
+
+### Unknowns
+- No documented render-speed number (fps or wall time) for a 30 s 1080x1920 30fps render on CPU or an i7-13700. It has to be measured locally (npx remotion benchmark / slowestFrames).
+- The download size of Chrome Headless Shell 157.0.8080.0 for win64, and whether a first render downloads anything other than the browser. My unverified understanding is that FFmpeg/compositor binaries ship as npm deps (the binariesDirectory option suggests this), but I did not confirm it in the docs.
+- Whether loadFont() correctly registers a variable-font weight range ('100 900'). The source passes weight to FontFace; that it works is inferred from the FontFace standard, not from Remotion docs.
+- Whether files added to the bundle output dir (or public/) after bundle() are served without re-bundling. The docs only say public/ is copied at bundle time. For per-job MP4s, the documented options are copying into public/ (or publicDir) before bundle(), or serving over local HTTP and passing the URL.
+- Whether the source AAC track of rough_reel_1.mp4 is re-encoded or passed through. Remotion mixes audio itself and encodes the final track with audioCodec; that it re-encodes rather than copies is not explicitly stated.
+- Remotion licence terms for this user or company (renderMedia has a licenseKey option from v4.0.409). Not checked.
+- The docs were read from the GitHub main branch, which may contain small changes after 4.0.534. Version-tagged items cited (durationInFrames 4.0.530, shared-memory capture 4.0.534, Chrome 157 from 4.0.534) are all at or below 4.0.534.
+- Exact Windows behaviour of the default gl=null renderer without a discrete GPU (Intel iGPU via ANGLE vs SwiftShader). Not documented for Windows.
+
+## hyperframes-cli
+
+### versions
+Plain `npx hyperframes` runs the globally installed 0.8.41. `npx hyperframes@latest` is 0.8.145, and doctor (0.8.41) flags `Version | 0.8.41 → 0.8.145 available`. Pipeline code should pin `hyperframes@0.8.145` explicitly instead of relying on bare `npx hyperframes`. Flag differences between 0.8.41 and 0.8.145 were not diffed.
+
+_Source: ran in C:/Users/firda/монтаж/workspace/_proto: `npx hyperframes --version` → 0.8.41; `npx -y hyperframes@latest --version` → 0.8.145; `npm ls -g` → hyperframes@0.8.41 at C:/Users/firda/AppData/Roaming/npm/node_modules/hyperframes_
+
+### doctor
+`npx -y hyperframes@latest doctor --json` exited 0 with `ok: false`. Failing checks: Memory ('7.7 GB total · 0.4 GB available', hint 'Low memory — renders may fail'), plus whisper-cpp, TTS (Kokoro) and BGM (MusicGen), all optional, and 'Docker running' (needed only for --docker). Passing checks: Node v24.16.0, CPU '24 cores · i7-13700', Disk 233.5 GB free, FFmpeg/FFprobe 9.0.1-full_build (gyan.dev, WinGet), and Chrome = puppeteer-cached chrome-headless-shell win64-152.0.7977.42. Nothing required for a local MP4 render is missing. The docs say doctor --json always exits 0, so gate on `.ok` or on individual checks.
+
+_Source: doctor --json output (0.8.145); references/doctor-browser.md_
+
+```
+npx -y hyperframes@0.8.145 doctor --json | jq -e '.ok'
+```
+
+### scaffold
+Non-interactive blank scaffold: `init` takes the project NAME as a positional argument and creates that directory relative to the cwd. There is no --dir flag in the help, and absolute or nested NAME paths were not tested. `--non-interactive` forces flag-only mode (it is also automatic outside a TTY). `--resolution portrait` gives 1080x1920. HYPERFRAMES_SKIP_SKILLS=1 skips the GitHub skills check, because the `--skip-skills` flag is 'temporarily ignored'. A real run created: AGENTS.md, CLAUDE.md, hyperframes.json, index.html, meta.json, package.json. No node_modules and no npm install.
+
+_Source: `init --help` (0.8.145); actual run in C:/Users/firda/монтаж/workspace/_proto/hf-scaffold-test; references/init-and-scaffold.md_
+
+```
+cd <parent> && HYPERFRAMES_SKIP_SKILLS=1 HYPERFRAMES_NO_TELEMETRY=1 npx -y hyperframes@0.8.145 init <name> --non-interactive --resolution portrait
+```
+
+### scaffold package.json
+The scaffolded package.json has no dependencies/devDependencies. It pins the CLI version only inside its scripts: dev = `npx --yes hyperframes@0.8.145 preview`, check = `… check`, render = `… render`, publish = `… publish`. It is `type: module` and `private: true`. hyperframes.json holds the registry URL, paths (compositions, assets) and `media.autoProxy: true`.
+
+_Source: C:/Users/firda/монтаж/workspace/_proto/hf-scaffold-test/package.json, hyperframes.json_
+
+### scaffold index.html
+The blank index.html loads GSAP 3.14.2 from cdn.jsdelivr.net, so rendering needs the network unless it is localized. Its structure: `<html data-resolution="portrait">`, root `<div id="root" data-composition-id="main" data-start="0" data-duration="10" data-width="1080" data-height="1920">`, timed children with `class="clip" data-start data-duration data-track-index`, and a paused timeline registered as `window.__timelines["main"] = tl`. The default CSS uses `font-family: Inter`. The render compiler then auto-fetched 11 Inter faces from Google Fonts into ~/.cache/hyperframes/fonts/inter and injected deterministic @font-face rules.
+
+_Source: hf-scaffold-test/index.html; check/render stderr: '[Compiler] Fetched 11 font face(s) for "Inter" from Google Fonts'_
+
+### render command
+Render usage is `hyperframes render [OPTIONS] [DIR]`. -o/--output sets the output path (help default: renders/<name>.mp4; the skill doc says it is timestamped). -c/--composition renders an alternate HTML file. --format accepts mp4|webm|mov|gif|png-sequence|hls (default mp4). -f/--fps accepts integers 1-240 or rationals like 30000/1001 and defaults to the root data-fps, else 30. --crf 0-51 and --video-bitrate (e.g. 10M) are mutually exclusive overrides. --strict / --strict-all fail the render on lint errors (and warnings). --variables / --variables-file / --batch run parameterized renders.
+
+_Source: `npx -y hyperframes@latest render --help` (0.8.145)_
+
+```
+npx -y hyperframes@0.8.145 render <projectDir> -o <out.mp4> -q delivery --strict
+```
+
+### render quality levels
+CLI aliases (QUALITY_ALIASES in src/commands/render/plan.ts): draft→draft; standard→standard; high→high; looks→standard + crf 16 (this is the default); delivery→high. Engine presets (ENCODER_PRESETS in engine/src/services/chunkEncoder.ts): draft = libx264 preset ultrafast CRF 28; standard = medium CRF 18; high = slow CRF 15. So looks = medium/CRF16 and delivery = slow/CRF15. For WebM, preset ultrafast maps to deadline realtime and anything else to good.
+
+_Source: npx cache …/_npx/110f701c48e68d66/node_modules/hyperframes/dist/render-Z253WHBK.js:254-260 and dist/chunk-UXO2L7HJ.js:8651-8653_
+
+### render size
+Local render has no arbitrary --width/--height flag. Output size comes from the composition's data-width/data-height. `--resolution` (landscape|portrait|…|portrait-4k) only supersamples via Chrome deviceScaleFactor: the aspect ratio must match, the scale must be an integer multiple, and it does not work with --hdr. --width/--height exist only on the lambda/cloudrun render commands.
+
+_Source: render --help (0.8.145); SKILL.md render-choices table_
+
+### render machine output
+render `--json` applies only with --batch ('emit exactly one final JSON result document'). A single render prints parseable lines instead: `@hf-progress {"code":"encode","done":262,"total":300,"pct":89}` progress records, and `[INFO] [Render:trace] {json}` records carrying phase, elapsedMs, workerCount, captureMode and forceScreenshot. It ends with a human summary of the output path, then size, duration and wall time, then the stage line.
+
+_Source: render --help; observed output of draft render in hf-scaffold-test_
+
+### concurrency/GPU flags
+Concurrency and GPU flags: -w/--workers N|auto (default auto; each worker is a Chrome process of about 256 MB); --batch-concurrency (default 1); --max-concurrent-renders 1-10 (producer server only); --gpu (GPU FFmpeg encode; the skill doc lists NVENC/VideoToolbox/VAAPI/QSV); --browser-gpu / --no-browser-gpu (Chrome capture GPU: auto-probe, else SwiftShader); --low-memory-mode / --no-low-memory-mode; --experimental-fast-capture (on by default only on macOS with a hardware GPU); --docker (deterministic). Timeouts: --browser-timeout s, --protocol-timeout ms, --player-ready-timeout ms. --frames-cache-dir relocates the extracted-frame cache.
+
+_Source: render --help (0.8.145); references/preview-render.md flag table_
+
+### low-memory mode on this machine
+Low-memory mode turns on automatically when total RAM ≤ LOW_MEMORY_TOTAL_MB_THRESHOLD = 8192 MB. This machine reports os.totalmem() = 7860 MB, so it is ON by default. Per the help, safe mode 'pins to 1 worker, uses screenshot capture, and skips auto-worker calibration'. The observed draft render trace showed workerCount 1 and forceScreenshot true, which matches. Override with --no-low-memory-mode or PRODUCER_LOW_MEMORY_MODE=false (the risk with only 0.4-0.6 GB free was not tested).
+
+_Source: dist/chunk-USDEMXXL.js:100 `var LOW_MEMORY_TOTAL_MB_THRESHOLD = 8192`; chunk-UXO2L7HJ.js resolveLowMemoryMode; render --help --low-memory-mode text; node os.totalmem_
+
+### beginframe vs screenshot
+BeginFrame capture is Linux-only, so on Windows capture is always the slower 'screenshot' path (Page.captureScreenshot). The skill doc's summary-line guidance ('screenshot + software gpu on Linux is the slow path') therefore always applies to Windows here in its screenshot form. The GPU probe on this PC chose hardware: ANGLE Intel UHD Graphics 770 D3D11.
+
+_Source: dist/chunk-UXO2L7HJ.js:1253; SKILL.md step 9; check/render stderr 'browserGpuMode probe → hardware'_
+
+```
+const requestedCaptureMode = headlessShell && process.platform === "linux" && !launchConfig.forceScreenshot && beginFrameControlEnabled ? "beginframe" : "screenshot";
+```
+
+### measured CPU render speed
+Measured: a draft render of the trivial 10 s 1080x1920 30 fps scaffold (one text clip, no video) took 25.2 s (29 s wall including npx). The stage line was 'screenshot capture · hardware gpu · compile 3.6s · extract 0.0s · audio 0.0s · probe 0.0s · setup 1.2s · capture 20.3s · encode (during capture) 20.3s · assemble 0.1s'. That is 300 frames in 20.3 s, about 14.8 frames/s, with 1 worker. Output verified as h264 1080x1920 30/1 and 10.000 s. The Cyrillic project path (C:/Users/firda/монтаж/…) worked.
+
+_Source: actual run: `npx -y hyperframes@0.8.145 render --quality draft --output renders/test.mp4` in C:/Users/firda/монтаж/workspace/_proto/hf-scaffold-test; ffprobe of renders/test.mp4_
+
+### audio mixing
+Audio from `<audio>` elements and from `<video data-has-audio="true">` (not muted) is mixed by the engine with ffmpeg `amix=inputs=N:duration=longest:dropout_transition=0`. For MP4 it is encoded as `-c:a aac -b:a 192k` with `-movflags +faststart`; AAC sidecars may be stream-copied. WebM uses libopus 128k. Every timed `<video>` must be either `data-has-audio="true"` or `muted` (lint `video_missing_muted`). Per-clip `data-volume` (0-3.98) and `data-fade-in`/`data-fade-out` are available. For trims on `<video>`/`<audio>`, use `data-media-start`: the audio mixer reads only that, so `data-playback-start` alone gives trimmed picture over untrimmed audio.
+
+_Source: dist/chunk-UXO2L7HJ.js:9106-9117, 14541-14566; repo docs/reference/html-schema.mdx lines 134-144 (via gh api)_
+
+### mp4 codec
+MP4 output is H.264 yuv420p (libx264, software, preset per quality) plus AAC. H.265 is used only with HDR10. The engine's software fallback is `{ encoder: "libx264-software", pixelFormat: "yuv420p", preset: "medium" }`.
+
+_Source: repo packages/producer/README.md transparent-output table; dist/chunk-3KU3PFDW.js:15311-15313_
+
+### lint
+`npx hyperframes@0.8.145 lint [DIR] --json [--verbose]` returns `{ok, errorCount, warningCount, infoCount, findings[], filesScanned, _meta{version, latestVersion, updateAvailable}}`. Verified on the scaffold: ok:true, 0 findings, exit 0. Info-level findings appear only with --verbose.
+
+_Source: `lint --help` and actual `lint --json` run (0.8.145)_
+
+### check
+`npx hyperframes@0.8.145 check [DIR] --json` (it runs lint first and skips the browser if lint has errors) produced top-level keys ok, strict, browserSkipped, lint, runtime, layout, motion, contrast, hdr, snapshots, _meta. lint, runtime, layout, motion and contrast each carry `{ok, errorCount, warningCount, infoCount, findings[]}`. layout adds duration, samples, tolerance, totalIssueCount and truncated; contrast adds checked/passed. Per the docs, each finding carries a selector, data-* identity, source file, bbox and sample time. The exit code is non-zero on errors, and on warnings too with --strict. Useful flags: --samples (default 9), --at t1,t2, --at-transitions, --caption-zone "x0=..;y0=..;x1=..;y1=..;severity=..", --no-contrast, --snapshots, --timeout ms. WCAG AA contrast failures are gating errors, and a static 3 s+ timeline fails with `sweep_static`.
+
+_Source: `check --help` and actual `check --json` run on hf-scaffold-test (ok:true, exit 0); references/lint-validate-inspect.md_
+
+### license
+License: the `hyperframes` npm package (0.8.41 and 0.8.145) declares `"license": "Apache-2.0"`, but the tarball ships no LICENSE file (`files: [bin, dist]`; only README.md). The GitHub repo heygen-com/hyperframes is detected as Apache-2.0. Its LICENSE is the standard Apache License 2.0 with 'Copyright 2026 HeyGen, Inc.', and the README states it has no per-render fees or commercial-use thresholds. Commercial use is permitted under Apache-2.0 terms (keep the notice; no warranty).
+
+_Source: package.json in global and npx cache; `gh api repos/heygen-com/hyperframes/license` → Apache-2.0, path LICENSE; LICENSE tail; README lines 286, 299, 362-364_
+
+### subpackage license metadata
+`npm view` shows that @hyperframes/producer, @hyperframes/core and @hyperframes/engine (0.8.145) publish without a `license` field. They live in the same Apache-2.0 monorepo (packages/producer, packages/core, packages/engine), but the package-level license metadata is missing.
+
+_Source: `npm view @hyperframes/producer license` (and core, engine) → empty; repository.directory fields_
+
+### programmatic API
+The `hyperframes` CLI package has no main/module/exports/types. It is bin-only (bin/hyperframes.mjs, bin/hyperframes-localize-fonts.mjs), so using it directly means child_process. A separate package, @hyperframes/producer@0.8.145 (ESM, Node ≥22), exports createRenderJob, executeRenderJob, startServer, createCaptureSession, captureFrame, createFileServer, resolveConfig, runHyperframeLint and more. Its README example is `createRenderJob({inputPath, outputPath, width, height, fps, quality:'draft'|'standard'|'high', format})` then `await executeRenderJob(job, p => …)`. @hyperframes/core exports './lint'. The producer depends on full `puppeteer` (which downloads its own Chrome) plus core/engine/lint/parsers/studio-server. The producer API was not executed here.
+
+_Source: package.json of hyperframes 0.8.145 (npx cache); `npm view @hyperframes/producer exports dependencies`; repo packages/producer/src/index.ts and README.md via gh api_
+
+### network/telemetry side effects
+Network and telemetry side effects: `init` contacts GitHub for skills unless HYPERFRAMES_SKIP_SKILLS=1. Telemetry is anonymous and can be disabled with HYPERFRAMES_NO_TELEMETRY=1 or `hyperframes telemetry disable`. Render/check fetch the GSAP CDN script and Google Fonts for named families unless they are provided locally. The scratch scaffold and test render remain at C:/Users/firda/монтаж/workspace/_proto/hf-scaffold-test (renders/test.mp4).
+
+_Source: references/init-and-scaffold.md; references/upgrade-info-misc.md; observed compiler log_
+
+### Unknowns
+- Render speed for the real job: a 19.9 s 1080x1920 background <video> (rough_reel_1.mp4, which needs the frame-extract stage) plus many per-word DOM spans on the Windows screenshot path. Only a trivial composition was measured (~14.8 fps capture, 1 worker).
+- Whether `--gpu` actually selects Intel QSV (UHD 770) for H.264 encoding on Windows. Untested.
+- Whether a local @font-face pointing at assets/fonts/Inter-Variable.ttf stops the compiler from fetching Inter from Google Fonts. Untested; renaming the family (e.g. 'InterLocal') would likely avoid the match, but that is unverified.
+- Whether `init` accepts an absolute or nested NAME path. The help has no --dir flag; only a relative name under the cwd was tested.
+- Whether `--no-low-memory-mode` with multiple workers is stable with 7.7 GB total and about 0.4-0.6 GB free (doctor Memory check failing).
+- Exact RenderConfig fields of @hyperframes/producer for crf/bitrate overrides, and whether the 'looks' alias exists there (the README lists only draft/standard/high). The API was not executed.
+- Package-level license of @hyperframes/producer, core and engine on npm (no license field; assumed covered by the repo's Apache-2.0).
+- Flag differences between the globally installed 0.8.41 and 0.8.145. Only the 0.8.145 help was captured.
+
