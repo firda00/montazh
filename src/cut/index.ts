@@ -1,6 +1,6 @@
 import path from "node:path";
 import { ffmpeg, ffprobe } from "../lib/ffmpeg.ts";
-import { jobDir, writeJson } from "../lib/workspace.ts";
+import { exists, jobDir, readJson, writeJson } from "../lib/workspace.ts";
 import { TARGET_FPS } from "../ingest/index.ts";
 import type { Aspect, Clip, Edl, Media, Output, Transcript } from "../schemas/index.ts";
 import { checkClipBoundaries, snapClipsToWords } from "../plan/validate.ts";
@@ -56,6 +56,8 @@ export function cropScaleFilter(aspect: Aspect): string {
 export function sanitizeClips(clips: Clip[], media: Media) {
   const warnings: string[] = [];
   const kept: Clip[] = [];
+  const autoFace = clips.filter((c) => c.crop === "auto_face").length;
+  if (autoFace) warnings.push(`auto_face not implemented yet, using center crop (${autoFace} clip${autoFace > 1 ? "s" : ""})`);
   clips.forEach((c, i) => {
     if (c.src_start >= media.duration) {
       warnings.push(`clip ${i}: starts at ${c.src_start}s, after end of video (${media.duration.toFixed(2)}s) — skipped`);
@@ -66,7 +68,6 @@ export function sanitizeClips(clips: Clip[], media: Media) {
       warnings.push(`clip ${i}: src_end ${end}s clamped to ${media.duration.toFixed(2)}s`);
       end = media.duration;
     }
-    if (c.crop === "auto_face") warnings.push(`clip ${i}: auto_face not implemented yet, using center crop`);
     kept.push({ ...c, src_end: end });
   });
   return { clips: kept, warnings };
@@ -166,10 +167,17 @@ export async function cut(jobId: string, edl: Edl, media: Media, opts: CutOption
     }
   }
 
-  await writeJson(path.join(dir, "cut.json"), CutReportSchema, report);
-  const failed = report.outputs.filter((o) => o.status === "failed").length;
-  if (failed === report.outputs.length) {
-    throw new Error(`all outputs failed:\n${report.outputs.map((o) => `  ${o.id}: ${o.error}`).join("\n")}`);
+  // a --only run keeps the records of outputs it did not touch
+  const reportFile = path.join(dir, "cut.json");
+  if (opts.only && (await exists(reportFile))) {
+    const previous = await readJson(reportFile, CutReportSchema);
+    const touched = new Set(report.outputs.map((o) => o.id));
+    report.outputs = [...previous.outputs.filter((o) => !touched.has(o.id) && edl.outputs.some((e) => e.id === o.id)), ...report.outputs];
+  }
+  await writeJson(reportFile, CutReportSchema, report);
+  const failed = report.outputs.filter((o) => o.status === "failed" && targets.some((t) => t.id === o.id)).length;
+  if (targets.length > 0 && failed === targets.length) {
+    throw new Error(`all outputs failed:\n${report.outputs.filter((o) => o.status === "failed").map((o) => `  ${o.id}: ${o.error}`).join("\n")}`);
   }
   return { ...report, partial: failed > 0 };
 }

@@ -1,6 +1,6 @@
 {
   "name": "vedit",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "AI video editing agent (MVP)",

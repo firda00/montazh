@@ -1,0 +1,11 @@
+{
+  "name": "calm",
+  "description": "Спокойный монтаж в исходном порядке, длинные планы",
+  "pace": "calm",
+  "clip_seconds": { "min": 5, "max": 15 },
+  "caption_style": "clean",
+  "title_style": "minimal",
+  "default_aspect": "16:9",
+  "music_default": false,
+  "notes": ["сохранять исходный порядок", "не ускорять речь"]
+}

@@ -1,0 +1,198 @@
+import { z } from "zod";
+import { AspectSchema } from "./edl.ts";
+
+// ---- what the model returns: a draft that references boundaries by id, never seconds ----
+
+export const RefSchema = z
+  .string()
+  .describe('boundary ref: "p12" (phrase), "s3" (scene), "g7" (silence gap), "p12.start" | "p12.end", "p12.w4" (word 4 of phrase 12, 0-based) — never seconds');
+
+export const DraftClipSchema = z.object({
+  start: RefSchema,
+  end: RefSchema,
+  speed: z.number().optional().describe("playback speed; 1.0 on speech, 1.25–2.0 only on speech-free clips"),
+  crop: z.enum(["center", "auto_face"]).optional().describe("auto_face keeps the speaker in frame for 9:16"),
+  note: z.string().optional().describe("why this clip, one short sentence"),
+});
+
+export const DraftTitleSchema = z.object({
+  at: z.number().describe("seconds on the OUTPUT timeline"),
+  duration: z.number().optional(),
+  text: z.string().describe("≤ 40 chars, only facts that appear in the phrases"),
+  style: z.string().optional(),
+});
+
+export const DraftOutputSchema = z.object({
+  id: z.string().describe("filename-safe id such as reel_1"),
+  aspect: AspectSchema,
+  target_duration: z.number().optional().describe("seconds"),
+  hook: z.string().optional().describe("what grabs attention in the first 3 seconds"),
+  clips: z.array(DraftClipSchema),
+  captions: z.object({
+    enabled: z.boolean(),
+    language: z.string().optional().describe("ISO code the user asked for, e.g. uz, even if speech is ru"),
+    style: z.string().optional(),
+  }),
+  titles: z.array(DraftTitleSchema),
+  music: z.object({ enabled: z.boolean() }),
+});
+
+export const DraftBriefSchema = z.object({
+  outputs_requested: z.number().optional(),
+  target_duration_s: z.number().optional(),
+  aspect: AspectSchema.optional(),
+  captions_language: z.string().optional(),
+  style_words: z.array(z.string()).describe("style words taken from the instruction, e.g. динамично"),
+});
+
+export const PlanDraftSchema = z.object({
+  brief: DraftBriefSchema.describe("how you understood the instruction"),
+  outputs: z.array(DraftOutputSchema),
+  reasoning: z.string().describe("2–6 sentences for the user, in the language of the instruction"),
+});
+export type PlanDraft = z.infer<typeof PlanDraftSchema>;
+
+// ---- validation issues ----
+
+export const IssueCodeSchema = z.enum([
+  "invalid_json",
+  "schema",
+  "no_outputs",
+  "bad_id",
+  "duplicate_id",
+  "no_clips",
+  "unknown_ref",
+  "raw_time",
+  "empty_clip",
+  "out_of_media",
+  "bad_speed",
+  "speech_speed",
+  "gap_cut",
+  "mid_phrase",
+  "cuts_word",
+  "overlap",
+  "duration_off",
+  "count_mismatch",
+  "captions_no_language",
+  "title_outside",
+  "title_long",
+]);
+export type IssueCode = z.infer<typeof IssueCodeSchema>;
+
+export const PlanIssueSchema = z.object({
+  severity: z.enum(["error", "warning"]),
+  code: IssueCodeSchema,
+  output: z.string().optional(),
+  clip: z.number().int().optional(),
+  message: z.string(),
+  suggestion: z.string().optional(),
+});
+export type PlanIssue = z.infer<typeof PlanIssueSchema>;
+
+// ---- reports ----
+
+export const PlanUsageSchema = z.object({
+  input_tokens: z.number().default(0),
+  output_tokens: z.number().default(0),
+  cache_read_input_tokens: z.number().default(0),
+  cache_creation_input_tokens: z.number().default(0),
+  thinking_tokens: z.number().default(0),
+});
+export type PlanUsage = z.infer<typeof PlanUsageSchema>;
+
+export const ToolCallRecordSchema = z.object({
+  name: z.string(),
+  input: z.unknown(),
+  ok: z.boolean(),
+  ms: z.number(),
+  summary: z.string(),
+  image: z.boolean().optional(),
+});
+export type ToolCallRecord = z.infer<typeof ToolCallRecordSchema>;
+
+export const CallUsageSchema = z.object({
+  model: z.string(),
+  usage: PlanUsageSchema,
+  usd: z.number(),
+  priced: z.boolean(),
+  stop_reason: z.string().nullable(),
+  tools: z.array(z.string()),
+});
+export type CallUsage = z.infer<typeof CallUsageSchema>;
+
+export const PlanOutputSummarySchema = z.object({
+  id: z.string(),
+  status: z.enum(["ok", "dropped"]),
+  aspect: z.string(),
+  duration_s: z.number(),
+  target_s: z.number().nullable(),
+  clips: z.number().int(),
+  captions_language: z.string().nullable(),
+});
+
+export const PlanReportSchema = z.object({
+  kind: z.enum(["plan", "revise"]),
+  status: z.enum(["ok", "partial", "failed"]),
+  backend: z.string(),
+  backend_note: z.string(),
+  backend_account: z.record(z.string(), z.unknown()).optional(),
+  contract: z.enum(["format", "submit"]),
+  model: z.string(),
+  effort: z.string(),
+  mode: z.enum(["full", "compact"]),
+  pack_hash: z.string(),
+  pack_tokens_estimate: z.number(),
+  prompt_version: z.string(),
+  instruction: z.string(),
+  preset: z.string(),
+  calls: z.number().int(),
+  repairs: z.number().int(),
+  tool_calls: z.array(ToolCallRecordSchema),
+  tools_seen: z.array(z.string()).optional(),
+  per_call: z.array(CallUsageSchema),
+  usage: PlanUsageSchema,
+  usd: z.number(),
+  priced: z.boolean(),
+  estimate: z.boolean(),
+  outputs: z.array(PlanOutputSummarySchema),
+  fixed: z.array(PlanIssueSchema),
+  issues: z.array(PlanIssueSchema),
+  warnings: z.array(z.string()),
+  draft: z.unknown().optional(),
+  error: z.string().optional(),
+  error_code: z.string().optional(),
+  wall_seconds: z.number(),
+});
+export type PlanReport = z.infer<typeof PlanReportSchema>;
+
+export const EdlDiffSchema = z.object({
+  added: z.array(z.string()),
+  removed: z.array(z.string()),
+  changed: z.array(z.object({ id: z.string(), fields: z.array(z.string()) })),
+  unchanged: z.array(z.string()),
+  stages: z.record(z.string(), z.array(z.string())),
+});
+export type EdlDiff = z.infer<typeof EdlDiffSchema>;
+
+export const ReviseReportSchema = PlanReportSchema.extend({
+  edit: z.string(),
+  diff: EdlDiffSchema,
+  affected: z.array(z.string()),
+  previous_edl: z.string(),
+});
+export type ReviseReport = z.infer<typeof ReviseReportSchema>;
+
+// ---- style presets ----
+
+export const PresetSchema = z.object({
+  name: z.string(),
+  description: z.string().default(""),
+  pace: z.enum(["dynamic", "calm", "neutral"]),
+  clip_seconds: z.object({ min: z.number().positive(), max: z.number().positive() }),
+  caption_style: z.string(),
+  title_style: z.string().default("hero"),
+  default_aspect: AspectSchema.default("9:16"),
+  music_default: z.boolean().default(false),
+  notes: z.array(z.string()).default([]),
+});
+export type Preset = z.infer<typeof PresetSchema>;
