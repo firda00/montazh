@@ -1,0 +1,906 @@
+{
+  "job_id": "20261010-4fb4ed",
+  "rough_path": "C:\\Users\\firda\\монтаж\\workspace\\20261010-4fb4ed\\rough_reel_1.mp4",
+  "timeline": {
+    "output_id": "reel_1",
+    "aspect": "9:16",
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "duration": 19.885,
+    "clips": [
+      {
+        "index": 0,
+        "out_start": 0,
+        "out_end": 2.703,
+        "src_start": 49.852,
+        "src_end": 52.555,
+        "speed": 1
+      },
+      {
+        "index": 1,
+        "out_start": 2.703,
+        "out_end": 5.083,
+        "src_start": 53.645,
+        "src_end": 56.025,
+        "speed": 1
+      },
+      {
+        "index": 2,
+        "out_start": 5.083,
+        "out_end": 7.279,
+        "src_start": 17.277,
+        "src_end": 19.473,
+        "speed": 1
+      },
+      {
+        "index": 3,
+        "out_start": 7.279,
+        "out_end": 11.813,
+        "src_start": 20.466,
+        "src_end": 25,
+        "speed": 1
+      },
+      {
+        "index": 4,
+        "out_start": 11.813,
+        "out_end": 13.753,
+        "src_start": 33.84,
+        "src_end": 35.78,
+        "speed": 1
+      },
+      {
+        "index": 5,
+        "out_start": 13.753,
+        "out_end": 16.713,
+        "src_start": 43.622,
+        "src_end": 46.582,
+        "speed": 1
+      },
+      {
+        "index": 6,
+        "out_start": 16.713,
+        "out_end": 19.885,
+        "src_start": 57.14,
+        "src_end": 60.312,
+        "speed": 1
+      }
+    ],
+    "phrases": [
+      {
+        "phrase": 8,
+        "clip": 0,
+        "start": 0,
+        "end": 2.703,
+        "lang": "ru",
+        "text": "Многие спрашивают, в чем секрет.",
+        "words": [
+          {
+            "w": "Многие",
+            "start": 0,
+            "end": 0.49,
+            "clip": 0,
+            "phrase": 8
+          },
+          {
+            "w": "спрашивают,",
+            "start": 0.49,
+            "end": 1.337,
+            "clip": 0,
+            "phrase": 8
+          },
+          {
+            "w": "в",
+            "start": 1.8,
+            "end": 1.95,
+            "clip": 0,
+            "phrase": 8
+          },
+          {
+            "w": "чем",
+            "start": 1.95,
+            "end": 2.15,
+            "clip": 0,
+            "phrase": 8
+          },
+          {
+            "w": "секрет.",
+            "start": 2.15,
+            "end": 2.703,
+            "clip": 0,
+            "phrase": 8
+          }
+        ]
+      },
+      {
+        "phrase": 9,
+        "clip": 1,
+        "start": 2.703,
+        "end": 5.083,
+        "lang": "ru",
+        "text": "Секрет простой, не торопиться.",
+        "words": [
+          {
+            "w": "Секрет",
+            "start": 2.703,
+            "end": 3.203,
+            "clip": 1,
+            "phrase": 9
+          },
+          {
+            "w": "простой,",
+            "start": 3.203,
+            "end": 3.821,
+            "clip": 1,
+            "phrase": 9
+          },
+          {
+            "w": "не",
+            "start": 4.18,
+            "end": 4.323,
+            "clip": 1,
+            "phrase": 9
+          },
+          {
+            "w": "торопиться.",
+            "start": 4.323,
+            "end": 5.083,
+            "clip": 1,
+            "phrase": 9
+          }
+        ]
+      },
+      {
+        "phrase": 2,
+        "clip": 2,
+        "start": 5.083,
+        "end": 7.279,
+        "lang": "ru",
+        "text": "Главное блюдо у нас – плов.",
+        "words": [
+          {
+            "w": "Главное",
+            "start": 5.083,
+            "end": 5.646,
+            "clip": 2,
+            "phrase": 2
+          },
+          {
+            "w": "блюдо",
+            "start": 5.646,
+            "end": 6.066,
+            "clip": 2,
+            "phrase": 2
+          },
+          {
+            "w": "у",
+            "start": 6.066,
+            "end": 6.266,
+            "clip": 2,
+            "phrase": 2
+          },
+          {
+            "w": "нас –",
+            "start": 6.266,
+            "end": 6.506,
+            "clip": 2,
+            "phrase": 2
+          },
+          {
+            "w": "плов.",
+            "start": 6.988,
+            "end": 7.279,
+            "clip": 2,
+            "phrase": 2
+          }
+        ]
+      },
+      {
+        "phrase": 3,
+        "clip": 3,
+        "start": 7.279,
+        "end": 11.813,
+        "lang": "ru",
+        "text": "Рис мы берем только дивзира, его привозят из Ферганской долины.",
+        "words": [
+          {
+            "w": "Рис",
+            "start": 7.279,
+            "end": 7.553,
+            "clip": 3,
+            "phrase": 3
+          },
+          {
+            "w": "мы",
+            "start": 7.553,
+            "end": 7.713,
+            "clip": 3,
+            "phrase": 3
+          },
+          {
+            "w": "берем",
+            "start": 7.713,
+            "end": 8.093,
+            "clip": 3,
+            "phrase": 3
+          },
+          {
+            "w": "только",
+            "start": 8.093,
+            "end": 8.453,
+            "clip": 3,
+            "phrase": 3
+          },
+          {
+            "w": "дивзира,",
+            "start": 8.453,
+            "end": 9.013,
+            "clip": 3,
+            "phrase": 3
+          },
+          {
+            "w": "его",
+            "start": 9.44,
+            "end": 9.693,
+            "clip": 3,
+            "phrase": 3
+          },
+          {
+            "w": "привозят",
+            "start": 9.693,
+            "end": 10.353,
+            "clip": 3,
+            "phrase": 3
+          },
+          {
+            "w": "из",
+            "start": 10.353,
+            "end": 10.533,
+            "clip": 3,
+            "phrase": 3
+          },
+          {
+            "w": "Ферганской",
+            "start": 10.533,
+            "end": 11.293,
+            "clip": 3,
+            "phrase": 3
+          },
+          {
+            "w": "долины.",
+            "start": 11.293,
+            "end": 11.813,
+            "clip": 3,
+            "phrase": 3
+          }
+        ]
+      },
+      {
+        "phrase": 5,
+        "clip": 4,
+        "start": 11.813,
+        "end": 13.753,
+        "lang": "ru",
+        "text": "Казан стоит на открытом огне.",
+        "words": [
+          {
+            "w": "Казан",
+            "start": 11.813,
+            "end": 12.175,
+            "clip": 4,
+            "phrase": 5
+          },
+          {
+            "w": "стоит",
+            "start": 12.175,
+            "end": 12.515,
+            "clip": 4,
+            "phrase": 5
+          },
+          {
+            "w": "на",
+            "start": 12.515,
+            "end": 12.795,
+            "clip": 4,
+            "phrase": 5
+          },
+          {
+            "w": "открытом",
+            "start": 12.795,
+            "end": 13.375,
+            "clip": 4,
+            "phrase": 5
+          },
+          {
+            "w": "огне.",
+            "start": 13.375,
+            "end": 13.753,
+            "clip": 4,
+            "phrase": 5
+          }
+        ]
+      },
+      {
+        "phrase": 7,
+        "clip": 5,
+        "start": 13.753,
+        "end": 16.713,
+        "lang": "ru",
+        "text": "Зирвак должен кипеть не меньше 40 минут.",
+        "words": [
+          {
+            "w": "Зирвак",
+            "start": 13.753,
+            "end": 14.233,
+            "clip": 5,
+            "phrase": 7
+          },
+          {
+            "w": "должен",
+            "start": 14.233,
+            "end": 14.653,
+            "clip": 5,
+            "phrase": 7
+          },
+          {
+            "w": "кипеть",
+            "start": 14.653,
+            "end": 15.153,
+            "clip": 5,
+            "phrase": 7
+          },
+          {
+            "w": "не",
+            "start": 15.153,
+            "end": 15.393,
+            "clip": 5,
+            "phrase": 7
+          },
+          {
+            "w": "меньше",
+            "start": 15.393,
+            "end": 15.733,
+            "clip": 5,
+            "phrase": 7
+          },
+          {
+            "w": "40",
+            "start": 15.733,
+            "end": 16.113,
+            "clip": 5,
+            "phrase": 7
+          },
+          {
+            "w": "минут.",
+            "start": 16.113,
+            "end": 16.713,
+            "clip": 5,
+            "phrase": 7
+          }
+        ]
+      },
+      {
+        "phrase": 10,
+        "clip": 6,
+        "start": 16.713,
+        "end": 19.885,
+        "lang": "ru",
+        "text": "Плов не любит спешки, и люди это чувствуют.",
+        "words": [
+          {
+            "w": "Плов",
+            "start": 16.713,
+            "end": 16.958,
+            "clip": 6,
+            "phrase": 10
+          },
+          {
+            "w": "не",
+            "start": 16.958,
+            "end": 17.178,
+            "clip": 6,
+            "phrase": 10
+          },
+          {
+            "w": "любит",
+            "start": 17.178,
+            "end": 17.558,
+            "clip": 6,
+            "phrase": 10
+          },
+          {
+            "w": "спешки,",
+            "start": 17.558,
+            "end": 18.118,
+            "clip": 6,
+            "phrase": 10
+          },
+          {
+            "w": "и",
+            "start": 18.525,
+            "end": 18.598,
+            "clip": 6,
+            "phrase": 10
+          },
+          {
+            "w": "люди",
+            "start": 18.598,
+            "end": 18.858,
+            "clip": 6,
+            "phrase": 10
+          },
+          {
+            "w": "это",
+            "start": 18.858,
+            "end": 19.178,
+            "clip": 6,
+            "phrase": 10
+          },
+          {
+            "w": "чувствуют.",
+            "start": 19.178,
+            "end": 19.885,
+            "clip": 6,
+            "phrase": 10
+          }
+        ]
+      }
+    ],
+    "titles": [
+      {
+        "at": 0.3,
+        "duration": 2.5,
+        "text": "Секрет плова — не торопиться",
+        "style": "hero"
+      }
+    ],
+    "captions": {
+      "enabled": true,
+      "language": "ru",
+      "style": "bold_pop"
+    }
+  },
+  "pages": [
+    {
+      "start": 0,
+      "end": 1.95,
+      "words": [
+        {
+          "w": "Многие",
+          "start": 0,
+          "end": 0.49,
+          "clip": 0,
+          "phrase": 8
+        },
+        {
+          "w": "спрашивают,",
+          "start": 0.49,
+          "end": 1.337,
+          "clip": 0,
+          "phrase": 8
+        },
+        {
+          "w": "в",
+          "start": 1.8,
+          "end": 1.95,
+          "clip": 0,
+          "phrase": 8
+        }
+      ]
+    },
+    {
+      "start": 1.95,
+      "end": 2.703,
+      "words": [
+        {
+          "w": "чем",
+          "start": 1.95,
+          "end": 2.15,
+          "clip": 0,
+          "phrase": 8
+        },
+        {
+          "w": "секрет.",
+          "start": 2.15,
+          "end": 2.703,
+          "clip": 0,
+          "phrase": 8
+        }
+      ]
+    },
+    {
+      "start": 2.703,
+      "end": 4.323,
+      "words": [
+        {
+          "w": "Секрет",
+          "start": 2.703,
+          "end": 3.203,
+          "clip": 1,
+          "phrase": 9
+        },
+        {
+          "w": "простой,",
+          "start": 3.203,
+          "end": 3.821,
+          "clip": 1,
+          "phrase": 9
+        },
+        {
+          "w": "не",
+          "start": 4.18,
+          "end": 4.323,
+          "clip": 1,
+          "phrase": 9
+        }
+      ]
+    },
+    {
+      "start": 4.323,
+      "end": 5.083,
+      "words": [
+        {
+          "w": "торопиться.",
+          "start": 4.323,
+          "end": 5.083,
+          "clip": 1,
+          "phrase": 9
+        }
+      ]
+    },
+    {
+      "start": 5.083,
+      "end": 6.506,
+      "words": [
+        {
+          "w": "Главное",
+          "start": 5.083,
+          "end": 5.646,
+          "clip": 2,
+          "phrase": 2
+        },
+        {
+          "w": "блюдо",
+          "start": 5.646,
+          "end": 6.066,
+          "clip": 2,
+          "phrase": 2
+        },
+        {
+          "w": "у",
+          "start": 6.066,
+          "end": 6.266,
+          "clip": 2,
+          "phrase": 2
+        },
+        {
+          "w": "нас –",
+          "start": 6.266,
+          "end": 6.506,
+          "clip": 2,
+          "phrase": 2
+        }
+      ]
+    },
+    {
+      "start": 6.988,
+      "end": 7.279,
+      "words": [
+        {
+          "w": "плов.",
+          "start": 6.988,
+          "end": 7.279,
+          "clip": 2,
+          "phrase": 2
+        }
+      ]
+    },
+    {
+      "start": 7.279,
+      "end": 8.453,
+      "words": [
+        {
+          "w": "Рис",
+          "start": 7.279,
+          "end": 7.553,
+          "clip": 3,
+          "phrase": 3
+        },
+        {
+          "w": "мы",
+          "start": 7.553,
+          "end": 7.713,
+          "clip": 3,
+          "phrase": 3
+        },
+        {
+          "w": "берем",
+          "start": 7.713,
+          "end": 8.093,
+          "clip": 3,
+          "phrase": 3
+        },
+        {
+          "w": "только",
+          "start": 8.093,
+          "end": 8.453,
+          "clip": 3,
+          "phrase": 3
+        }
+      ]
+    },
+    {
+      "start": 8.453,
+      "end": 10.353,
+      "words": [
+        {
+          "w": "дивзира,",
+          "start": 8.453,
+          "end": 9.013,
+          "clip": 3,
+          "phrase": 3
+        },
+        {
+          "w": "его",
+          "start": 9.44,
+          "end": 9.693,
+          "clip": 3,
+          "phrase": 3
+        },
+        {
+          "w": "привозят",
+          "start": 9.693,
+          "end": 10.353,
+          "clip": 3,
+          "phrase": 3
+        }
+      ]
+    },
+    {
+      "start": 10.353,
+      "end": 11.813,
+      "words": [
+        {
+          "w": "из",
+          "start": 10.353,
+          "end": 10.533,
+          "clip": 3,
+          "phrase": 3
+        },
+        {
+          "w": "Ферганской",
+          "start": 10.533,
+          "end": 11.293,
+          "clip": 3,
+          "phrase": 3
+        },
+        {
+          "w": "долины.",
+          "start": 11.293,
+          "end": 11.813,
+          "clip": 3,
+          "phrase": 3
+        }
+      ]
+    },
+    {
+      "start": 11.813,
+      "end": 12.795,
+      "words": [
+        {
+          "w": "Казан",
+          "start": 11.813,
+          "end": 12.175,
+          "clip": 4,
+          "phrase": 5
+        },
+        {
+          "w": "стоит",
+          "start": 12.175,
+          "end": 12.515,
+          "clip": 4,
+          "phrase": 5
+        },
+        {
+          "w": "на",
+          "start": 12.515,
+          "end": 12.795,
+          "clip": 4,
+          "phrase": 5
+        }
+      ]
+    },
+    {
+      "start": 12.795,
+      "end": 13.753,
+      "words": [
+        {
+          "w": "открытом",
+          "start": 12.795,
+          "end": 13.375,
+          "clip": 4,
+          "phrase": 5
+        },
+        {
+          "w": "огне.",
+          "start": 13.375,
+          "end": 13.753,
+          "clip": 4,
+          "phrase": 5
+        }
+      ]
+    },
+    {
+      "start": 13.753,
+      "end": 15.153,
+      "words": [
+        {
+          "w": "Зирвак",
+          "start": 13.753,
+          "end": 14.233,
+          "clip": 5,
+          "phrase": 7
+        },
+        {
+          "w": "должен",
+          "start": 14.233,
+          "end": 14.653,
+          "clip": 5,
+          "phrase": 7
+        },
+        {
+          "w": "кипеть",
+          "start": 14.653,
+          "end": 15.153,
+          "clip": 5,
+          "phrase": 7
+        }
+      ]
+    },
+    {
+      "start": 15.153,
+      "end": 16.713,
+      "words": [
+        {
+          "w": "не",
+          "start": 15.153,
+          "end": 15.393,
+          "clip": 5,
+          "phrase": 7
+        },
+        {
+          "w": "меньше",
+          "start": 15.393,
+          "end": 15.733,
+          "clip": 5,
+          "phrase": 7
+        },
+        {
+          "w": "40",
+          "start": 15.733,
+          "end": 16.113,
+          "clip": 5,
+          "phrase": 7
+        },
+        {
+          "w": "минут.",
+          "start": 16.113,
+          "end": 16.713,
+          "clip": 5,
+          "phrase": 7
+        }
+      ]
+    },
+    {
+      "start": 16.713,
+      "end": 18.118,
+      "words": [
+        {
+          "w": "Плов",
+          "start": 16.713,
+          "end": 16.958,
+          "clip": 6,
+          "phrase": 10
+        },
+        {
+          "w": "не",
+          "start": 16.958,
+          "end": 17.178,
+          "clip": 6,
+          "phrase": 10
+        },
+        {
+          "w": "любит",
+          "start": 17.178,
+          "end": 17.558,
+          "clip": 6,
+          "phrase": 10
+        },
+        {
+          "w": "спешки,",
+          "start": 17.558,
+          "end": 18.118,
+          "clip": 6,
+          "phrase": 10
+        }
+      ]
+    },
+    {
+      "start": 18.525,
+      "end": 19.885,
+      "words": [
+        {
+          "w": "и",
+          "start": 18.525,
+          "end": 18.598,
+          "clip": 6,
+          "phrase": 10
+        },
+        {
+          "w": "люди",
+          "start": 18.598,
+          "end": 18.858,
+          "clip": 6,
+          "phrase": 10
+        },
+        {
+          "w": "это",
+          "start": 18.858,
+          "end": 19.178,
+          "clip": 6,
+          "phrase": 10
+        },
+        {
+          "w": "чувствуют.",
+          "start": 19.178,
+          "end": 19.885,
+          "clip": 6,
+          "phrase": 10
+        }
+      ]
+    }
+  ],
+  "design": {
+    "font": {
+      "family": "Inter",
+      "file": "assets/fonts/Inter-ExtraBold.ttf",
+      "weight": 800
+    },
+    "colors": {
+      "text": "#FFFFFF",
+      "highlight": "#FFD600",
+      "stroke": "#000000",
+      "title": "#FFFFFF",
+      "title_bg": "rgba(0,0,0,0.55)"
+    },
+    "captions": {
+      "anchor_y": 0.72,
+      "max_words": 4,
+      "max_chars": 22,
+      "font_size": 72,
+      "line_height": 1.15,
+      "uppercase": true,
+      "stroke_width": 8,
+      "word_animation": "pop",
+      "pop_scale": 1.12,
+      "page_animation": "fade_up"
+    },
+    "titles": {
+      "anchor_y": 0.18,
+      "font_size": 88,
+      "max_lines": 2,
+      "animation": "slide_up",
+      "padding": 24,
+      "radius": 20
+    },
+    "safe_area": {
+      "x": 0.06,
+      "y": 0.08
+    }
+  },
+  "preset": "bold_pop",
+  "assets": {
+    "video": "rough_reel_1.mp4",
+    "font": "Inter-Variable.ttf"
+  }
+}

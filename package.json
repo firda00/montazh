@@ -20,10 +20,12 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.296",
     "@anthropic-ai/sdk": "^0.133.0",
     "commander": "^15.0.0",
+    "opentype.js": "^2.0.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
+    "hyperframes": "^0.8.145",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }

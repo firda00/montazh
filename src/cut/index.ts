@@ -101,6 +101,9 @@ export function buildCutArgs(output: Output, clips: Clip[], media: Media, outPat
     "-filter_complex", chains.join(";"),
     "-map", "[v]", "-map", "[a]",
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+    // 1 s GOP and explicit colour tags: overlay renderers seek by keyframe and browsers assume bt709
+    "-g", String(TARGET_FPS), "-keyint_min", String(TARGET_FPS), "-sc_threshold", "0",
+    "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
     "-c:a", "aac", "-b:a", "192k",
     "-movflags", "+faststart",
     outPath,

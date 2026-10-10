@@ -3,6 +3,7 @@ workspace/*
 !workspace/.gitkeep
 .env
 tests/fixtures/*.mp4
-vendor/
+vendor/*
+!vendor/gsap/
 tests/fixtures/*.json
 .repro/

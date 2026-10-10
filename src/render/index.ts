@@ -80,7 +80,7 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
       const rendered = await opts.renderer.render(projectDir, overlay, { quality, onLine: (l) => opts.onEvent?.(`    ${l}`) });
 
       const tf = Date.now();
-      const fin = await finalizeOutput(rendered.file, outputPath(dir, output.id), { previewAt: job.timeline.titles[0]?.at ?? 1.0 });
+      const fin = await finalizeOutput(rendered.file, rough, outputPath(dir, output.id), { previewAt: (job.timeline.titles[0]?.at ?? 0.5) + 0.6 });
       report.outputs.push({
         id: output.id,
         status: "ok",

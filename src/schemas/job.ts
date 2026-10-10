@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const StepNameSchema = z.enum(["ingest", "understand", "plan", "cut", "design", "render", "revise"]);
+// "design" is logged inside "render" (one step produces the overlay project and the final file)
 export type StepName = z.infer<typeof StepNameSchema>;
 
 export const StepStateSchema = z.object({

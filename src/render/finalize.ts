@@ -9,9 +9,9 @@ export interface LoudnessMeasure {
   target_offset: number;
 }
 
-/** Pass 1 of EBU R128 normalisation: measure the integrated loudness of the file. */
+/** Pass 1 of EBU R128 normalisation: measure the integrated loudness of the file's audio. */
 export async function measureLoudness(file: string, target = -14): Promise<LoudnessMeasure> {
-  const { stderr } = await ffmpeg(["-i", file, "-af", `loudnorm=I=${target}:TP=-1.5:LRA=11:print_format=json`, "-f", "null", "-"], { loglevel: "info" });
+  const { stderr } = await ffmpeg(["-i", file, "-vn", "-af", `loudnorm=I=${target}:TP=-1.5:LRA=11:print_format=json`, "-f", "null", "-"], { loglevel: "info" });
   const start = stderr.lastIndexOf("{");
   const end = stderr.lastIndexOf("}");
   if (start < 0 || end < start) throw new Error("loudnorm did not report measurements (no audio stream?)");
@@ -33,14 +33,25 @@ export interface FinalizeResult {
 }
 
 /**
- * Final delivery: copies the rendered video stream, normalises the audio to the target
- * loudness (two-pass loudnorm, linear mode) and writes a preview JPEG.
+ * Final delivery: the overlay render's video stream (copied, no re-encode) + the rough cut's audio
+ * normalised to the target loudness (two-pass loudnorm, linear), trimmed to the rough cut's length
+ * so the overlay's whole-frame rounding never leaves a frozen tail. Also writes a preview JPEG.
  */
-export async function finalizeOutput(input: string, output: string, opts: { targetLufs?: number; previewAt?: number } = {}): Promise<FinalizeResult> {
+export async function finalizeOutput(overlay: string, rough: string, output: string, opts: { targetLufs?: number; previewAt?: number } = {}): Promise<FinalizeResult> {
   const target = opts.targetLufs ?? -14;
-  const before = await measureLoudness(input, target);
+  const roughProbe = await ffprobe(rough);
+  const roughDuration = Number(roughProbe.format.duration);
+  const before = await measureLoudness(rough, target);
   const filter = `loudnorm=I=${target}:TP=-1.5:LRA=11:measured_I=${before.input_i}:measured_TP=${before.input_tp}:measured_LRA=${before.input_lra}:measured_thresh=${before.input_thresh}:offset=${before.target_offset}:linear=true:print_format=summary`;
-  await ffmpeg(["-i", input, "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-af", filter, "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", output]);
+  await ffmpeg([
+    "-i", overlay, "-i", rough,
+    "-map", "0:v:0", "-map", "1:a:0",
+    "-c:v", "copy",
+    "-af", filter, "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+    "-t", roughDuration.toFixed(3),
+    "-movflags", "+faststart",
+    output,
+  ]);
   const after = await measureLoudness(output, target);
   const probe = await ffprobe(output);
   const v = probe.streams.find((s) => s.codec_type === "video");

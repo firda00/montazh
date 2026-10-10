@@ -7,6 +7,9 @@ import { understand, UnderstandReportSchema } from "./understand/index.ts";
 import { plan, loadPlanInputs, type PlanOptions, type PlanResult } from "./plan/index.ts";
 import { revise, type ReviseResult } from "./plan/revise.ts";
 import { PlanError, selectBackend, DEFAULT_MODEL, type BackendChoice, type Effort } from "./plan/backend/index.ts";
+import { renderOutputs, RenderReportSchema, type RenderReport } from "./render/index.ts";
+import { HyperFramesRenderer } from "./render/hyperframes.ts";
+import type { RenderQuality } from "./design/renderer.ts";
 import { createJob, exists, jobDir, loadJob, readJson, runStep, writeJson } from "./lib/workspace.ts";
 import { EdlSchema, MediaSchema, CostSchema, TranscriptSchema, HighlightsSchema, PlanReportSchema, ReviseReportSchema, type Edl, type Transcript, type PlanReport } from "./schemas/index.ts";
 
@@ -81,6 +84,47 @@ function printPlan(r: PlanResult | ReviseResult) {
   if (reasoning) console.log(`  «${reasoning.slice(0, 300)}${reasoning.length > 300 ? "…" : ""}»`);
 }
 
+function printRenderReport(r: RenderReport) {
+  for (const o of r.outputs) {
+    if (o.status === "ok") {
+      const caps = o.captions_language ? `, субтитры ${o.captions_language}${o.translated ? " (перевод)" : ""}` : "";
+      console.log(`  ✔ ${o.id}: ${o.duration?.toFixed(2)}s, ${o.pages} стр. субтитров${caps}, ${o.loudness_after?.toFixed(1)} LUFS → ${o.output}`);
+      console.log(`    сборка ${o.build_seconds?.toFixed(1)}s · рендер ${o.render_seconds?.toFixed(1)}s · финализация ${o.finalize_seconds?.toFixed(1)}s`);
+    } else console.log(`  ${o.status === "skipped" ? "–" : "✖"} ${o.id}: ${o.error}`);
+    for (const w of o.warnings) console.log(`    ⚠ ${w}`);
+  }
+  console.log(`  итого ${r.wall_seconds.toFixed(1)}s (${r.renderer}, ${r.quality})`);
+}
+
+interface RenderCliOpts {
+  quality: RenderQuality;
+  workers?: number;
+  translate: boolean;
+  renderer: string;
+}
+
+function withRenderOptions(cmd: Command) {
+  return cmd
+    .option("--quality <q>", "draft | looks | delivery", "looks")
+    .option("--workers <n>", "воркеры Chrome (по умолчанию — по свободной памяти)", (v) => Number(v))
+    .option("--no-translate", "не переводить субтитры на язык из плана")
+    .option("--renderer <name>", "hyperframes (другие — после этапа 4)", "hyperframes");
+}
+
+function makeRenderer(o: RenderCliOpts) {
+  if (o.renderer !== "hyperframes") throw new Error(`рендерер "${o.renderer}" не подключён; доступен: hyperframes`);
+  if (!["draft", "looks", "delivery"].includes(o.quality)) throw new Error("--quality: ожидается draft | looks | delivery");
+  return new HyperFramesRenderer({ workers: o.workers });
+}
+
+async function runRender(jobId: string, o: RenderCliOpts & { only?: string[] }, edl?: Edl) {
+  const renderer = makeRenderer(o);
+  await renderer.prepare();
+  const r = await runStep(jobId, "render", () => renderOutputs(jobId, { renderer, quality: o.quality, only: o.only, translate: o.translate, edl, onEvent: (l) => console.log(l) }));
+  printRenderReport(r);
+  return r;
+}
+
 async function stageEdl(jobId: string, edlPath: string): Promise<Edl> {
   const edl = await readJson(path.resolve(edlPath), EdlSchema);
   return writeJson(path.join(jobDir(jobId), "edl.json"), EdlSchema, edl);
@@ -142,19 +186,22 @@ function plannerOpts(o: PlannerCliOpts): Omit<PlanOptions, "instruction"> {
   };
 }
 
-withPlannerOptions(
-  program
-    .command("run")
-    .description("полный пайплайн: ingest → understand → plan → cut")
-    .argument("<video>", "путь к исходному видео")
-    .option("-p, --prompt <text>", "инструкция по монтажу (агент-планировщик)")
-    .option("--preset <name>", "пресет стиля", "bold_pop")
-    .option("-e, --edl <file>", "готовый edl.json вместо планировщика")
-    .option("--skip-understand", "не запускать транскрипцию и анализ сцен")
-    .option("--no-snap", "не подтягивать границы клипов к границам слов")
-    .option("--language <code>", "язык речи для whisper (по умолчанию auto)")
-    .option("--vision <provider>", "stub | auto", "auto"),
-).action(async (video: string, opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; language?: string; vision: "auto" | "stub" } & PlannerCliOpts) => {
+withRenderOptions(
+  withPlannerOptions(
+    program
+      .command("run")
+      .description("полный пайплайн: ingest → understand → plan → cut → render")
+      .argument("<video>", "путь к исходному видео")
+      .option("-p, --prompt <text>", "инструкция по монтажу (агент-планировщик)")
+      .option("--preset <name>", "пресет стиля", "bold_pop")
+      .option("-e, --edl <file>", "готовый edl.json вместо планировщика")
+      .option("--skip-understand", "не запускать транскрипцию и анализ сцен")
+      .option("--no-snap", "не подтягивать границы клипов к границам слов")
+      .option("--no-render", "остановиться после черновой нарезки")
+      .option("--language <code>", "язык речи для whisper (по умолчанию auto)")
+      .option("--vision <provider>", "stub | auto", "auto"),
+  ),
+).action(async (video: string, opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; render: boolean; language?: string; vision: "auto" | "stub" } & PlannerCliOpts & RenderCliOpts) => {
   try {
     if (opts.edl) await readJson(path.resolve(opts.edl), EdlSchema); // validate the plan before spending time on ingest
     if (opts.prompt && opts.skipUnderstand) throw new PlanError("--skip-understand вместе с --prompt: планировать не по чему (нет фраз и сцен)", "nothing_to_plan");
@@ -192,7 +239,26 @@ withPlannerOptions(
     console.log("▸ cut");
     const report = await runStep(job.id, "cut", () => cut(job.id, edl, media, { transcript, snap: opts.snap }));
     printCutReport(report);
+    if (opts.render) {
+      const okIds = report.outputs.filter((o) => o.status === "ok").map((o) => o.id);
+      await runRender(job.id, { ...opts, only: okIds }, edl);
+    }
     console.log(`\nготово за ${((Date.now() - t0) / 1000).toFixed(1)}s — workspace/${job.id}/`);
+  } catch (err) {
+    fail(err);
+  }
+});
+
+withRenderOptions(
+  program
+    .command("render")
+    .description("оформление + финальный рендер по edl.json и черновым нарезкам (output_<id>.mp4)")
+    .argument("<job_id>")
+    .option("-o, --only <ids...>", "рендерить только указанные выходы"),
+).action(async (jobId: string, opts: RenderCliOpts & { only?: string[] }) => {
+  try {
+    await loadJob(jobId);
+    await runRender(jobId, opts);
   } catch (err) {
     fail(err);
   }
@@ -351,6 +417,11 @@ program
       if (await exists(rFile)) {
         const r = await readJson(rFile, ReviseReportSchema);
         console.log(`правка: ${r.status} «${r.edit.slice(0, 60)}» — изменено ${r.diff.changed.map((c) => c.id).join(", ") || "—"}, перерезано ${r.affected.join(", ") || "—"}`);
+      }
+      const renFile = path.join(dir, "render.json");
+      if (await exists(renFile)) {
+        const r = await readJson(renFile, RenderReportSchema);
+        console.log(`рендер: ${r.outputs.map((o) => `${o.id} ${o.status}${o.render_seconds ? ` ${o.render_seconds.toFixed(0)}s` : ""}`).join(", ")} (${r.renderer}, ${r.quality}, ${r.wall_seconds.toFixed(0)}s)`);
       }
       const files = (await fs.readdir(dir)).filter((f) => f.endsWith(".mp4") || f.endsWith(".json"));
       console.log(`файлы: ${files.join(", ")}`);

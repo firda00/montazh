@@ -1,0 +1,177 @@
+import type { DesignJob } from "../export.ts";
+import type { Layout, LayoutPage } from "../layout-types.ts";
+
+/** Paths inside the generated project (relative to index.html). */
+export interface ComposeAssets {
+  videoRel: string;
+  fontRel: string;
+  gsapRel: string;
+}
+
+export const COMPOSE_VERSION = "hf-compose/1";
+
+const r3 = (x: number) => Math.round(x * 1000) / 1000;
+const fmt = (x: number) => String(r3(x));
+const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/** Vertical centring on an anchor without CSS transforms: pad the full-frame clip so its content box is centred at anchorY·H. */
+function anchorPad(anchorY: number, height: number) {
+  const cy = anchorY * height;
+  return cy >= height / 2 ? { top: r3(2 * cy - height), bottom: 0 } : { top: 0, bottom: r3(height - 2 * cy) };
+}
+
+/**
+ * DesignJob + Layout → standalone HyperFrames composition (one file, no sub-compositions).
+ * Video only: the rough cut's audio is muxed back at finalize, so no <audio> element here.
+ * Pure and deterministic: same inputs → byte-identical HTML.
+ */
+export function composeHyperframes(job: DesignJob, layout: Layout, assets: ComposeAssets): string {
+  const D = job.design;
+  const C = D.colors;
+  const W = layout.frame.width;
+  const H = layout.frame.height;
+  const FPS = layout.frame.fps;
+  const DUR = r3(layout.frame.duration);
+  const scale = Math.min(W, H) / 1080; // spec sizes are px on a 1080-wide portrait frame; landscape scales by its height
+  const capPad = anchorPad(layout.captions.anchorY, H);
+  const ttlPad = anchorPad(layout.titles.anchorY, H);
+  const strokeVisible = r3(layout.captions.strokeWidth); // already in output px (layout scales it); drawn at 2× with paint-order
+  const safeX = Math.round(D.safe_area.x * W);
+  const lang = layout.captions.language || "ru";
+
+  const capHtml: string[] = [];
+  const tw: string[] = [];
+
+  layout.pages.forEach((p: LayoutPage) => {
+    const id = `cap-${p.index}`;
+    const lines = p.lines
+      .map((line, li) => {
+        const spans = line.words.map((w, wi) => `<span class="w" id="${id}-l${li}-w${wi}">${esc(w.text).replace(/ /g, "&nbsp;")}</span>`).join("");
+        return `        <span class="cap-line" id="${id}-line${li}">${spans}</span>`;
+      })
+      .join("\n");
+    capHtml.push(
+      `      <section id="${id}" class="clip cap caption-group" data-start="${fmt(p.dispStart)}" data-duration="${fmt(p.dispEnd - p.dispStart)}" data-track-index="1" data-track-kind="captions" style="font-size:${r3(p.fontSize)}px;--gap:${r3(p.wordGap)}px">\n${lines}\n      </section>`,
+    );
+    const lineSel = p.lines.map((_, li) => `#${id}-line${li}`).join(", ");
+    if (D.captions.page_animation === "fade_up") {
+      tw.push(`tl.fromTo("${lineSel}", { opacity: 0, y: ${r3(36 * scale)} }, { opacity: 1, y: 0, duration: 0.22, ease: "power2.out" }, ${fmt(p.dispStart)});`);
+    }
+    if (p.exitFade) {
+      const outAt = Math.max(p.dispStart + 0.1, p.dispEnd - 0.14);
+      tw.push(`tl.fromTo("${lineSel}", { opacity: 1 }, { opacity: 0, duration: 0.12, ease: "power1.in", immediateRender: false }, ${fmt(outAt)});`);
+    }
+    if (D.captions.word_animation === "none") return;
+    const all = p.lines.flatMap((line, li) => line.words.map((w, wi) => ({ ...w, sel: `#${id}-l${li}-w${wi}` })));
+    all.forEach((w, k) => {
+      const next = all[k + 1];
+      const hlEnd = next ? next.start : p.dispEnd;
+      const span = Math.max(hlEnd - w.start, 1 / FPS);
+      const inDur = r3(Math.min(0.12, Math.max(0.04, span * 0.6)));
+      const sc = D.captions.word_animation === "pop" ? r3(w.popScale) : 1;
+      tw.push(`tl.fromTo("${w.sel}", { scale: 1, color: "${C.text}" }, { scale: ${sc}, color: "${C.highlight}", duration: ${inDur}, ease: "back.out(1.7)", immediateRender: false }, ${fmt(w.start)});`);
+      if (next) {
+        tw.push(`tl.fromTo("${w.sel}", { scale: ${sc}, color: "${C.highlight}" }, { scale: 1, color: "${C.text}", duration: 0.1, ease: "power1.out", immediateRender: false }, ${fmt(Math.max(hlEnd, w.start + inDur))});`);
+      }
+    });
+  });
+
+  const ttlHtml: string[] = [];
+  layout.titlesOut.forEach((t) => {
+    const id = `ttl-${t.index}`;
+    const card = t.style === "card";
+    const lines = t.lines.map((l, li) => `          <span class="ttl-line" id="${id}-line${li}">${esc(l)}</span>`).join("\n");
+    ttlHtml.push(
+      `      <section id="${id}" class="clip ttl" data-start="${fmt(t.at)}" data-duration="${fmt(t.duration)}" data-track-index="2">\n        <span class="ttl-box${card ? " card" : ""}" id="${id}-box" style="font-size:${r3(t.fontSize)}px">\n${lines}\n        </span>\n      </section>`,
+    );
+    const sel = `#${id}-box`;
+    if (D.titles.animation === "slide_up") tw.push(`tl.fromTo("${sel}", { opacity: 0, y: ${r3(90 * scale)} }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" }, ${fmt(t.at)});`);
+    else if (D.titles.animation === "fade") tw.push(`tl.fromTo("${sel}", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, ${fmt(t.at)});`);
+    const outAt = Math.max(t.at + 0.6, t.at + t.duration - 0.3);
+    if (outAt < t.at + t.duration) tw.push(`tl.fromTo("${sel}", { opacity: 1 }, { opacity: 0, duration: 0.24, ease: "power1.in", immediateRender: false }, ${fmt(outAt)});`);
+  });
+
+  return `<!doctype html>
+<html lang="${esc(lang)}" data-resolution="${W >= H ? "landscape" : "portrait"}">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=${W}, height=${H}" />
+    <!-- generated by vedit ${COMPOSE_VERSION} · job ${esc(job.job_id)} · output ${esc(job.timeline.output_id)} · preset ${esc(job.preset)} · ${layout.version} -->
+    <script src="${assets.gsapRel}"></script>
+    <style>
+      @font-face {
+        font-family: "${esc(layout.font.family)}";
+        src: url("${assets.fontRel}") format("truetype");
+        font-weight: 100 900;
+        font-style: normal;
+        font-display: block;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { margin: 0; width: ${W}px; height: ${H}px; overflow: hidden; background: #000; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; font-family: "${esc(layout.font.family)}", sans-serif; }
+      #a-roll { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      /* root-level timed clips are full-frame; content is centred on the anchor via padding (no transforms) */
+      .cap, .ttl { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
+      .cap { padding: ${capPad.top}px ${safeX}px ${capPad.bottom}px; }
+      .ttl { padding: ${ttlPad.top}px ${safeX}px ${ttlPad.bottom}px; }
+      .cap-line {
+        display: block;
+        white-space: nowrap;
+        text-align: center;
+        font-weight: ${layout.font.weight};
+        line-height: ${D.captions.line_height};
+        letter-spacing: -0.01em;
+        color: ${C.text};
+      }
+      .w {
+        display: inline-block; /* transforms need a box; NO CSS transform here (GSAP owns scale) */
+        margin: 0 calc(var(--gap) / 2);
+        color: ${C.text};
+        -webkit-text-stroke: ${r3(strokeVisible * 2)}px ${C.stroke};
+        paint-order: stroke fill;
+        text-shadow: 0 ${r3(3 * scale)}px ${r3(14 * scale)}px rgba(0, 0, 0, 0.55);
+      }
+      .ttl-box {
+        display: block;
+        text-align: center;
+        font-weight: ${layout.font.weight};
+        line-height: 1.08;
+        letter-spacing: -0.015em;
+        color: ${C.title};
+        -webkit-text-stroke: ${r3(strokeVisible * 2)}px ${C.stroke};
+        paint-order: stroke fill;
+        text-shadow: 0 ${r3(3 * scale)}px ${r3(14 * scale)}px rgba(0, 0, 0, 0.55);
+      }
+      .ttl-box.card {
+        padding: ${r3(D.titles.padding * scale)}px ${r3((D.titles.padding + 12) * scale)}px;
+        border-radius: ${r3(D.titles.radius * scale)}px;
+        background: ${C.title_bg};
+        -webkit-text-stroke: 0;
+        text-shadow: none;
+      }
+      .ttl-line { display: block; white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-width="${W}"
+      data-height="${H}"
+      data-duration="${DUR}"
+      data-fps="${FPS}"
+    >
+      <video id="a-roll" src="${assets.videoRel}" data-start="0" data-duration="${DUR}" data-track-index="0" muted playsinline></video>
+${capHtml.join("\n")}
+${ttlHtml.join("\n")}
+    </div>
+    <script>
+      const tl = gsap.timeline({ paused: true });
+      ${tw.join("\n      ")}
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>
+`;
+}
