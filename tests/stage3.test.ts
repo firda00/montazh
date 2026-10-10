@@ -166,6 +166,25 @@ test("revise: an unchanged plan round-trips byte-identical through refs", () => 
   assert.deepEqual(diffEdl(edl, EdlSchema.parse(back.edl!)).unchanged, ["reel_1", "wide_1"]);
 });
 
+test("revise: titles/captions added by an edit get preset defaults, existing ones keep theirs", () => {
+  const edl = EdlSchema.parse({
+    outputs: [{ id: "reel_1", aspect: "9:16", clips: [{ src_start: 0, src_end: 2.3 }], captions: { enabled: false }, titles: [{ at: 0, text: "old" }] }],
+    reasoning: "r",
+  });
+  // the calm preset has different styles than the ones the old plan carries (EdlSchema fills title style "hero")
+  const calm = makeFixtureContext({ preset: BUILTIN_PRESETS.calm });
+  const draft = draftFromEdl(edl, calm);
+  draft.outputs[0].captions = { enabled: true, language: "uz" };
+  draft.outputs[0].titles.push({ at: 1, text: "new" });
+  const r = EdlSchema.parse(resolveDraft(draft, calm, { mode: "revise", currentEdl: edl }).edl!);
+  assert.equal(r.outputs[0].captions.style, "clean", "captions switched on by the edit take the preset style");
+  assert.equal(r.outputs[0].titles[0].style, "hero", "the old title keeps its style");
+  assert.equal(r.outputs[0].titles[1].style, "minimal", "the new title takes the preset style");
+  // and an untouched output stays identical even under a different preset
+  const same = EdlSchema.parse(resolveDraft(draftFromEdl(edl, calm), calm, { mode: "revise", currentEdl: edl }).edl!);
+  assert.deepEqual(diffEdl(edl, same).unchanged, ["reel_1"]);
+});
+
 test("revise: a target on one output never leaks into an untouched sibling; count is not checked", () => {
   const edl = EdlSchema.parse({
     outputs: [

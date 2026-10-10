@@ -5,3 +5,4 @@ workspace/*
 tests/fixtures/*.mp4
 vendor/
 tests/fixtures/*.json
+.repro/

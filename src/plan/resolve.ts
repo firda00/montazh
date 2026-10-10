@@ -192,7 +192,9 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
         at = Math.min(Math.max(0, at), Math.max(0, duration - 1));
       }
       if (t.text.length > 60) warn("title_long", `title "${t.text.slice(0, 30)}…" is ${t.text.length} chars (keep ≤ 40)`);
-      return { at: r2(at), duration: t.duration, text: t.text, style: t.style ?? (existing ? currentOut?.titles[idx]?.style : ctx.preset.title_style) };
+      // a title that already existed keeps its style (even none); a title added by the edit gets the preset's
+      const prevTitle = currentOut?.titles[idx];
+      return { at: r2(at), duration: t.duration, text: t.text, style: t.style ?? (prevTitle ? prevTitle.style : ctx.preset.title_style) };
     });
 
     const out: ResolvedOutput = { id: o.id, aspect: o.aspect, errors, warnings, clips, duration_s: r2(duration), target_s: target, captions_language: captionsLanguage };
@@ -202,7 +204,12 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
         aspect: o.aspect,
         target_duration: target ?? undefined,
         clips: clips.map((c) => ({ src_start: Number(c.start.toFixed(3)), src_end: Number(c.end.toFixed(3)), speed: c.speed, crop: c.crop })),
-        captions: { enabled: o.captions.enabled, language: captionsLanguage ?? undefined, style: o.captions.style ?? (existing ? currentOut?.captions.style : ctx.preset.caption_style) },
+        // new output → preset; existing with captions already on → its own style; switched on by the edit → preset; still off → untouched
+        captions: {
+          enabled: o.captions.enabled,
+          language: captionsLanguage ?? undefined,
+          style: o.captions.style ?? (!existing ? ctx.preset.caption_style : currentOut?.captions.enabled ? currentOut.captions.style : o.captions.enabled ? ctx.preset.caption_style : undefined),
+        },
         titles,
         music: { enabled: o.music.enabled },
         transitions: "cut",
