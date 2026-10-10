@@ -1,0 +1,33 @@
+{
+  "outputs": [
+    {
+      "id": "reel_1",
+      "aspect": "9:16",
+      "target_duration": 12,
+      "clips": [
+        { "src_start": 5.0, "src_end": 9.0 },
+        { "src_start": 20.0, "src_end": 24.0, "speed": 2.0 },
+        { "src_start": 40.0, "src_end": 46.0 }
+      ],
+      "captions": { "enabled": true, "language": "uz", "style": "bold_pop" },
+      "titles": [{ "at": 0, "text": "Лучший плов в городе", "style": "hero" }]
+    },
+    {
+      "id": "square_1",
+      "aspect": "1:1",
+      "clips": [
+        { "src_start": 10.0, "src_end": 13.0, "crop": "auto_face" },
+        { "src_start": 30.0, "src_end": 32.0, "speed": 0.5 }
+      ]
+    },
+    {
+      "id": "wide_1",
+      "aspect": "16:9",
+      "clips": [
+        { "src_start": 0.0, "src_end": 3.0 },
+        { "src_start": 57.0, "src_end": 75.0 }
+      ]
+    }
+  ],
+  "reasoning": "Ручной план для демо этапа 1: три формата, ускорение x2, замедление x0.5, клип за концом видео (должен обрезаться с предупреждением)."
+}

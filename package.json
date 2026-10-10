@@ -1,0 +1,28 @@
+{
+  "name": "vedit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI video editing agent (MVP)",
+  "bin": {
+    "vedit": "./bin/vedit.mjs"
+  },
+  "scripts": {
+    "vedit": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "fixtures": "tsx tests/make-fixtures.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
