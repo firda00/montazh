@@ -39,19 +39,20 @@ export async function revise(jobId: string, opts: ReviseOptions): Promise<Revise
     throw new PlanError(report.error ?? "правка не применена", (report.error_code as PlanError["code"] | undefined) ?? "invalid", { report });
   }
 
-  // a partial result must not lose an output the model failed to re-express: keep its previous version
-  const next = { ...run.loop.resolved.edl };
+  // a partial result must not lose an output the model failed to re-express: keep its previous
+  // version at its former place; the model's order is kept for everything else
+  const next = { ...run.loop.resolved.edl, outputs: [...run.loop.resolved.edl.outputs] };
   const kept: string[] = [];
-  for (const o of current.outputs) {
-    const attempted = run.loop.resolved.outputs.some((r) => r.id === o.id);
+  current.outputs.forEach((o, i) => {
+    const attempted = run.loop.resolved!.outputs.some((r) => r.id === o.id);
     const survived = next.outputs.some((r) => r.id === o.id);
-    if (attempted && !survived) {
-      next.outputs.push(o);
-      kept.push(o.id);
-    }
-  }
-  next.outputs.sort((a, b) => current.outputs.findIndex((o) => o.id === a.id) - current.outputs.findIndex((o) => o.id === b.id));
+    if (!attempted || survived) return;
+    const prevSibling = current.outputs.slice(0, i).reverse().map((p) => next.outputs.findIndex((n) => n.id === p.id)).find((idx) => idx >= 0);
+    next.outputs.splice(prevSibling === undefined ? 0 : prevSibling + 1, 0, o);
+    kept.push(o.id);
+  });
   const warnings = [...base.warnings, ...kept.map((id) => `${id}: правка не применена (ошибки валидации), оставлен прежний вариант`)];
+  base.outputs = base.outputs.map((o) => (kept.includes(o.id) ? { ...o, status: "kept" as const } : o));
 
   // keep the previous plan as edl.v<N>.json
   let n = 1;

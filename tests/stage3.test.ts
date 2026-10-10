@@ -175,11 +175,18 @@ test("revise: titles/captions added by an edit get preset defaults, existing one
   const calm = makeFixtureContext({ preset: BUILTIN_PRESETS.calm });
   const draft = draftFromEdl(edl, calm);
   draft.outputs[0].captions = { enabled: true, language: "uz" };
-  draft.outputs[0].titles.push({ at: 1, text: "new" });
+  draft.outputs[0].titles.unshift({ at: 1, text: "new" }); // inserted BEFORE the old one: matching is by text, not position
   const r = EdlSchema.parse(resolveDraft(draft, calm, { mode: "revise", currentEdl: edl }).edl!);
   assert.equal(r.outputs[0].captions.style, "clean", "captions switched on by the edit take the preset style");
-  assert.equal(r.outputs[0].titles[0].style, "hero", "the old title keeps its style");
-  assert.equal(r.outputs[0].titles[1].style, "minimal", "the new title takes the preset style");
+  assert.equal(r.outputs[0].titles[0].style, "minimal", "the new title takes the preset style");
+  assert.equal(r.outputs[0].titles[1].style, "hero", "the old title keeps its style");
+
+  // captions that were already on without a language keep having none (no brief/majority guess leaks in)
+  const edl2 = EdlSchema.parse({ outputs: [{ id: "wide_1", aspect: "16:9", clips: [{ src_start: 29.37, src_end: 32.07 }], captions: { enabled: true } }], reasoning: "r" });
+  const r2 = resolveDraft(draftFromEdl(edl2, ctx), ctx, { mode: "revise", currentEdl: edl2 });
+  assert.equal(r2.outputs[0].captions_language, null);
+  assert.ok(!r2.warnings.some((w) => w.code === "captions_no_language"));
+  assert.deepEqual(diffEdl(edl2, EdlSchema.parse(r2.edl!)).unchanged, ["wide_1"]);
   // and an untouched output stays identical even under a different preset
   const same = EdlSchema.parse(resolveDraft(draftFromEdl(edl, calm), calm, { mode: "revise", currentEdl: edl }).edl!);
   assert.deepEqual(diffEdl(edl, same).unchanged, ["reel_1"]);
@@ -359,6 +366,21 @@ test("loop: submit contract — accepted via tool, or nudged then failed", async
   assert.equal(r2.status, "failed");
   assert.equal(b2.received.length, 2);
   assert.match(b2.received[0], /submit_edl/);
+});
+
+test("loop: a stop after an earlier valid output keeps it as partial; a silent tool stop mid-repair is a nudge", async () => {
+  const { backend, opts } = loopOpts(new MockBackend({ turns: [{ text: BAD_DRAFT_UNKNOWN_REF }, { stopReason: "max_tokens" }] }));
+  const r = await runPlannerLoop(backend, ctx, task, opts);
+  assert.equal(r.status, "partial", "wide_1 from the first draft survives a truncated repair");
+  assert.equal(r.resolved?.edl?.outputs.length, 1);
+
+  const { backend: b2, opts: o2 } = loopOpts(new MockBackend({ turns: [{ text: BAD_DRAFT_UNKNOWN_REF }, { stopReason: "max_iterations" }, { text: GOOD_DRAFT }] }));
+  const r2 = await runPlannerLoop(b2, ctx, task, o2);
+  assert.equal(r2.status, "ok");
+  assert.equal(r2.repairs, 1, "the tool-budget stop did not burn a second repair");
+  assert.match(b2.received[0], /VALIDATION ISSUES/);
+  assert.match(b2.received[1], /tool budget/);
+  assert.ok(r2.fixed.some((f) => f.code === "unknown_ref"));
 });
 
 test("loop: uncharged backends are metered per turn; max_iterations gets a nudge, not a bogus repair", async () => {

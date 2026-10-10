@@ -140,8 +140,11 @@ export class AnthropicApiBackend implements PlannerBackend {
         last = message;
         // only a message that asks for more tool work is worth stopping over; a finished answer is kept
         if (message.stop_reason === "tool_use" && req.budget.exceeded()) {
+          // in the submit contract the finished plan arrives as a submit_edl call: run it locally
+          // (free, no further request) so the submission is recorded before stopping
+          if (message.content.some((b) => b.type === "tool_use" && b.name === "submit_edl")) await runner.generateToolResponse();
           stopped = "budget";
-          break; // this message's tools never run; nothing more is appended to runner.params.messages
+          break; // no further request is made; nothing more is appended to runner.params.messages
         }
       }
     } catch (err) {
@@ -189,7 +192,7 @@ export class AnthropicApiBackend implements PlannerBackend {
         // output_config.format together with client tools → the caller switches contract
         throw new PlanError(`API rejected output_config.format with client tools: ${err.message}`, "contract", { status: err.status, perCall });
       }
-      return { ...base, stopReason: "error", errorCode: "api", error: `${err.status} ${err.message}` };
+      return { ...base, stopReason: "error", errorCode: "api", error: err.message };
     }
     if (err instanceof Anthropic.APIUserAbortError) return { ...base, stopReason: "budget", error: "aborted (wall clock)" };
     if (err instanceof Anthropic.APIConnectionError) return { ...base, stopReason: "error", errorCode: "network", error: err.message };

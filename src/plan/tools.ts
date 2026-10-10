@@ -22,11 +22,12 @@ export interface ToolState {
   frameCache: Map<number, Promise<ToolResult>>;
   trace: ToolCallRecord[];
   submitted: { draft: PlanDraft; resolved: ResolvedDraft } | null;
+  lastRejected: { draft: PlanDraft; errors: ResolvedDraft["errors"] } | null;
   submitAttempts: number;
 }
 
 export function newToolState(): ToolState {
-  return { calls: 0, frames: 0, frameCache: new Map(), trace: [], submitted: null, submitAttempts: 0 };
+  return { calls: 0, frames: 0, frameCache: new Map(), trace: [], submitted: null, lastRejected: null, submitAttempts: 0 };
 }
 
 export interface ToolOptions {
@@ -193,6 +194,7 @@ export function makePlannerTools(ctx: PlanContext, state: ToolState, deps: ToolD
             state.submitted = { draft: plan, resolved: r };
             return { text: JSON.stringify({ accepted: true, warnings: r.warnings, resolved: summarize(r), next: "Reply with one sentence." }) };
           }
+          state.lastRejected = { draft: plan, errors: r.errors };
           const left = Math.max(0, opts.maxRepairs + 1 - state.submitAttempts);
           return { text: JSON.stringify({ accepted: false, attempt: state.submitAttempts, attempts_left: left, final: left === 0, errors: r.errors, warnings: r.warnings }) };
         },

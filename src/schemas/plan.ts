@@ -122,7 +122,8 @@ export type CallUsage = z.infer<typeof CallUsageSchema>;
 
 export const PlanOutputSummarySchema = z.object({
   id: z.string(),
-  status: z.enum(["ok", "dropped"]),
+  /** kept = a revise could not re-express this output, its previous version stays */
+  status: z.enum(["ok", "dropped", "kept"]),
   aspect: z.string(),
   duration_s: z.number(),
   target_s: z.number().nullable(),

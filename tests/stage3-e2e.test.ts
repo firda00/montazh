@@ -74,6 +74,17 @@ test("plan(): --no-tools passes an empty tool list; missing understand → nothi
   await assert.rejects(() => plan(bare.id, { instruction: "x", backendInstance: new MockBackend({ turns: [{ text: GOOD_DRAFT }] }) }), (e: Error & { code?: string }) => e.code === "nothing_to_plan");
 });
 
+test("revise(): an output added by the edit stays where the model put it", async () => {
+  const id = await seedJob();
+  await plan(id, { instruction: "x", backendInstance: new MockBackend({ turns: [{ text: GOOD_DRAFT }] }), extractFrame });
+  const added = { ...GOOD_DRAFT, outputs: [...GOOD_DRAFT.outputs, { ...GOOD_DRAFT.outputs[1], id: "sq_1", aspect: "1:1" as const, clips: [{ start: "p3", end: "p3" }] }] };
+  const r = await revise(id, { edit: "добавь квадратный ролик", backendInstance: new MockBackend({ turns: [{ text: added }] }), extractFrame });
+  assert.equal(r.report.status, "ok");
+  assert.deepEqual(r.edl.outputs.map((o) => o.id), ["reel_1", "wide_1", "sq_1"]);
+  assert.deepEqual(r.report.diff.added, ["sq_1"]);
+  assert.deepEqual(r.affected, ["sq_1"]);
+});
+
 test("revise(): a partial result keeps the previous version of an output the model broke", async () => {
   const id = await seedJob();
   await plan(id, { instruction: "x", backendInstance: new MockBackend({ turns: [{ text: GOOD_DRAFT }] }), extractFrame });

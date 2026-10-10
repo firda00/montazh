@@ -178,22 +178,23 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
     // 5. captions / titles (a carried-over output inherits its own previous defaults, a new one the preset's)
     const currentOut = existing ? opts.currentEdl?.outputs.find((x) => x.id === o.id) : undefined;
     let captionsLanguage = o.captions.language ?? null;
-    if (o.captions.enabled && !captionsLanguage) {
+    // a carried-over output with captions already on keeps whatever language it had (possibly none)
+    if (o.captions.enabled && !captionsLanguage && !(existing && currentOut?.captions.enabled)) {
       const guess = draft.brief.captions_language ?? majorityLang(ctx);
       if (guess && guess !== "unknown") {
         captionsLanguage = guess;
         warn("captions_no_language", `captions enabled without a language → ${captionsLanguage}`);
       } else warn("captions_no_language", "captions enabled without a language and the speech language is unknown; left unset");
     }
-    const titles = o.titles.map((t, idx) => {
+    const titles = o.titles.map((t) => {
       let at = t.at;
       if (at < 0 || at > duration) {
         warn("title_outside", `title "${t.text}" at ${t.at}s is outside the ${r2(duration)}s output → clamped`);
         at = Math.min(Math.max(0, at), Math.max(0, duration - 1));
       }
       if (t.text.length > 60) warn("title_long", `title "${t.text.slice(0, 30)}…" is ${t.text.length} chars (keep ≤ 40)`);
-      // a title that already existed keeps its style (even none); a title added by the edit gets the preset's
-      const prevTitle = currentOut?.titles[idx];
+      // a title that already existed (same text, nearest time) keeps its style; a title added by the edit gets the preset's
+      const prevTitle = currentOut?.titles.filter((p) => p.text === t.text).sort((a, b) => Math.abs(a.at - t.at) - Math.abs(b.at - t.at))[0];
       return { at: r2(at), duration: t.duration, text: t.text, style: t.style ?? (prevTitle ? prevTitle.style : ctx.preset.title_style) };
     });
 
@@ -208,7 +209,7 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
         captions: {
           enabled: o.captions.enabled,
           language: captionsLanguage ?? undefined,
-          style: o.captions.style ?? (!existing ? ctx.preset.caption_style : currentOut?.captions.enabled ? currentOut.captions.style : o.captions.enabled ? ctx.preset.caption_style : undefined),
+          style: o.captions.style ?? (!existing ? ctx.preset.caption_style : currentOut?.captions.enabled ? currentOut.captions.style : o.captions.enabled ? ctx.preset.caption_style : currentOut?.captions.style),
         },
         titles,
         music: { enabled: o.music.enabled },

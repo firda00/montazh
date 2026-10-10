@@ -116,7 +116,7 @@ export async function runPlannerLoop(backend: PlannerBackend, ctx: PlanContext, 
   const finish = (status: LoopResult["status"], extra: Partial<LoopResult> = {}): LoopResult => {
     const perCall = turns.flatMap((t) => t.perCall);
     const last = turns[turns.length - 1];
-    const remaining = new Set(lastIssues.map(issueKey));
+    const remaining = new Set(lastIssues.filter((i) => i.severity === "error").map(issueKey));
     const fixed = sentForRepair.filter((i, idx, arr) => !remaining.has(issueKey(i)) && arr.findIndex((o) => issueKey(o) === issueKey(i)) === idx);
     return {
       status,
@@ -144,29 +144,32 @@ export async function runPlannerLoop(backend: PlannerBackend, ctx: PlanContext, 
   await opts.onTurn?.(turn);
 
   for (;;) {
-    // classify the stop
+    // classify the stop; whatever was already valid survives as a partial result
+    const partialOrFailed = (error: string, errorCode: PlanError["code"]) => (resolved?.edl ? finish("partial", { error }) : finish("failed", { error, errorCode }));
     if (turn.stopReason === "refusal") return finish("failed", { error: `модель отказалась планировать${turn.refusalCategory ? ` (${turn.refusalCategory})` : ""}`, errorCode: "refusal" });
-    if (turn.stopReason === "max_tokens") return finish("failed", { error: "ответ модели обрезан по max_tokens даже после повтора", errorCode: "max_tokens" });
-    if (turn.stopReason === "error") return finish("failed", { error: turn.error ?? "backend error", errorCode: turn.errorCode ?? "api" });
+    if (turn.stopReason === "max_tokens") return partialOrFailed("ответ модели обрезан по max_tokens даже после повтора", "max_tokens");
+    if (turn.stopReason === "error") return partialOrFailed(turn.error ?? "backend error", turn.errorCode ?? "api");
     const outOfBudget = turn.stopReason === "budget" || turn.stopReason === "aborted";
+    // a tool-budget stop brings no answer at all: nothing to validate, the previous draft stays as it was
+    const silentToolStop = turn.stopReason === "max_iterations" && !turn.text && !(opts.contract === "submit" && opts.state.submitted);
 
     // extract the draft
     let issues: PlanIssue[] = [];
     if (opts.contract === "submit" && opts.state.submitted) {
       draft = opts.state.submitted.draft;
-    } else if (turn.text || turn.stopReason === "end_turn") {
+    } else if (!silentToolStop && (turn.text || turn.stopReason === "end_turn")) {
       const p = parseDraft(turn.text);
       draft = p.draft ?? draft;
       issues = p.issues;
     }
 
-    if (draft) {
+    if (draft && !silentToolStop) {
       resolved = resolveDraft(draft, ctx, { mode, currentEdl: task.currentEdl });
       issues = [...issues.filter((i) => i.code !== "invalid_json"), ...resolved.issues];
+      lastIssues = issues;
     }
-    lastIssues = issues;
-    const errors = issues.filter((i) => i.severity === "error");
-    if (draft && resolved && errors.length === 0) return finish("ok");
+    const errors = lastIssues.filter((i) => i.severity === "error");
+    if (draft && resolved && errors.length === 0 && !silentToolStop) return finish("ok");
 
     if (outOfBudget) {
       const reason = opts.budget.exceeded() ?? "budget";
@@ -174,13 +177,16 @@ export async function runPlannerLoop(backend: PlannerBackend, ctx: PlanContext, 
     }
 
     // repair or nudge (a nudge asks for the answer that never came: tool budget used up, or no submit_edl call)
-    const needNudge = !draft && (turn.stopReason === "max_iterations" || opts.contract === "submit");
+    const needNudge = silentToolStop || (!draft && opts.contract === "submit");
     const canContinue = opts.budget.exceeded() === null && opts.budget.remainingCalls() > 0;
     if (canContinue && (needNudge ? nudges < opts.maxRepairs : repairs < opts.maxRepairs)) {
       let text: string;
       if (needNudge) {
         nudges += 1;
         text = turn.stopReason === "max_iterations" ? TOOL_BUDGET_NUDGE_TEXT : NUDGE_TEXT;
+        // stateless backends start a fresh session: carry the last rejected submission so the model can fix it
+        const lastRejected = opts.contract === "submit" ? opts.state.lastRejected : null;
+        if (lastRejected) text += `\nYOUR LAST SUBMISSION:\n${JSON.stringify(lastRejected.draft)}\nITS ERRORS:\n${JSON.stringify(lastRejected.errors)}`;
       } else {
         repairs += 1;
         sentForRepair.push(...errors);

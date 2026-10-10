@@ -68,7 +68,9 @@ function printPlan(r: PlanResult | ReviseResult) {
   for (const o of rep.outputs) {
     const tgt = o.target_s ? `/${o.target_s}s` : "";
     const caps = o.captions_language ? `, субтитры ${o.captions_language}` : "";
-    console.log(`  ${o.status === "ok" ? "✔" : "✖"} ${o.id} ${o.aspect} ${o.duration_s}s${tgt}, ${o.clips} клип(ов)${caps}${o.status === "dropped" ? " — отброшен" : ""}`);
+    const mark = o.status === "ok" ? "✔" : o.status === "kept" ? "↺" : "✖";
+    const tail = o.status === "dropped" ? " — отброшен" : o.status === "kept" ? " — правка не применена, оставлен прежний вариант" : "";
+    console.log(`  ${mark} ${o.id} ${o.aspect} ${o.duration_s}s${tgt}, ${o.clips} клип(ов)${caps}${tail}`);
   }
   for (const i of rep.issues.filter((x) => x.severity === "warning")) console.log(`    ⚠ ${i.output ? `${i.output}: ` : ""}${i.message}`);
   for (const i of rep.issues.filter((x) => x.severity === "error")) console.log(`    ✖ ${i.output ? `${i.output}: ` : ""}${i.message}`);
@@ -156,6 +158,7 @@ withPlannerOptions(
   try {
     if (opts.edl) await readJson(path.resolve(opts.edl), EdlSchema); // validate the plan before spending time on ingest
     if (opts.prompt && opts.skipUnderstand) throw new PlanError("--skip-understand вместе с --prompt: планировать не по чему (нет фраз и сцен)", "nothing_to_plan");
+    const planner = opts.prompt ? plannerOpts(opts) : null; // option errors surface before ingest/understand run
     const job = await createJob(video, { prompt: opts.prompt, preset: opts.preset });
     console.log(`job ${job.id}`);
     const t0 = Date.now();
@@ -178,7 +181,7 @@ withPlannerOptions(
       console.log(`▸ plan: edl.json из ${opts.edl} (${edl.outputs.length} выход(ов))`);
     } else if (opts.prompt) {
       console.log("▸ plan");
-      const r = await runStep(job.id, "plan", () => plan(job.id, { instruction: opts.prompt!, preset: opts.preset, ...plannerOpts(opts) }));
+      const r = await runStep(job.id, "plan", () => plan(job.id, { instruction: opts.prompt!, preset: opts.preset, ...planner! }));
       printPlan(r);
       edl = r.edl!;
     } else {
@@ -251,7 +254,8 @@ withPlannerOptions(
       console.log(ctx.packText);
       return;
     }
-    const r = await runStep(jobId, "plan", () => plan(jobId, { instruction: opts.prompt, preset: opts.preset, ...plannerOpts(opts) }));
+    const planner = plannerOpts(opts);
+    const r = await runStep(jobId, "plan", () => plan(jobId, { instruction: opts.prompt, preset: opts.preset, ...planner }));
     printPlan(r);
     if (opts.cut) {
       const media = await readJson(path.join(jobDir(jobId), "media.json"), MediaSchema);
@@ -275,7 +279,8 @@ withPlannerOptions(
 ).action(async (jobId: string, opts: { prompt: string; cut: boolean; snap: boolean } & PlannerCliOpts) => {
   try {
     await loadJob(jobId);
-    const r = await runStep(jobId, "revise", () => revise(jobId, { edit: opts.prompt, ...plannerOpts(opts) }));
+    const planner = plannerOpts(opts);
+    const r = await runStep(jobId, "revise", () => revise(jobId, { edit: opts.prompt, ...planner }));
     printPlan(r);
     const d = r.report.diff;
     console.log(`  изменено: ${d.changed.map((c) => `${c.id} (${c.fields.join(", ")})`).join(", ") || "—"}; без изменений: ${d.unchanged.join(", ") || "—"}; добавлено: ${d.added.join(", ") || "—"}; удалено: ${d.removed.join(", ") || "—"}`);

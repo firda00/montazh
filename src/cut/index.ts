@@ -56,6 +56,7 @@ export function cropScaleFilter(aspect: Aspect): string {
 export function sanitizeClips(clips: Clip[], media: Media) {
   const warnings: string[] = [];
   const kept: Clip[] = [];
+  const indices: number[] = []; // EDL index of each kept clip
   const autoFace = clips.filter((c) => c.crop === "auto_face").length;
   if (autoFace) warnings.push(`auto_face not implemented yet, using center crop (${autoFace} clip${autoFace > 1 ? "s" : ""})`);
   clips.forEach((c, i) => {
@@ -69,8 +70,9 @@ export function sanitizeClips(clips: Clip[], media: Media) {
       end = media.duration;
     }
     kept.push({ ...c, src_end: end });
+    indices.push(i);
   });
-  return { clips: kept, warnings };
+  return { clips: kept, warnings, indices };
 }
 
 export function expectedDuration(clips: Clip[]) {
@@ -128,15 +130,17 @@ export async function cut(jobId: string, edl: Edl, media: Media, opts: CutOption
   const targets = opts.only ? edl.outputs.filter((o) => opts.only!.includes(o.id)) : edl.outputs;
 
   for (const output of targets) {
-    let { clips, warnings } = sanitizeClips(output.clips, media);
+    let { clips, warnings, indices } = sanitizeClips(output.clips, media);
     if (opts.transcript) {
+      // word checks number clips as in the EDL, even after sanitizeClips dropped one
+      const edlIndex = (i: number) => indices[i] ?? i;
       if (opts.snap) {
         const snapped = snapClipsToWords(clips, opts.transcript);
         clips = snapped.clips;
-        warnings.push(...snapped.notes);
+        warnings.push(...snapped.notes.map((n) => n.replace(/^clip (\d+)/, (_m, k) => `clip ${edlIndex(Number(k))}`)));
       } else {
         for (const i of checkClipBoundaries(clips, opts.transcript)) {
-          warnings.push(`clip ${i.clip} ${i.edge} ${i.t.toFixed(2)}s cuts the word "${i.word.w}" (${i.word.start}-${i.word.end}s)`);
+          warnings.push(`clip ${edlIndex(i.clip)} ${i.edge} ${i.t.toFixed(2)}s cuts the word "${i.word.w}" (${i.word.start}-${i.word.end}s)`);
         }
       }
     }
