@@ -175,15 +175,16 @@ export async function cut(jobId: string, edl: Edl, media: Media, opts: CutOption
     }
   }
 
-  // a --only run keeps the records of outputs it did not touch
+  // cut.json keeps the records of outputs a --only run did not touch; the returned report covers this run only
   const reportFile = path.join(dir, "cut.json");
+  let stored: CutReport = report;
   if (opts.only && (await exists(reportFile))) {
     const previous = await readJson(reportFile, CutReportSchema);
     const touched = new Set(report.outputs.map((o) => o.id));
-    report.outputs = [...previous.outputs.filter((o) => !touched.has(o.id) && edl.outputs.some((e) => e.id === o.id)), ...report.outputs];
+    stored = { outputs: [...previous.outputs.filter((o) => !touched.has(o.id) && edl.outputs.some((e) => e.id === o.id)), ...report.outputs] };
   }
-  await writeJson(reportFile, CutReportSchema, report);
-  const failed = report.outputs.filter((o) => o.status === "failed" && targets.some((t) => t.id === o.id)).length;
+  await writeJson(reportFile, CutReportSchema, stored);
+  const failed = report.outputs.filter((o) => o.status === "failed").length;
   if (targets.length > 0 && failed === targets.length) {
     throw new Error(`all outputs failed:\n${report.outputs.filter((o) => o.status === "failed").map((o) => `  ${o.id}: ${o.error}`).join("\n")}`);
   }
