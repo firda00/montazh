@@ -185,6 +185,47 @@ export type ReviseReport = z.infer<typeof ReviseReportSchema>;
 
 // ---- style presets ----
 
+/** Visual spec shared by every renderer (stage 4): fonts, colours, caption layout and motion. */
+export const DesignSpecSchema = z.object({
+  font: z.object({
+    family: z.string().default("Inter"),
+    file: z.string().default("assets/fonts/Inter-Variable.ttf"), // repo-relative; must cover Cyrillic + Latin
+    weight: z.number().default(800),
+  }).prefault({}),
+  colors: z.object({
+    text: z.string().default("#FFFFFF"),
+    highlight: z.string().default("#FFD600"), // the word being spoken
+    stroke: z.string().default("#000000"),
+    title: z.string().default("#FFFFFF"),
+    title_bg: z.string().default("rgba(0,0,0,0.55)"),
+  }).prefault({}),
+  captions: z.object({
+    /** vertical anchor as a fraction of the frame height (centre of the caption block) */
+    anchor_y: z.number().default(0.72),
+    max_words: z.number().int().default(4),
+    max_chars: z.number().int().default(22),
+    font_size: z.number().default(72), // px at 1080 wide; scaled by width/1080
+    line_height: z.number().default(1.15),
+    uppercase: z.boolean().default(true),
+    /** px, scaled like font_size */
+    stroke_width: z.number().default(8),
+    /** how the spoken word is emphasised */
+    word_animation: z.enum(["pop", "fill", "none"]).default("pop"),
+    pop_scale: z.number().default(1.12),
+    page_animation: z.enum(["fade_up", "none"]).default("fade_up"),
+  }).prefault({}),
+  titles: z.object({
+    anchor_y: z.number().default(0.18),
+    font_size: z.number().default(88),
+    max_lines: z.number().int().default(2),
+    animation: z.enum(["slide_up", "fade", "none"]).default("slide_up"),
+    padding: z.number().default(24),
+    radius: z.number().default(20),
+  }).prefault({}),
+  safe_area: z.object({ x: z.number().default(0.06), y: z.number().default(0.08) }).prefault({}),
+});
+export type DesignSpec = z.infer<typeof DesignSpecSchema>;
+
 export const PresetSchema = z.object({
   name: z.string(),
   description: z.string().default(""),
@@ -195,5 +236,6 @@ export const PresetSchema = z.object({
   default_aspect: AspectSchema.default("9:16"),
   music_default: z.boolean().default(false),
   notes: z.array(z.string()).default([]),
+  design: DesignSpecSchema.prefault({}),
 });
 export type Preset = z.infer<typeof PresetSchema>;
