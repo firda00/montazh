@@ -75,12 +75,10 @@ export function draftFromEdl(edl: Edl, ctx: PlanContext): PlanDraft {
     titles: o.titles.map((t) => ({ at: t.at, duration: t.duration, text: t.text, style: t.style })),
     music: { enabled: o.music.enabled },
   }));
-  const first = edl.outputs[0];
+  // No synthesized counts/targets: each carried output already has its own target_duration and
+  // aspect, and a brief target or count would leak into sibling outputs the edit never touched.
   return {
     brief: {
-      outputs_requested: edl.outputs.length,
-      target_duration_s: first?.target_duration,
-      aspect: first?.aspect,
       captions_language: edl.outputs.find((o) => o.captions.language)?.captions.language,
       style_words: [],
     },

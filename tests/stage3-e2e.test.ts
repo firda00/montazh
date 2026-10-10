@@ -74,6 +74,19 @@ test("plan(): --no-tools passes an empty tool list; missing understand → nothi
   await assert.rejects(() => plan(bare.id, { instruction: "x", backendInstance: new MockBackend({ turns: [{ text: GOOD_DRAFT }] }) }), (e: Error & { code?: string }) => e.code === "nothing_to_plan");
 });
 
+test("revise(): a partial result keeps the previous version of an output the model broke", async () => {
+  const id = await seedJob();
+  await plan(id, { instruction: "x", backendInstance: new MockBackend({ turns: [{ text: GOOD_DRAFT }] }), extractFrame });
+  const broken = { ...GOOD_DRAFT, outputs: [{ ...GOOD_DRAFT.outputs[0], clips: [{ start: "p99", end: "p2" }] }, { ...GOOD_DRAFT.outputs[1], captions: { enabled: false } }] };
+  const r = await revise(id, { edit: "сломай reel_1", backendInstance: new MockBackend({ turns: [{ text: broken }, { text: broken }, { text: broken }] }), extractFrame });
+  assert.equal(r.report.status, "partial");
+  assert.deepEqual(r.edl.outputs.map((o) => o.id), ["reel_1", "wide_1"], "reel_1 is not deleted");
+  assert.equal(r.edl.outputs[0].clips.length, 3, "reel_1 keeps its previous clips");
+  assert.deepEqual(r.report.diff.changed.map((c) => c.id), ["wide_1"]);
+  assert.deepEqual(r.affected, []);
+  assert.ok(r.report.warnings.some((w) => /reel_1: правка не применена/.test(w)));
+});
+
 test("revise(): diff, backup, affected outputs and cut.json merge", async () => {
   const id = await seedJob();
   await plan(id, { instruction: "x", backendInstance: new MockBackend({ turns: [{ text: GOOD_DRAFT }] }), extractFrame });

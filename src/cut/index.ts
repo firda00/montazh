@@ -121,6 +121,10 @@ export interface CutOptions {
 export async function cut(jobId: string, edl: Edl, media: Media, opts: CutOptions = {}): Promise<CutReport & { partial: boolean }> {
   const dir = jobDir(jobId);
   const report: CutReport = { outputs: [] };
+  if (opts.only) {
+    const unknown = opts.only.filter((id) => !edl.outputs.some((o) => o.id === id));
+    if (unknown.length) throw new Error(`unknown output id(s): ${unknown.join(", ")} (plan has ${edl.outputs.map((o) => o.id).join(", ")})`);
+  }
   const targets = opts.only ? edl.outputs.filter((o) => opts.only!.includes(o.id)) : edl.outputs;
 
   for (const output of targets) {

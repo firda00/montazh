@@ -166,6 +166,29 @@ test("revise: an unchanged plan round-trips byte-identical through refs", () => 
   assert.deepEqual(diffEdl(edl, EdlSchema.parse(back.edl!)).unchanged, ["reel_1", "wide_1"]);
 });
 
+test("revise: a target on one output never leaks into an untouched sibling; count is not checked", () => {
+  const edl = EdlSchema.parse({
+    outputs: [
+      { id: "reel_1", aspect: "9:16", target_duration: 15, clips: [{ src_start: 0, src_end: 2.3 }, { src_start: 8.29, src_end: 13.08 }, { src_start: 19.6, src_end: 27.16 }] },
+      { id: "reel_2", aspect: "9:16", clips: [{ src_start: 0, src_end: 2.3 }] },
+    ],
+    reasoning: "r",
+  });
+  const draft = draftFromEdl(edl, ctx);
+  assert.equal(draft.brief.target_duration_s, undefined);
+  assert.equal(draft.brief.outputs_requested, undefined);
+  const back = resolveDraft(draft, ctx, { mode: "revise", currentEdl: edl });
+  assert.deepEqual(back.errors, []);
+  assert.deepEqual(diffEdl(edl, EdlSchema.parse(back.edl!)).unchanged, ["reel_1", "reel_2"]);
+  // even if the model echoes a brief target/count, carried outputs ignore it and the count is not enforced on edits
+  const echoed = { ...draft, brief: { ...draft.brief, target_duration_s: 15, aspect: "9:16" as const, outputs_requested: 2 }, outputs: [...draft.outputs, { ...draft.outputs[1], id: "reel_3", clips: [{ start: "p4", end: "p4" }] }] };
+  const r = resolveDraft(echoed, ctx, { mode: "revise", currentEdl: edl });
+  assert.equal(r.outputs[1].target_s, null, "carried output ignores the echoed brief target");
+  assert.equal(r.outputs[2].target_s, 15, "a NEW output in an edit still takes the brief target");
+  assert.deepEqual(r.errors.map((e) => `${e.output}:${e.code}`), ["reel_3:duration_off"], "only the new 2.7 s output is far from its 15 s target");
+  assert.ok(!r.errors.some((e) => e.code === "count_mismatch"));
+});
+
 test("tools: sorted, validated, budgeted, traced", async () => {
   const state = newToolState();
   const calls: string[] = [];
@@ -317,6 +340,31 @@ test("loop: submit contract — accepted via tool, or nudged then failed", async
   assert.equal(r2.status, "failed");
   assert.equal(b2.received.length, 2);
   assert.match(b2.received[0], /submit_edl/);
+});
+
+test("loop: uncharged backends are metered per turn; max_iterations gets a nudge, not a bogus repair", async () => {
+  const { backend, opts } = loopOpts(new MockBackend({ turns: [{ text: GOOD_DRAFT, usd: 0.5 }] }));
+  await runPlannerLoop(backend, ctx, task, opts);
+  assert.equal(opts.budget.usd, 0.5);
+  assert.equal(opts.budget.calls, 1);
+
+  const { backend: b2, opts: o2 } = loopOpts(new MockBackend({ turns: [{ stopReason: "max_iterations" }, { text: GOOD_DRAFT }] }));
+  const r2 = await runPlannerLoop(b2, ctx, task, o2);
+  assert.equal(r2.status, "ok");
+  assert.equal(r2.repairs, 0, "a tool-budget stop is not a validation failure");
+  assert.match(b2.received[0], /tool budget/);
+  assert.ok(!/VALIDATION ISSUES/.test(b2.received[0]));
+});
+
+test("resolveDraft: messages keep the draft's clip numbering when an earlier clip is skipped", () => {
+  const draft: PlanDraft = {
+    brief: { style_words: [] },
+    outputs: [{ id: "a", aspect: "9:16", clips: [{ start: "p99", end: "p99" }, { start: "s1", end: "p2" }], captions: { enabled: false }, titles: [], music: { enabled: false } }],
+    reasoning: "",
+  };
+  const r = resolveDraft(draft, ctx, { mode: "plan" });
+  const w = r.warnings.find((x) => x.code === "cuts_word");
+  assert.ok(w && w.clip === 1 && /^clip 1 /.test(w.message), `got ${w?.message}`);
 });
 
 test("loop: nothing to plan is refused before any call", async () => {

@@ -39,15 +39,29 @@ export async function revise(jobId: string, opts: ReviseOptions): Promise<Revise
     throw new PlanError(report.error ?? "правка не применена", (report.error_code as PlanError["code"] | undefined) ?? "invalid", { report });
   }
 
+  // a partial result must not lose an output the model failed to re-express: keep its previous version
+  const next = { ...run.loop.resolved.edl };
+  const kept: string[] = [];
+  for (const o of current.outputs) {
+    const attempted = run.loop.resolved.outputs.some((r) => r.id === o.id);
+    const survived = next.outputs.some((r) => r.id === o.id);
+    if (attempted && !survived) {
+      next.outputs.push(o);
+      kept.push(o.id);
+    }
+  }
+  next.outputs.sort((a, b) => current.outputs.findIndex((o) => o.id === a.id) - current.outputs.findIndex((o) => o.id === b.id));
+  const warnings = [...base.warnings, ...kept.map((id) => `${id}: правка не применена (ошибки валидации), оставлен прежний вариант`)];
+
   // keep the previous plan as edl.v<N>.json
   let n = 1;
   while (await exists(path.join(dir, `edl.v${n}.json`))) n += 1;
   const backup = `edl.v${n}.json`;
   await fs.copyFile(edlFile, path.join(dir, backup));
-  const edl = await writeJson(edlFile, EdlSchema, run.loop.resolved.edl);
+  const edl = await writeJson(edlFile, EdlSchema, next);
   const diff = diffEdl(current, edl);
   const affected = needsCut(diff);
-  const report = ReviseReportSchema.parse({ ...base, edit: opts.edit, diff, affected, previous_edl: backup });
+  const report = ReviseReportSchema.parse({ ...base, warnings, edit: opts.edit, diff, affected, previous_edl: backup });
   await writeJson(path.join(dir, "revise.json"), ReviseReportSchema, report);
   return { report, edl, affected, partial: report.status === "partial" };
 }

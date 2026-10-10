@@ -188,6 +188,7 @@ export class AgentSdkBackend implements PlannerBackend {
     const turnUsd = resumed ? Math.max(0, usd - prev.cumulative.usd) : usd;
     const cumulative = resumed ? { usage, usd } : { usage: { ...prev.cumulative.usage, ...sumInto(prev.cumulative.usage, usage) }, usd: prev.cumulative.usd + usd };
     const perCall: CallUsage[] = [{ model, usage: turnUsage, usd: turnUsd, priced: false, stop_reason: stop, tools: [] }];
-    return { text, stopReason: stop, error, errorCode, calls: Math.max(1, numTurns), perCall, account, toolsSeen, handle: { sessionId, cumulative } satisfies Handle };
+    // charged: false → the loop meters this turn against the BudgetTracker (usd + request count)
+    return { text, stopReason: stop, error, errorCode, calls: Math.max(1, numTurns), perCall, charged: false, account, toolsSeen, handle: { sessionId, cumulative } satisfies Handle };
   }
 }

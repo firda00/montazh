@@ -44,6 +44,8 @@ export interface Turn {
   errorCode?: PlanErrorCode;
   calls: number;
   perCall: CallUsage[];
+  /** true when the backend already charged the BudgetTracker for this turn (per request, mid-turn) */
+  charged?: boolean;
   account?: Record<string, unknown>;
   toolsSeen?: string[];
   handle: unknown; // backend-private continuation state

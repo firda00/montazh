@@ -33,8 +33,8 @@ export class BudgetTracker {
     this.signal = AbortSignal.any(signals);
   }
 
-  addRequest(usd: number) {
-    this.calls += 1;
+  addRequest(usd: number, calls = 1) {
+    this.calls += calls;
     this.usd += usd;
   }
 

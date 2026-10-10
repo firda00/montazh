@@ -134,6 +134,10 @@ export async function runPlanning(args: RunLoopArgs): Promise<{ loop: LoopResult
     return { ...r, backend, contract, effort, warnings };
   } catch (err) {
     if (err instanceof PlanError && err.code === "contract" && contract === "format") {
+      // requests made before the rejection are still money: log them
+      for (const c of (err.details?.perCall as { model: string; usage: Record<string, number>; usd: number; priced: boolean; tools: string[] }[] | undefined) ?? []) {
+        await addCost(jobId, { step, provider: "anthropic", model: c.model, units: { ...c.usage, calls: 1, tool_calls: c.tools.length, unpriced: c.priced ? 0 : 1, estimate: 0 }, usd: c.usd });
+      }
       warnings.push(`api_rejected_format_with_tools: ${err.message}`);
       opts.onEvent?.("  ⚠ API не принял structured output вместе с инструментами — переключаюсь на submit_edl");
       contract = "submit";

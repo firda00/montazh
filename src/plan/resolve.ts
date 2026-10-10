@@ -5,6 +5,8 @@ import type { PlanContext } from "./context.ts";
 import { parseRef, resolveRef } from "./refs.ts";
 
 export interface ResolvedClip {
+  /** index of the clip in the model's draft (messages use it, so skipped clips do not shift numbering) */
+  index: number;
   start: number;
   end: number;
   from: string;
@@ -73,7 +75,8 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
   const outputs: ResolvedOutput[] = [];
   const global: PlanIssue[] = [];
   if (draft.outputs.length === 0) global.push({ severity: "error", code: "no_outputs", message: "the plan has no outputs" });
-  if (draft.brief.outputs_requested !== undefined && draft.outputs.length > 0 && draft.brief.outputs_requested !== draft.outputs.length) {
+  // the requested count is checked for fresh plans only: an edit may add or remove outputs
+  if (opts.mode === "plan" && draft.brief.outputs_requested !== undefined && draft.outputs.length > 0 && draft.brief.outputs_requested !== draft.outputs.length) {
     global.push({ severity: "error", code: "count_mismatch", message: `brief says ${draft.brief.outputs_requested} outputs were requested but the plan has ${draft.outputs.length}` });
   }
   const seenIds = new Set<string>();
@@ -85,6 +88,8 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
     const err = (code: PlanIssue["code"], message: string, clip?: number, suggestion?: string) => errors.push({ severity: "error", code, output: o.id, clip, message, suggestion });
     const warn = (code: PlanIssue["code"], message: string, clip?: number, suggestion?: string) => warnings.push({ severity: "warning", code, output: o.id, clip, message, suggestion });
 
+    // an output carried over from the current plan keeps its fields as they are; only new outputs get brief/preset defaults
+    const existing = opts.mode === "revise" && Boolean(opts.currentEdl?.outputs.some((x) => x.id === o.id));
     if (!ID_RE.test(o.id)) err("bad_id", `output id "${o.id}" must match [a-zA-Z0-9_-]+ (e.g. reel_1)`);
     if (seenIds.has(o.id)) err("duplicate_id", `output id "${o.id}" is used twice`);
     seenIds.add(o.id);
@@ -121,29 +126,30 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
       const speed = c.speed ?? 1;
       if (speed < 0.25 || speed > 4) return err("bad_speed", `clip ${i}: speed ${speed} outside 0.25–4`, i);
       if (speed !== 1 && hasSpeech(ctx, start, end)) warn("speech_speed", `clip ${i}: speed ${speed} over speech`, i);
-      clips.push({ start, end, from: c.start, to: c.end, speed, crop: c.crop ?? "center" });
+      clips.push({ index: i, start, end, from: c.start, to: c.end, speed, crop: c.crop ?? "center" });
     });
 
     // 2. keep words whole (scene/gap edges can land inside a word)
     const issues = checkClipBoundaries(clips.map((c) => ({ src_start: c.start, src_end: c.end, speed: c.speed, crop: c.crop })), ctx.transcript);
     for (const is of issues) {
+      const clip = clips[is.clip];
       const shift = Math.abs(is.suggested - is.t);
-      const label = `clip ${is.clip} ${is.edge} ${r2(is.t)}s cuts the word "${is.word.w}" (${is.word.start}–${is.word.end}s)`;
+      const label = `clip ${clip.index} ${is.edge} ${r2(is.t)}s cuts the word "${is.word.w}" (${is.word.start}–${is.word.end}s)`;
       if (shift <= maxSnap) {
-        if (is.edge === "start") clips[is.clip].start = is.suggested;
-        else clips[is.clip].end = is.suggested;
-        warn("cuts_word", `${label} → moved to ${r2(is.suggested)}s`, is.clip);
+        if (is.edge === "start") clip.start = is.suggested;
+        else clip.end = is.suggested;
+        warn("cuts_word", `${label} → moved to ${r2(is.suggested)}s`, clip.index);
       } else {
         const p = ctx.phrases.find((ph) => ph.words.includes(is.word));
-        err("cuts_word", `${label}; moving it would shift ${r2(shift)}s`, is.clip, p ? `use ${p.id}.start / ${p.id}.end or a gap id` : undefined);
+        err("cuts_word", `${label}; moving it would shift ${r2(shift)}s`, clip.index, p ? `use ${p.id}.start / ${p.id}.end or a gap id` : undefined);
       }
     }
-    for (const c of clips) if (c.end <= c.start) err("empty_clip", `clip collapsed after word snapping (${r2(c.start)}–${r2(c.end)}s)`);
+    for (const c of clips) if (c.end <= c.start) err("empty_clip", `clip ${c.index} collapsed after word snapping (${r2(c.start)}–${r2(c.end)}s)`, c.index);
 
     // 3. overlaps inside the output and identical ranges across outputs
     for (let i = 0; i < clips.length; i++)
       for (let j = i + 1; j < clips.length; j++)
-        if (clips[i].start < clips[j].end && clips[j].start < clips[i].end) warn("overlap", `clips ${i} and ${j} overlap (${r2(clips[i].start)}–${r2(clips[i].end)}s / ${r2(clips[j].start)}–${r2(clips[j].end)}s)`, j);
+        if (clips[i].start < clips[j].end && clips[j].start < clips[i].end) warn("overlap", `clips ${clips[i].index} and ${clips[j].index} overlap (${r2(clips[i].start)}–${r2(clips[i].end)}s / ${r2(clips[j].start)}–${r2(clips[j].end)}s)`, clips[j].index);
     for (const c of clips) {
       const key = `${c.start.toFixed(2)}-${c.end.toFixed(2)}`;
       const other = seenRanges.get(key);
@@ -155,7 +161,7 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
     const duration = clips.reduce((s, c) => s + (c.end - c.start) / c.speed, 0);
     // the brief's target applies to outputs of the requested kind; a differently shaped extra output sets its own
     const briefTarget = draft.brief.aspect === undefined || draft.brief.aspect === o.aspect ? draft.brief.target_duration_s : undefined;
-    const target = o.target_duration ?? briefTarget ?? null;
+    const target = o.target_duration ?? (existing ? undefined : briefTarget) ?? null;
     if (target && clips.length) {
       const diff = duration - target;
       const hard = Math.max(0.25 * target, 5);
@@ -164,27 +170,29 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
         const last = clips[clips.length - 1];
         const candidates = diff < 0
           ? ctx.phrases.filter((p) => p.start >= last.end - 0.05).slice(0, 3).map((p) => `${p.id} (${r2(p.end - p.start)}s)`)
-          : clips.map((c, i) => `clip ${i} (${r2((c.end - c.start) / c.speed)}s)`).slice(-3);
+          : clips.map((c) => `clip ${c.index} (${r2((c.end - c.start) / c.speed)}s)`).slice(-3);
         err("duration_off", `output is ${r2(duration)}s, target ${target}s (${diff < 0 ? "too short" : "too long"} by ${r2(Math.abs(diff))}s)`, undefined, diff < 0 ? `add phrases, e.g. ${candidates.join(", ")}` : `remove or shorten ${candidates.join(", ")}`);
       } else if (Math.abs(diff) > soft) warn("duration_off", `output is ${r2(duration)}s vs target ${target}s`);
     }
 
-    // 5. captions / titles
+    // 5. captions / titles (a carried-over output inherits its own previous defaults, a new one the preset's)
+    const currentOut = existing ? opts.currentEdl?.outputs.find((x) => x.id === o.id) : undefined;
     let captionsLanguage = o.captions.language ?? null;
     if (o.captions.enabled && !captionsLanguage) {
-      captionsLanguage = draft.brief.captions_language ?? majorityLang(ctx);
-      warn("captions_no_language", `captions enabled without a language → ${captionsLanguage}`);
+      const guess = draft.brief.captions_language ?? majorityLang(ctx);
+      if (guess && guess !== "unknown") {
+        captionsLanguage = guess;
+        warn("captions_no_language", `captions enabled without a language → ${captionsLanguage}`);
+      } else warn("captions_no_language", "captions enabled without a language and the speech language is unknown; left unset");
     }
-    // an output carried over from the current plan keeps its fields as they are; only new outputs get preset defaults
-    const existing = opts.mode === "revise" && Boolean(opts.currentEdl?.outputs.some((x) => x.id === o.id));
-    const titles = o.titles.map((t) => {
+    const titles = o.titles.map((t, idx) => {
       let at = t.at;
       if (at < 0 || at > duration) {
         warn("title_outside", `title "${t.text}" at ${t.at}s is outside the ${r2(duration)}s output → clamped`);
         at = Math.min(Math.max(0, at), Math.max(0, duration - 1));
       }
       if (t.text.length > 60) warn("title_long", `title "${t.text.slice(0, 30)}…" is ${t.text.length} chars (keep ≤ 40)`);
-      return { at: r2(at), duration: t.duration, text: t.text, style: t.style ?? (existing ? undefined : ctx.preset.title_style) };
+      return { at: r2(at), duration: t.duration, text: t.text, style: t.style ?? (existing ? currentOut?.titles[idx]?.style : ctx.preset.title_style) };
     });
 
     const out: ResolvedOutput = { id: o.id, aspect: o.aspect, errors, warnings, clips, duration_s: r2(duration), target_s: target, captions_language: captionsLanguage };
@@ -194,7 +202,7 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
         aspect: o.aspect,
         target_duration: target ?? undefined,
         clips: clips.map((c) => ({ src_start: Number(c.start.toFixed(3)), src_end: Number(c.end.toFixed(3)), speed: c.speed, crop: c.crop })),
-        captions: { enabled: o.captions.enabled, language: captionsLanguage ?? undefined, style: o.captions.style ?? (existing ? undefined : ctx.preset.caption_style) },
+        captions: { enabled: o.captions.enabled, language: captionsLanguage ?? undefined, style: o.captions.style ?? (existing ? currentOut?.captions.style : ctx.preset.caption_style) },
         titles,
         music: { enabled: o.music.enabled },
         transitions: "cut",

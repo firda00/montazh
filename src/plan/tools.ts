@@ -76,9 +76,15 @@ export function makePlannerTools(ctx: PlanContext, state: ToolState, deps: ToolD
   }
 
   const words = allWords(ctx.transcript);
+  const MAX_SNAP = 0.4; // same limit as resolveDraft
   const edgeInfo = (t: number, side: "start" | "end") => {
     const w = wordAt(words, t);
-    return { inside_word: w ? { w: w.w, start: w.start, end: w.end } : null, safe: w ? (side === "start" ? w.start : w.end) : r2(t) };
+    if (!w) return { inside_word: null, safe: r2(t) };
+    const safe = side === "start" ? w.start : w.end;
+    const shift = Math.abs(safe - t);
+    return shift <= MAX_SNAP
+      ? { inside_word: { w: w.w, start: w.start, end: w.end }, safe }
+      : { inside_word: { w: w.w, start: w.start, end: w.end }, safe: null, note: `the harness will not move this edge ${r2(shift)}s; use a phrase or gap ref instead` };
   };
 
   const tools: PlannerTool[] = [
@@ -138,7 +144,7 @@ export function makePlannerTools(ctx: PlanContext, state: ToolState, deps: ToolD
 
     define(
       "preview_frame",
-      "One JPEG frame of the source video at time t (640 px wide). The only way to know what is actually visible. Use only when the instruction depends on visuals; request every frame you need in one turn. Budget: 6 per plan.",
+      `One JPEG frame of the source video at time t (640 px wide). The only way to know what is actually visible. Use only when the instruction depends on visuals; request every frame you need in one turn. Budget: ${frameBudget} per plan.`,
       { t: z.number().describe("seconds in [0, duration]") },
       async ({ t }) => {
         if (t < 0 || t > ctx.duration) return { text: `t must be within 0–${r2(ctx.duration)}s`, isError: true };

@@ -38,7 +38,7 @@ TOOLS
 - Tools are optional. Your final answer is validated automatically and any problems come back to you, so do not call validate_edl for an ordinary plan.
 - get_transcript_range: in compact mode, or to get word indexes before a pN.wK cut. Ask for every range you need in one turn.
 - get_scene_details: metadata of one scene and what the harness will snap its edges to.
-- preview_frame: only when the instruction depends on what is visible (choosing a hook frame, checking that a speaker is in frame for 9:16). Request all frames you need in one turn; the budget is 6 per plan.
+- preview_frame: only when the instruction depends on what is visible (choosing a hook frame, checking that a speaker is in frame for 9:16). Request all frames you need in one turn; each result tells you how many previews are left.
 - validate_edl: before answering only for unusual plans (more than 3 outputs, more than 15 clips, word-level cuts, or after frames changed your plan).
 
 OUTPUT
@@ -60,6 +60,7 @@ export const AGENT_ADDENDUM = `
 Tool names are prefixed mcp__vedit__ in this environment.`;
 
 export const NUDGE_TEXT = "You ended without an accepted plan. Call submit_edl now with the complete plan.";
+export const TOOL_BUDGET_NUDGE_TEXT = "The tool budget for this plan is used up. Decide from what you already have and return the complete plan now.";
 
 export function buildTaskText(o: { instruction: string; presetName: string; mode: "full" | "compact"; toolsAvailable: boolean }) {
   return `INSTRUCTION:\n${o.instruction}\nPRESET: ${o.presetName}\nMODE: ${o.mode.toUpperCase()}\nTOOLS: ${o.toolsAvailable ? "available" : "none — decide from the pack"}\nProduce the plan now.`;

@@ -2,7 +2,7 @@ import { PlanDraftSchema, type CallUsage, type Edl, type PlanDraft, type PlanIss
 import type { BudgetTracker } from "./budget.ts";
 import type { PlanContext } from "./context.ts";
 import { sumUsage } from "./pricing.ts";
-import { buildRepairText, buildReviseText, buildTaskText, NUDGE_TEXT } from "./prompt.ts";
+import { buildRepairText, buildReviseText, buildTaskText, NUDGE_TEXT, TOOL_BUDGET_NUDGE_TEXT } from "./prompt.ts";
 import { draftFromEdl } from "./refs.ts";
 import { resolveDraft, type ResolvedDraft } from "./resolve.ts";
 import type { ToolState } from "./tools.ts";
@@ -99,16 +99,25 @@ export async function runPlannerLoop(backend: PlannerBackend, ctx: PlanContext, 
   };
 
   const turns: Turn[] = [];
-  const fixed: PlanIssue[] = [];
+  const sentForRepair: PlanIssue[] = [];
   let repairs = 0;
   let nudges = 0;
   let draft: PlanDraft | null = null;
   let resolved: ResolvedDraft | null = null;
   let lastIssues: PlanIssue[] = [];
 
+  const charge = (turn: Turn) => {
+    turns.push(turn);
+    // backends that do not meter per request (agent, mock) are charged here, per turn
+    if (!turn.charged) opts.budget.addRequest(turn.perCall.reduce((s, c) => s + c.usd, 0), Math.max(1, turn.calls));
+  };
+  const issueKey = (i: PlanIssue) => `${i.code}|${i.output ?? ""}|${i.clip ?? ""}`;
+
   const finish = (status: LoopResult["status"], extra: Partial<LoopResult> = {}): LoopResult => {
     const perCall = turns.flatMap((t) => t.perCall);
     const last = turns[turns.length - 1];
+    const remaining = new Set(lastIssues.map(issueKey));
+    const fixed = sentForRepair.filter((i, idx, arr) => !remaining.has(issueKey(i)) && arr.findIndex((o) => issueKey(o) === issueKey(i)) === idx);
     return {
       status,
       draft,
@@ -131,7 +140,7 @@ export async function runPlannerLoop(backend: PlannerBackend, ctx: PlanContext, 
   };
 
   let turn = await backend.start(req);
-  turns.push(turn);
+  charge(turn);
   await opts.onTurn?.(turn);
 
   for (;;) {
@@ -164,21 +173,21 @@ export async function runPlannerLoop(backend: PlannerBackend, ctx: PlanContext, 
       return resolved?.edl ? finish("partial", { error: `бюджет исчерпан (${reason}); сохранены выходы без ошибок` }) : finish("failed", { error: `бюджет исчерпан (${reason}) до валидного плана`, errorCode: "budget" });
     }
 
-    // repair or nudge
-    const needNudge = opts.contract === "submit" && !opts.state.submitted && !draft;
+    // repair or nudge (a nudge asks for the answer that never came: tool budget used up, or no submit_edl call)
+    const needNudge = !draft && (turn.stopReason === "max_iterations" || opts.contract === "submit");
     const canContinue = opts.budget.exceeded() === null && opts.budget.remainingCalls() > 0;
     if (canContinue && (needNudge ? nudges < opts.maxRepairs : repairs < opts.maxRepairs)) {
       let text: string;
       if (needNudge) {
         nudges += 1;
-        text = NUDGE_TEXT;
+        text = turn.stopReason === "max_iterations" ? TOOL_BUDGET_NUDGE_TEXT : NUDGE_TEXT;
       } else {
         repairs += 1;
-        fixed.push(...errors);
+        sentForRepair.push(...errors);
         text = buildRepairText(issues, repairs, opts.maxRepairs);
       }
       turn = await backend.continue(turn, text, req);
-      turns.push(turn);
+      charge(turn);
       await opts.onTurn?.(turn);
       continue;
     }

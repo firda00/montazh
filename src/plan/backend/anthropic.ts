@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { CallUsage } from "../../schemas/index.ts";
 import { normalizeUsage, usdForUsage } from "../pricing.ts";
 import { zodToApiSchema } from "../schema-sanitize.ts";
-import { PlanError, type PlannerBackend, type StartRequest, type Turn } from "./types.ts";
+import { PlanError, type PlannerBackend, type PlannerTool, type StartRequest, type Turn } from "./types.ts";
 
 interface Handle {
   history: Anthropic.Beta.BetaMessageParam[];
@@ -20,6 +20,32 @@ export interface ApiBackendOptions {
   fallbacks?: boolean; // VEDIT_FALLBACKS=1 — a rescue runs on another model, unpriced
 }
 
+type ApiTools = ReturnType<typeof buildTools>;
+
+function buildTools(tools: PlannerTool[]) {
+  return tools
+    .map((t) => ({
+      ...betaZodTool({
+        name: t.name,
+        description: t.description,
+        inputSchema: z.object(t.inputShape),
+        run: async (args, c) => {
+          const r = await t.run(args, { signal: c?.signal ?? undefined });
+          if (r.isError) throw new ToolError(r.text);
+          if (r.images?.length) {
+            return [
+              { type: "text" as const, text: r.text },
+              ...r.images.map((i) => ({ type: "image" as const, source: { type: "base64" as const, media_type: i.mediaType, data: i.base64 } })),
+            ];
+          }
+          return r.text;
+        },
+      }),
+      input_schema: zodToApiSchema(z.object(t.inputShape)) as { type: "object"; [k: string]: unknown },
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /**
  * Claude API through the SDK's beta tool runner. Needs ANTHROPIC_API_KEY (or an `ant auth login`
  * profile). Request layout keeps tools + system + pack byte-stable so repairs and revise are cache reads.
@@ -29,8 +55,9 @@ export class AnthropicApiBackend implements PlannerBackend {
   readonly model: string;
   readonly note = "backend: api — Claude API (ANTHROPIC_API_KEY)";
   private readonly client: Anthropic;
-  private apiTools: ReturnType<typeof this.buildTools> | null = null;
-  private firstRequest = true;
+  // adapters are built once per tool list (a contract fallback passes a new list with submit_edl and fresh state)
+  private readonly toolCache = new WeakMap<PlannerTool[], ApiTools>();
+  private requests = 0;
 
   constructor(private readonly opts: ApiBackendOptions) {
     this.model = opts.model;
@@ -38,28 +65,13 @@ export class AnthropicApiBackend implements PlannerBackend {
     this.client = opts.client ?? new Anthropic({ maxRetries: 3, timeout: 600_000 });
   }
 
-  private buildTools(req: StartRequest) {
-    return req.tools
-      .map((t) => ({
-        ...betaZodTool({
-          name: t.name,
-          description: t.description,
-          inputSchema: z.object(t.inputShape),
-          run: async (args, c) => {
-            const r = await t.run(args, { signal: c?.signal ?? undefined });
-            if (r.isError) throw new ToolError(r.text);
-            if (r.images?.length) {
-              return [
-                { type: "text" as const, text: r.text },
-                ...r.images.map((i) => ({ type: "image" as const, source: { type: "base64" as const, media_type: i.mediaType, data: i.base64 } })),
-              ];
-            }
-            return r.text;
-          },
-        }),
-        input_schema: zodToApiSchema(z.object(t.inputShape)) as { type: "object"; [k: string]: unknown },
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+  private apiTools(req: StartRequest): ApiTools {
+    let t = this.toolCache.get(req.tools);
+    if (!t) {
+      t = buildTools(req.tools);
+      this.toolCache.set(req.tools, t);
+    }
+    return t;
   }
 
   private cacheMark() {
@@ -93,7 +105,6 @@ export class AnthropicApiBackend implements PlannerBackend {
   }
 
   private async runTurn(req: StartRequest, messages: Anthropic.Beta.BetaMessageParam[], maxTokens: number): Promise<Turn> {
-    this.apiTools ??= this.buildTools(req);
     const perCall: CallUsage[] = [];
     const useFormat = req.contract === "format";
     const runner = this.client.beta.messages.toolRunner(
@@ -105,7 +116,7 @@ export class AnthropicApiBackend implements PlannerBackend {
         output_config: { effort: this.opts.effort, ...(useFormat ? { format: { type: "json_schema" as const, schema: req.draftJsonSchema } } : {}) },
         cache_control: { type: "ephemeral" as const },
         system: [{ type: "text", text: req.system, cache_control: this.cacheMark() }],
-        tools: this.apiTools,
+        tools: this.apiTools(req),
         messages,
         ...(this.opts.fallbacks ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const } : {}),
       },
@@ -116,6 +127,7 @@ export class AnthropicApiBackend implements PlannerBackend {
     let stopped: Turn["stopReason"] | null = null;
     try {
       for await (const message of runner) {
+        this.requests += 1;
         const priced = usdForUsage(message.model, message.usage);
         req.budget.addRequest(priced.usd);
         perCall.push({
@@ -126,18 +138,18 @@ export class AnthropicApiBackend implements PlannerBackend {
           tools: message.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use").map((b) => b.name),
         });
         last = message;
-        if (req.budget.exceeded()) {
+        // only a message that asks for more tool work is worth stopping over; a finished answer is kept
+        if (message.stop_reason === "tool_use" && req.budget.exceeded()) {
           stopped = "budget";
           break; // this message's tools never run; nothing more is appended to runner.params.messages
         }
       }
-      this.firstRequest = false;
     } catch (err) {
       return this.mapError(err, req, perCall, messages);
     }
 
     const history = stopped ? messages : [...runner.params.messages];
-    const base = { calls: perCall.length, perCall };
+    const base = { calls: perCall.length, perCall, charged: true };
     if (!last) return { text: null, stopReason: "error", error: "no response", ...base, handle: { history, unsentToolResult: false } satisfies Handle };
     if (stopped) return { text: null, stopReason: stopped, ...base, handle: { history, unsentToolResult: false } satisfies Handle };
 
@@ -148,8 +160,10 @@ export class AnthropicApiBackend implements PlannerBackend {
         return { text, stopReason: "end_turn", ...base, handle: { history, unsentToolResult: false } satisfies Handle };
       case "max_tokens": {
         if (maxTokens < 32_000 && !req.budget.exceeded()) {
-          // retry once with more room; the truncated assistant message was received but never sent back, so dropping it is not an edit
-          const retry = await this.runTurn(req, messages, 32_000);
+          // retry once with more room from the point the turn reached: tool results already in the
+          // history stay; only the truncated assistant message (received, never sent back) is dropped
+          const resume = history[history.length - 1]?.role === "assistant" ? history.slice(0, -1) : history;
+          const retry = await this.runTurn(req, resume, 32_000);
           return { ...retry, calls: retry.calls + perCall.length, perCall: [...perCall, ...retry.perCall] };
         }
         return { text, stopReason: "max_tokens", ...base, handle: { history, unsentToolResult: false } satisfies Handle };
@@ -165,14 +179,15 @@ export class AnthropicApiBackend implements PlannerBackend {
   }
 
   private mapError(err: unknown, req: StartRequest, perCall: CallUsage[], messages: Anthropic.Beta.BetaMessageParam[]): Turn {
-    const base = { calls: perCall.length, perCall, handle: { history: messages, unsentToolResult: false } satisfies Handle, text: null };
+    const base = { calls: perCall.length, perCall, charged: true, handle: { history: messages, unsentToolResult: false } satisfies Handle, text: null };
     if (err instanceof Anthropic.AuthenticationError) return { ...base, stopReason: "error", errorCode: "auth", error: err.message };
     if (err instanceof Anthropic.NotFoundError) return { ...base, stopReason: "error", errorCode: "model", error: `model ${this.model}: ${err.message}` };
     if (err instanceof Anthropic.RateLimitError) return { ...base, stopReason: "error", errorCode: "rate_limit", error: err.message };
     if (err instanceof Anthropic.BadRequestError) {
-      if (this.firstRequest && req.contract === "format" && req.tools.length > 0) {
-        // feature detection: the API may reject output_config.format together with client tools → switch contract
-        throw new PlanError(`API rejected output_config.format with client tools: ${err.message}`, "contract", { status: err.status });
+      if (this.requests === 0 && req.contract === "format" && req.tools.length > 0) {
+        // feature detection on the very first request of the job: the API may reject
+        // output_config.format together with client tools → the caller switches contract
+        throw new PlanError(`API rejected output_config.format with client tools: ${err.message}`, "contract", { status: err.status, perCall });
       }
       return { ...base, stopReason: "error", errorCode: "api", error: `${err.status} ${err.message}` };
     }

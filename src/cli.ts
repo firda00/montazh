@@ -22,7 +22,7 @@ const HINTS: Partial<Record<PlanError["code"], string>> = {
   auth: "проверьте ключ/вход: ANTHROPIC_API_KEY в .env или `claude /login`",
   refusal: "модель отказалась; переформулируйте инструкцию или выберите другой фрагмент",
   budget: "поднимите лимит: --budget <usd> (по умолчанию 1.50) или упростите инструкцию",
-  invalid: "черновик модели сохранён как edl.draft.json — исправьте вручную и запустите vedit cut <job> --edl <file>",
+  invalid: "если модель вернула черновик, он сохранён как edl.draft.json — исправьте вручную и запустите vedit cut <job> --edl <file>; иначе уточните инструкцию",
   loop: "лимит запросов исчерпан; попробуйте --effort high или более конкретную инструкцию",
   nothing_to_plan: "запустите понимание видео: vedit understand <job> (или уберите --skip-understand)",
   missing_inputs: "сначала vedit run <video> или vedit ingest + vedit understand",
@@ -116,7 +116,17 @@ function withPlannerOptions(cmd: Command) {
     .option("--verbose", "печатать вызовы инструментов");
 }
 
+const BACKENDS = ["auto", "api", "agent", "mock"];
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
 function plannerOpts(o: PlannerCliOpts): Omit<PlanOptions, "instruction"> {
+  if (!BACKENDS.includes(o.backend)) throw new Error(`--backend: ожидается ${BACKENDS.join(" | ")}, получено "${o.backend}"`);
+  if (!EFFORTS.includes(o.effort)) throw new Error(`--effort: ожидается ${EFFORTS.join(" | ")}, получено "${o.effort}"`);
+  if (o.contract !== undefined && !["format", "submit"].includes(o.contract)) throw new Error(`--contract: ожидается format | submit`);
+  if (o.cacheTtl !== undefined && !["5m", "1h"].includes(o.cacheTtl)) throw new Error(`--cache-ttl: ожидается 5m | 1h`);
+  for (const [name, v] of [["--budget", o.budget], ["--max-repairs", o.maxRepairs], ["--frames", o.frames]] as const) {
+    if (v !== undefined && !(Number.isFinite(v) && v >= 0)) throw new Error(`${name}: ожидается неотрицательное число`);
+  }
   return {
     backend: o.backend,
     model: o.model,
