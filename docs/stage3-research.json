@@ -1,0 +1,19 @@
+{
+ "research": {},
+ "designs": [
+  {
+   "angle": "design:tools-first"
+  },
+  {
+   "angle": "design:context-first"
+  },
+  {
+   "angle": "design:hybrid-budget"
+  }
+ ],
+ "verdicts": [
+  null,
+  null,
+  null
+ ]
+}

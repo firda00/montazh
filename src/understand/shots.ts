@@ -37,7 +37,12 @@ export function shotsFromCuts(cuts: { t: number; score: number }[], duration: nu
   return shots;
 }
 
-export async function detectShots(video: string, duration: number, threshold = 0.3): Promise<Shot[]> {
+// 0.2 rather than ffmpeg's customary 0.3: on the fixtures a real hard cut between two
+// similar-brightness scenes scored 0.27 while the strongest non-cut frame scored 0.07.
+// Each shot keeps its cut_score so downstream can treat weak cuts with suspicion.
+export const DEFAULT_SCENE_THRESHOLD = 0.2;
+
+export async function detectShots(video: string, duration: number, threshold = DEFAULT_SCENE_THRESHOLD): Promise<Shot[]> {
   const { stderr } = await ffmpeg(
     ["-i", video, "-an", "-vf", `scale=320:-2,select='gt(scene,${threshold})',metadata=print`, "-f", "null", "-"],
     { loglevel: "info" },
