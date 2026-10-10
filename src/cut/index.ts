@@ -2,7 +2,8 @@ import path from "node:path";
 import { ffmpeg, ffprobe } from "../lib/ffmpeg.ts";
 import { jobDir, writeJson } from "../lib/workspace.ts";
 import { TARGET_FPS } from "../ingest/index.ts";
-import type { Aspect, Clip, Edl, Media, Output } from "../schemas/index.ts";
+import type { Aspect, Clip, Edl, Media, Output, Transcript } from "../schemas/index.ts";
+import { checkClipBoundaries, snapClipsToWords } from "../plan/validate.ts";
 import { z } from "zod";
 
 export const OUTPUT_SIZE: Record<Aspect, { w: number; h: number }> = {
@@ -108,13 +109,32 @@ export function buildCutArgs(output: Output, clips: Clip[], media: Media, outPat
  * CUT: one rough_<id>.mp4 per EDL output. Outputs are independent — one failing
  * does not stop the others; the report says which succeeded.
  */
-export async function cut(jobId: string, edl: Edl, media: Media, only?: string[]): Promise<CutReport & { partial: boolean }> {
+export interface CutOptions {
+  only?: string[];
+  /** when present, clip edges are checked against word boundaries (spec §5.3) */
+  transcript?: Transcript;
+  /** move offending edges to the nearest word boundary instead of only warning */
+  snap?: boolean;
+}
+
+export async function cut(jobId: string, edl: Edl, media: Media, opts: CutOptions = {}): Promise<CutReport & { partial: boolean }> {
   const dir = jobDir(jobId);
   const report: CutReport = { outputs: [] };
-  const targets = only ? edl.outputs.filter((o) => only.includes(o.id)) : edl.outputs;
+  const targets = opts.only ? edl.outputs.filter((o) => opts.only!.includes(o.id)) : edl.outputs;
 
   for (const output of targets) {
-    const { clips, warnings } = sanitizeClips(output.clips, media);
+    let { clips, warnings } = sanitizeClips(output.clips, media);
+    if (opts.transcript) {
+      if (opts.snap) {
+        const snapped = snapClipsToWords(clips, opts.transcript);
+        clips = snapped.clips;
+        warnings.push(...snapped.notes);
+      } else {
+        for (const i of checkClipBoundaries(clips, opts.transcript)) {
+          warnings.push(`clip ${i.clip} ${i.edge} ${i.t.toFixed(2)}s cuts the word "${i.word.w}" (${i.word.start}-${i.word.end}s)`);
+        }
+      }
+    }
     const expected = expectedDuration(clips);
     if (output.target_duration && Math.abs(expected - output.target_duration) > 1) {
       warnings.push(`duration ${expected.toFixed(1)}s differs from target ${output.target_duration}s`);

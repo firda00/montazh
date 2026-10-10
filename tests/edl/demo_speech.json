@@ -1,0 +1,20 @@
+{
+  "outputs": [
+    {
+      "id": "reel_1",
+      "aspect": "9:16",
+      "clips": [
+        { "src_start": 0.0, "src_end": 2.8 },
+        { "src_start": 8.5, "src_end": 13.3 },
+        { "src_start": 19.58, "src_end": 27.16 }
+      ],
+      "captions": { "enabled": true, "language": "ru", "style": "bold_pop" }
+    },
+    {
+      "id": "wide_1",
+      "aspect": "16:9",
+      "clips": [ { "src_start": 23.36, "src_end": 27.16 }, { "src_start": 29.07, "src_end": 32.07 } ]
+    }
+  ],
+  "reasoning": "Демо этапа 2: клип 2 в reel_1 намеренно режет слова «Каждое» и «казан» — проверка правила про границы слов."
+}

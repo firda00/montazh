@@ -12,9 +12,9 @@ export class ProcessError extends Error {
   }
 }
 
-function run(bin: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+function run(bin: string, args: string[], opts: { cwd?: string } = {}): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { windowsHide: true });
+    const child = spawn(bin, args, { windowsHide: true, cwd: opts.cwd });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -30,8 +30,12 @@ function run(bin: string, args: string[]): Promise<{ stdout: string; stderr: str
   });
 }
 
-export function ffmpeg(args: string[]) {
-  return run(FFMPEG, ["-hide_banner", "-loglevel", "error", "-y", ...args]);
+export function ffmpeg(args: string[], opts: { loglevel?: "error" | "info" } = {}) {
+  return run(FFMPEG, ["-hide_banner", "-loglevel", opts.loglevel ?? "error", "-y", ...args]);
+}
+
+export function runProcess(bin: string, args: string[], opts: { cwd?: string } = {}) {
+  return run(bin, args, opts);
 }
 
 export interface ProbeStream {

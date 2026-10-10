@@ -43,7 +43,86 @@ export async function makeFixtures() {
       "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", portrait,
     ]);
   }
-  return { landscape, portrait };
+  const speech = await makeSpeechFixture();
+  return { landscape, portrait, speech };
+}
+
+// Russian "cafe promo" voice-over with pauses + an English outro, over three visually
+// distinct scenes. Writes <name>.truth.json with SAPI word starts and the scene cut times.
+const SPEECH_PARTS = [
+  { voice: "Microsoft Irina Desktop", text: "Добро пожаловать в наше кафе. Здесь готовят лучший плов в городе." },
+  { pause_ms: 1500 },
+  { voice: "Microsoft Irina Desktop", text: "Каждое утро мы закладываем рис, морковь и мясо в большой казан. Огонь, специи и много терпения." },
+  { pause_ms: 2000 },
+  { voice: "Microsoft Irina Desktop", text: "Попробуйте нашу самсу прямо из тандыра. Ждём вас каждый день с девяти утра до одиннадцати вечера." },
+  { pause_ms: 1200 },
+  { voice: "Microsoft Zira Desktop", text: "Thank you for watching. See you soon." },
+];
+
+async function makeSpeechFixture() {
+  const out = path.join(dir, "cafe_speech_ru_en.mp4");
+  if (fs.existsSync(out)) return out;
+  if (process.platform !== "win32") {
+    console.warn("speech fixture needs Windows SAPI — skipped");
+    return null;
+  }
+  const { spawnSync } = await import("node:child_process");
+  const { ffprobe } = await import("../src/lib/ffmpeg.ts");
+  const tmp = fs.mkdtempSync(path.join(dir, "_speech-"));
+  const specFile = path.join(tmp, "spec.json");
+  fs.writeFileSync(specFile, JSON.stringify({ parts: SPEECH_PARTS }));
+  const ps = spawnSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(here, "fixture-src", "speak.ps1"), "-In", specFile, "-OutDir", tmp], { encoding: "utf8" });
+  if (ps.status !== 0) throw new Error(`speech synthesis failed: ${ps.stderr}`);
+  const parts = JSON.parse(fs.readFileSync(path.join(tmp, "parts.json"), "utf8")) as { index: number; file: string; words: { w: string; start: number }[] }[];
+
+  // Lay the parts out on one timeline: spoken parts back to back, pauses as exact silence.
+  const words: { w: string; start: number }[] = [];
+  const audioInputs: string[] = [];
+  let offset = 0;
+  for (const [i, p] of SPEECH_PARTS.entries()) {
+    const pause = "pause_ms" in p ? p.pause_ms : undefined;
+    if (pause) {
+      audioInputs.push("-f", "lavfi", "-t", (pause / 1000).toFixed(3), "-i", "anullsrc=r=16000:cl=mono");
+      offset += pause / 1000;
+    } else {
+      const part = parts.find((x) => x.index === i)!;
+      audioInputs.push("-i", part.file);
+      for (const w of part.words) words.push({ w: w.w, start: Math.round((w.start + offset) * 1000) / 1000 });
+      offset += Number((await ffprobe(part.file)).format.duration);
+    }
+  }
+  const wav = path.join(tmp, "speech.wav");
+  const n = SPEECH_PARTS.length;
+  const fmt = Array.from({ length: n }, (_, k) => `[${k}:a]aformat=sample_fmts=s16:sample_rates=16000:channel_layouts=mono[a${k}]`);
+  const cat = `${Array.from({ length: n }, (_, k) => `[a${k}]`).join("")}concat=n=${n}:v=0:a=1[a]`;
+  await ffmpeg([...audioInputs, "-filter_complex", [...fmt, cat].join(";"), "-map", "[a]", wav]);
+  const speechDur = Number((await ffprobe(wav)).format.duration);
+  const total = Math.ceil(speechDur + 1.5);
+  // cut points chosen to fall inside pauses would be too convenient — put them mid-sentence
+  const cuts = [0, Math.round(total * 0.33 * 10) / 10, Math.round(total * 0.66 * 10) / 10, total];
+  const sources = ["testsrc2=size=1920x1080:rate=30", "smptehdbars=size=1920x1080:rate=30", "life=size=1920x1080:rate=30:mold=10:ratio=0.1:life_color=#00ff88:death_color=#203040"];
+  const inputs: string[] = [];
+  const chains: string[] = [];
+  sources.forEach((src, i) => {
+    inputs.push("-t", (cuts[i + 1] - cuts[i]).toFixed(2), "-f", "lavfi", "-i", src);
+    chains.push(`[${i}:v]format=yuv420p,setpts=PTS-STARTPTS[s${i}]`);
+  });
+  const ov = font
+    ? `,drawtext=fontfile='${font.replace(/:/g, "\\:")}':text='%{pts\\:hms}':fontsize=64:fontcolor=white:borderw=5:bordercolor=black:x=40:y=40`
+    : "";
+  chains.push(`[s0][s1][s2]concat=n=3:v=1:a=0${ov}[v]`);
+  chains.push(`[3:a]apad=whole_dur=${total}[a]`);
+  await ffmpeg([
+    ...inputs, "-i", wav,
+    "-filter_complex", chains.join(";"), "-map", "[v]", "-map", "[a]",
+    "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-ar", "48000", "-t", String(total), out,
+  ]);
+  fs.writeFileSync(
+    out.replace(/\.mp4$/, ".truth.json"),
+    JSON.stringify({ scene_cuts: cuts.slice(1, -1), duration: total, words }, null, 2),
+  );
+  fs.rmSync(tmp, { recursive: true });
+  return out;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

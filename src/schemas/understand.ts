@@ -12,6 +12,7 @@ export const TranscriptSchema = z.object({
       end: z.number(),
       text: z.string(),
       words: z.array(WordSchema),
+      lang: z.string().optional(), // per-phrase language when the video mixes languages
     }),
   ),
 });
