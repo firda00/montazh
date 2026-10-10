@@ -11,9 +11,13 @@ export const FIELD_STAGES: Record<string, string[]> = {
   music: ["design", "render"],
 };
 
+/** Canonical JSON: sorted keys, undefined-valued keys dropped (an absent field and an undefined one are the same thing). */
 function stable(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
-  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  if (v && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${stable(o[k])}`).join(",")}}`;
+  }
   return JSON.stringify(v);
 }
 
