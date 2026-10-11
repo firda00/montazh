@@ -2,17 +2,61 @@
   "name": "calm",
   "description": "Спокойный монтаж в исходном порядке, длинные планы",
   "pace": "calm",
-  "clip_seconds": { "min": 5, "max": 15 },
+  "clip_seconds": {
+    "min": 5,
+    "max": 15
+  },
   "caption_style": "clean",
   "title_style": "minimal",
   "default_aspect": "16:9",
   "music_default": false,
-  "notes": ["сохранять исходный порядок", "не ускорять речь"],
+  "notes": [
+    "сохранять исходный порядок",
+    "не ускорять речь"
+  ],
   "design": {
-    "font": { "family": "Inter", "file": "assets/fonts/Inter-Variable.ttf", "weight": 600 },
-    "colors": { "text": "#FFFFFF", "highlight": "#FFFFFF", "stroke": "rgba(0,0,0,0.6)", "title": "#FFFFFF", "title_bg": "rgba(0,0,0,0.35)" },
-    "captions": { "anchor_y": 0.88, "max_words": 7, "max_chars": 42, "font_size": 44, "line_height": 1.25, "uppercase": false, "stroke_width": 3, "word_animation": "none", "page_animation": "fade_up" },
-    "titles": { "anchor_y": 0.14, "font_size": 64, "max_lines": 2, "animation": "fade", "padding": 20, "radius": 12 },
-    "safe_area": { "x": 0.06, "y": 0.08 }
+    "font": {
+      "family": "Inter",
+      "file": "assets/fonts/Inter-Variable.ttf",
+      "weight": 600
+    },
+    "colors": {
+      "text": "#FFFFFF",
+      "highlight": "#FFFFFF",
+      "stroke": "rgba(0,0,0,0.6)",
+      "title": "#FFFFFF",
+      "title_bg": "rgba(0,0,0,0.35)"
+    },
+    "captions": {
+      "anchor_y": 0.88,
+      "max_words": 7,
+      "max_chars": 42,
+      "font_size": 44,
+      "line_height": 1.25,
+      "uppercase": false,
+      "stroke_width": 3,
+      "word_animation": "none",
+      "page_animation": "fade_up"
+    },
+    "titles": {
+      "anchor_y": 0.14,
+      "font_size": 64,
+      "max_lines": 2,
+      "animation": "fade",
+      "padding": 20,
+      "radius": 12
+    },
+    "safe_area": {
+      "x": 0.06,
+      "y": 0.08
+    },
+    "outro": {
+      "enabled": false,
+      "duration": 2,
+      "text": "",
+      "text_by_lang": {},
+      "font_size": 64,
+      "backdrop": "rgba(0,0,0,0.35)"
+    }
   }
 }

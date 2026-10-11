@@ -18,6 +18,14 @@ export const BUILTIN_PRESETS: Record<string, Preset> = {
     default_aspect: "9:16",
     music_default: false,
     notes: ["хук в первые 3 секунды", "заканчивать на законченной фразе", "чередовать сцены"],
+    design: {
+      outro: {
+        enabled: true,
+        duration: 1.8,
+        text: "Подпишись — дальше ещё вкуснее",
+        text_by_lang: { ru: "Подпишись — дальше ещё вкуснее", uz: "Obuna boʻling — davomi yanada mazali", en: "Follow for more" },
+      },
+    },
   }),
   calm: PresetSchema.parse({
     name: "calm",

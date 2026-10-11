@@ -14,6 +14,21 @@ const r3 = (x: number) => Math.round(x * 1000) / 1000;
 const fmt = (x: number) => String(r3(x));
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+/** Splits a short text into ≤ maxLines lines of similar length at word boundaries (CTA cards; no font measuring needed). */
+export function splitBalanced(text: string, maxLines: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length < 4 || maxLines < 2) return [words.join(" ")];
+  let best = words.length;
+  let bestDiff = Infinity;
+  for (let i = 1; i < words.length; i++) {
+    const a = words.slice(0, i).join(" ").length;
+    const b = words.slice(i).join(" ").length;
+    const diff = Math.abs(a - b);
+    if (diff <= bestDiff) (bestDiff = diff), (best = i); // ties → longer first line
+  }
+  return [words.slice(0, best).join(" "), words.slice(best).join(" ")];
+}
+
 /** Vertical centring on an anchor without CSS transforms: pad the full-frame clip so its content box is centred at anchorY·H. */
 function anchorPad(anchorY: number, height: number) {
   const cy = anchorY * height;
@@ -91,6 +106,22 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
     if (outAt < t.at + t.duration) tw.push(`tl.fromTo("${sel}", { opacity: 1 }, { opacity: 0, duration: 0.24, ease: "power1.in", immediateRender: false }, ${fmt(outAt)});`);
   });
 
+  // outro: a CTA card over the last seconds — the cut and its audio are untouched
+  const outroHtml: string[] = [];
+  const O = D.outro;
+  if (O.enabled && DUR > O.duration + 1) {
+    const text = (O.text_by_lang[lang] ?? O.text).trim();
+    if (text) {
+      const start = r3(DUR - O.duration);
+      const lines = splitBalanced(text, 2);
+      outroHtml.push(
+        `      <section id="outro" class="clip outro" data-start="${fmt(start)}" data-duration="${fmt(DUR - start)}" data-track-index="3">\n        <span class="outro-backdrop" id="outro-backdrop"></span>\n        <span class="outro-text" id="outro-text" style="font-size:${r3(O.font_size * scale)}px">\n${lines.map((l, i) => `          <span class="outro-line" id="outro-line${i}">${esc(l)}</span>`).join("\n")}\n        </span>\n      </section>`,
+      );
+      tw.push(`tl.fromTo("#outro-backdrop", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, ${fmt(start)});`);
+      tw.push(`tl.fromTo("#outro-text", { opacity: 0, y: ${r3(40 * scale)} }, { opacity: 1, y: 0, duration: 0.45, ease: "power3.out" }, ${fmt(start + 0.1)});`);
+    }
+  }
+
   return `<!doctype html>
 <html lang="${esc(lang)}" data-resolution="${W >= H ? "landscape" : "portrait"}">
   <head>
@@ -150,6 +181,10 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
         text-shadow: none;
       }
       .ttl-line { display: block; white-space: nowrap; }
+      .outro { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; padding: 0 ${safeX}px; }
+      .outro-backdrop { position: absolute; inset: 0; display: block; background: ${O.backdrop}; }
+      .outro-text { position: relative; display: block; text-align: center; font-weight: ${layout.font.weight}; line-height: 1.1; letter-spacing: -0.01em; color: ${C.title}; -webkit-text-stroke: ${r3(strokeVisible * 2)}px ${C.stroke}; paint-order: stroke fill; text-shadow: 0 ${r3(3 * scale)}px ${r3(14 * scale)}px rgba(0, 0, 0, 0.55); }
+      .outro-line { display: block; white-space: nowrap; }
     </style>
   </head>
   <body>
@@ -165,6 +200,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       <video id="a-roll" src="${assets.videoRel}" data-start="0" data-duration="${DUR}" data-track-index="0" muted playsinline></video>
 ${capHtml.join("\n")}
 ${ttlHtml.join("\n")}
+${outroHtml.join("\n")}
     </div>
     <script>
       const tl = gsap.timeline({ paused: true });

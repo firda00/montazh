@@ -334,15 +334,18 @@ withPlannerOptions(
   }
 });
 
-withPlannerOptions(
-  program
-    .command("revise")
-    .description("правка плана диалогом: изменить edl.json и перерезать затронутые выходы")
-    .argument("<job_id>")
-    .requiredOption("-p, --prompt <text>", "что изменить")
-    .option("--no-cut", "только обновить план, не резать")
-    .option("--no-snap", "не подтягивать границы клипов к границам слов"),
-).action(async (jobId: string, opts: { prompt: string; cut: boolean; snap: boolean } & PlannerCliOpts) => {
+withRenderOptions(
+  withPlannerOptions(
+    program
+      .command("revise")
+      .description("правка плана диалогом: изменить edl.json, перерезать и перерендерить затронутые выходы")
+      .argument("<job_id>")
+      .requiredOption("-p, --prompt <text>", "что изменить")
+      .option("--no-cut", "только обновить план, не резать и не рендерить")
+      .option("--no-render", "перерезать, но не рендерить")
+      .option("--no-snap", "не подтягивать границы клипов к границам слов"),
+  ),
+).action(async (jobId: string, opts: { prompt: string; cut: boolean; render: boolean; snap: boolean } & PlannerCliOpts & RenderCliOpts) => {
   try {
     await loadJob(jobId);
     const planner = plannerOpts(opts);
@@ -351,12 +354,18 @@ withPlannerOptions(
     const d = r.report.diff;
     console.log(`  изменено: ${d.changed.map((c) => `${c.id} (${c.fields.join(", ")})`).join(", ") || "—"}; без изменений: ${d.unchanged.join(", ") || "—"}; добавлено: ${d.added.join(", ") || "—"}; удалено: ${d.removed.join(", ") || "—"}`);
     console.log(`  предыдущий план: ${r.report.previous_edl}`);
-    if (opts.cut && r.affected.length) {
+    if (!opts.cut) return;
+    if (r.affected.length) {
       const media = await readJson(path.join(jobDir(jobId), "media.json"), MediaSchema);
       const transcript = await loadTranscript(jobId);
       console.log(`▸ cut (${r.affected.join(", ")})`);
       printCutReport(await runStep(jobId, "cut", () => cut(jobId, r.edl, media, { only: r.affected, transcript, snap: opts.snap })));
-    } else if (opts.cut) console.log("  нарезка не нужна: клипы не менялись");
+    } else console.log("  нарезка не нужна: клипы не менялись");
+    // design/render-stage changes (captions, titles) need a new overlay even when the cut is untouched
+    const toRender = [...d.added, ...d.changed.map((c) => c.id)].filter((id, i, arr) => arr.indexOf(id) === i && (d.stages[id] ?? []).some((s) => s === "design" || s === "render"));
+    if (!opts.render) return;
+    if (toRender.length) await runRender(jobId, { ...opts, only: toRender }, r.edl);
+    else console.log("  рендер не нужен: оформление не менялось");
   } catch (err) {
     fail(err);
   }

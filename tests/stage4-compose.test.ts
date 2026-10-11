@@ -58,6 +58,21 @@ test("composeHyperframes: deterministic standalone composition, video-only, capt
   assert.match(html, /scale: 1\.12, color: "#FFD600"/);
   assert.ok(!/tl\.(fromTo|to|set)\("#cap-\d+",/.test(html), "never tween the .clip itself");
   assert.match(html, /tl\.fromTo\("#cap-1-line0, #cap-1-line1", \{ opacity: 1 \}, \{ opacity: 0/, "exit fade on the inner lines of a fading page");
+  // outro card (bold_pop has it enabled): last 1.8 s, text in the caption language, two balanced lines
+  assert.match(html, /<section id="outro" class="clip outro" data-start="2\.9" data-duration="1\.8"/);
+  assert.match(html, /Подпишись — дальше/);
+  assert.equal((html.match(/class="outro-line"/g) ?? []).length, 2);
+  // uz captions pick the uz text; a video shorter than outro+1 s gets no outro
+  const uz = composeHyperframes({ ...job("C:/x/r.mp4"), captions_language: "uz" }, { ...layout, captions: { ...layout.captions, language: "uz" } }, { videoRel: "a.mp4", fontRel: "f.ttf", gsapRel: "g.js" });
+  assert.match(uz, /Obuna/);
+  const short = composeHyperframes(job("C:/x/r.mp4"), { ...layout, frame: { ...layout.frame, duration: 2.5 }, pages: [], titlesOut: [] }, { videoRel: "a.mp4", fontRel: "f.ttf", gsapRel: "g.js" });
+  assert.ok(!/id="outro"/.test(short));
+});
+
+test("splitBalanced keeps short texts on one line and balances longer ones", async () => {
+  const { splitBalanced } = await import("../src/design/hyperframes/compose.ts");
+  assert.deepEqual(splitBalanced("Follow for more", 2), ["Follow for more"]);
+  assert.deepEqual(splitBalanced("Подпишись — дальше ещё вкуснее", 2), ["Подпишись — дальше", "ещё вкуснее"]);
 });
 
 test("writeHyperframesProject produces a project the pinned CLI lints clean", async () => {

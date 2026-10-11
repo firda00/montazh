@@ -51,6 +51,10 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
   const dir = jobDir(jobId);
   const edl = opts.edl ?? (await readJson(path.join(dir, "edl.json"), EdlSchema));
   const quality = opts.quality ?? "looks";
+  if (opts.only) {
+    const unknown = opts.only.filter((id) => !edl.outputs.some((o) => o.id === id));
+    if (unknown.length) throw new Error(`неизвестные выходы: ${unknown.join(", ")} (в плане: ${edl.outputs.map((o) => o.id).join(", ")})`);
+  }
   const targets = opts.only ? edl.outputs.filter((o) => opts.only!.includes(o.id)) : edl.outputs;
   const report: RenderReport = { renderer: opts.renderer.name, quality, outputs: [], wall_seconds: 0 };
 

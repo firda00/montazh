@@ -223,6 +223,16 @@ export const DesignSpecSchema = z.object({
     radius: z.number().default(20),
   }).prefault({}),
   safe_area: z.object({ x: z.number().default(0.06), y: z.number().default(0.08) }).prefault({}),
+  /** call-to-action card over the last seconds (overlay only: the cut and its audio are untouched) */
+  outro: z.object({
+    enabled: z.boolean().default(false),
+    duration: z.number().default(1.8),
+    text: z.string().default(""),
+    /** per caption language; falls back to `text` */
+    text_by_lang: z.record(z.string(), z.string()).default({}),
+    font_size: z.number().default(80),
+    backdrop: z.string().default("rgba(0,0,0,0.45)"),
+  }).prefault({}),
 });
 export type DesignSpec = z.infer<typeof DesignSpecSchema>;
 

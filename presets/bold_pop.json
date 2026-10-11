@@ -2,17 +2,67 @@
   "name": "bold_pop",
   "description": "Динамичные вертикальные ролики: хук в первые 3 секунды, короткие клипы, крупные субтитры",
   "pace": "dynamic",
-  "clip_seconds": { "min": 2, "max": 6 },
+  "clip_seconds": {
+    "min": 2,
+    "max": 6
+  },
   "caption_style": "bold_pop",
   "title_style": "hero",
   "default_aspect": "9:16",
   "music_default": false,
-  "notes": ["хук в первые 3 секунды", "заканчивать на законченной фразе", "чередовать сцены"],
+  "notes": [
+    "хук в первые 3 секунды",
+    "заканчивать на законченной фразе",
+    "чередовать сцены"
+  ],
   "design": {
-    "font": { "family": "Inter", "file": "assets/fonts/Inter-Variable.ttf", "weight": 800 },
-    "colors": { "text": "#FFFFFF", "highlight": "#FFD600", "stroke": "#000000", "title": "#FFFFFF", "title_bg": "rgba(0,0,0,0.55)" },
-    "captions": { "anchor_y": 0.72, "max_words": 4, "max_chars": 22, "font_size": 72, "line_height": 1.15, "uppercase": true, "stroke_width": 8, "word_animation": "pop", "pop_scale": 1.12, "page_animation": "fade_up" },
-    "titles": { "anchor_y": 0.18, "font_size": 88, "max_lines": 2, "animation": "slide_up", "padding": 24, "radius": 20 },
-    "safe_area": { "x": 0.06, "y": 0.08 }
+    "font": {
+      "family": "Inter",
+      "file": "assets/fonts/Inter-Variable.ttf",
+      "weight": 800
+    },
+    "colors": {
+      "text": "#FFFFFF",
+      "highlight": "#FFD600",
+      "stroke": "#000000",
+      "title": "#FFFFFF",
+      "title_bg": "rgba(0,0,0,0.55)"
+    },
+    "captions": {
+      "anchor_y": 0.72,
+      "max_words": 4,
+      "max_chars": 22,
+      "font_size": 72,
+      "line_height": 1.15,
+      "uppercase": true,
+      "stroke_width": 8,
+      "word_animation": "pop",
+      "pop_scale": 1.12,
+      "page_animation": "fade_up"
+    },
+    "titles": {
+      "anchor_y": 0.18,
+      "font_size": 88,
+      "max_lines": 2,
+      "animation": "slide_up",
+      "padding": 24,
+      "radius": 20
+    },
+    "safe_area": {
+      "x": 0.06,
+      "y": 0.08
+    },
+    "outro": {
+      "enabled": true,
+      "duration": 1.8,
+      "text": "Подпишись — дальше ещё вкуснее",
+      "text_by_lang": {
+        "ru": "Подпишись — дальше ещё вкуснее",
+        "uz": "Obuna boʻling — davomi yanada mazali",
+        "en": "Follow for more"
+      },
+      "font_size": 80,
+      "backdrop": "rgba(0,0,0,0.45)"
+    }
   }
 }
