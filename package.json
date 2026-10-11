@@ -9,6 +9,7 @@
   },
   "scripts": {
     "vedit": "tsx src/cli.ts",
+    "bot": "tsx src/bot/run.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
     "fixtures": "tsx tests/make-fixtures.ts"
