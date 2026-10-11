@@ -59,6 +59,10 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
 
   layout.pages.forEach((p: LayoutPage) => {
     const id = `cap-${p.index}`;
+    // start/duration are rounded as a pair so back-to-back pages never leave a 1 ms gap; never past the composition end
+    const ds = r3(Math.min(p.dispStart, DUR));
+    const de = r3(Math.min(p.dispEnd, DUR));
+    if (de <= ds) return;
     const lines = p.lines
       .map((line, li) => {
         const spans = line.words.map((w, wi) => `<span class="w" id="${id}-l${li}-w${wi}">${esc(w.text).replace(/ /g, "&nbsp;")}</span>`).join("");
@@ -66,21 +70,21 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       })
       .join("\n");
     capHtml.push(
-      `      <section id="${id}" class="clip cap caption-group" data-start="${fmt(p.dispStart)}" data-duration="${fmt(p.dispEnd - p.dispStart)}" data-track-index="1" data-track-kind="captions" style="font-size:${r3(p.fontSize)}px;--gap:${r3(p.wordGap)}px">\n${lines}\n      </section>`,
+      `      <section id="${id}" class="clip cap caption-group" data-start="${fmt(ds)}" data-duration="${fmt(de - ds)}" data-track-index="1" data-track-kind="captions" style="font-size:${r3(p.fontSize)}px;--gap:${r3(p.wordGap)}px">\n${lines}\n      </section>`,
     );
     const lineSel = p.lines.map((_, li) => `#${id}-line${li}`).join(", ");
     if (D.captions.page_animation === "fade_up") {
-      tw.push(`tl.fromTo("${lineSel}", { opacity: 0, y: ${r3(36 * scale)} }, { opacity: 1, y: 0, duration: 0.22, ease: "power2.out" }, ${fmt(p.dispStart)});`);
+      tw.push(`tl.fromTo("${lineSel}", { opacity: 0, y: ${r3(36 * scale)} }, { opacity: 1, y: 0, duration: 0.22, ease: "power2.out" }, ${fmt(ds)});`);
     }
-    if (p.exitFade) {
-      const outAt = Math.max(p.dispStart + 0.1, p.dispEnd - 0.14);
+    if (p.exitFade && de - ds > 0.3) {
+      const outAt = Math.max(ds + 0.1, de - 0.14);
       tw.push(`tl.fromTo("${lineSel}", { opacity: 1 }, { opacity: 0, duration: 0.12, ease: "power1.in", immediateRender: false }, ${fmt(outAt)});`);
     }
     if (D.captions.word_animation === "none") return;
     const all = p.lines.flatMap((line, li) => line.words.map((w, wi) => ({ ...w, sel: `#${id}-l${li}-w${wi}` })));
     all.forEach((w, k) => {
       const next = all[k + 1];
-      const hlEnd = next ? next.start : p.dispEnd;
+      const hlEnd = next ? next.start : de;
       const span = Math.max(hlEnd - w.start, 1 / FPS);
       const inDur = r3(Math.min(0.12, Math.max(0.04, span * 0.6)));
       const sc = D.captions.word_animation === "pop" ? r3(w.popScale) : 1;
@@ -102,8 +106,9 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
     const sel = `#${id}-box`;
     if (D.titles.animation === "slide_up") tw.push(`tl.fromTo("${sel}", { opacity: 0, y: ${r3(90 * scale)} }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" }, ${fmt(t.at)});`);
     else if (D.titles.animation === "fade") tw.push(`tl.fromTo("${sel}", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, ${fmt(t.at)});`);
+    // exit fade only when it fits inside the clip window (short titles just cut)
     const outAt = Math.max(t.at + 0.6, t.at + t.duration - 0.3);
-    if (outAt < t.at + t.duration) tw.push(`tl.fromTo("${sel}", { opacity: 1 }, { opacity: 0, duration: 0.24, ease: "power1.in", immediateRender: false }, ${fmt(outAt)});`);
+    if (outAt + 0.24 <= t.at + t.duration) tw.push(`tl.fromTo("${sel}", { opacity: 1 }, { opacity: 0, duration: 0.24, ease: "power1.in", immediateRender: false }, ${fmt(outAt)});`);
   });
 
   // outro: a CTA card over the last seconds — the cut and its audio are untouched
@@ -114,8 +119,11 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
     if (text) {
       const start = r3(DUR - O.duration);
       const lines = splitBalanced(text, 2);
+      // no font metrics here: a conservative 0.62 em per character keeps the longest line inside the safe width
+      const maxLineChars = Math.max(...lines.map((l) => l.length));
+      const fontSize = r3(Math.min(O.font_size * scale, (W - 2 * safeX) / (0.62 * maxLineChars)));
       outroHtml.push(
-        `      <section id="outro" class="clip outro" data-start="${fmt(start)}" data-duration="${fmt(DUR - start)}" data-track-index="3">\n        <span class="outro-backdrop" id="outro-backdrop"></span>\n        <span class="outro-text" id="outro-text" style="font-size:${r3(O.font_size * scale)}px">\n${lines.map((l, i) => `          <span class="outro-line" id="outro-line${i}">${esc(l)}</span>`).join("\n")}\n        </span>\n      </section>`,
+        `      <section id="outro" class="clip outro" data-start="${fmt(start)}" data-duration="${fmt(DUR - start)}" data-track-index="3">\n        <span class="outro-backdrop" id="outro-backdrop"></span>\n        <span class="outro-text" id="outro-text" style="font-size:${fontSize}px">\n${lines.map((l, i) => `          <span class="outro-line" id="outro-line${i}">${esc(l)}</span>`).join("\n")}\n        </span>\n      </section>`,
       );
       tw.push(`tl.fromTo("#outro-backdrop", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, ${fmt(start)});`);
       tw.push(`tl.fromTo("#outro-text", { opacity: 0, y: ${r3(40 * scale)} }, { opacity: 1, y: 0, duration: 0.45, ease: "power3.out" }, ${fmt(start + 0.1)});`);

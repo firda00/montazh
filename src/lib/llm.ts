@@ -23,6 +23,8 @@ export interface StructuredResult {
   usd: number;
   /** true when usd is the Agent SDK's estimate rather than a priced API call */
   estimate: boolean;
+  /** false when the model has no price table entry (usd is then 0, not a real figure) */
+  priced?: boolean;
   model: string;
   provider: "anthropic" | "agent" | "mock";
 }
@@ -57,7 +59,7 @@ export const anthropicStructured: StructuredFn = async (q) => {
   if (res.stop_reason === "refusal") throw new PlanError("модель отказалась выполнять запрос", "refusal");
   const text = res.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("");
   const priced = usdForUsage(res.model, res.usage);
-  return { data: JSON.parse(stripFences(text)), usage: normalizeUsage(res.usage), usd: priced.usd, estimate: false, model: res.model, provider: "anthropic" };
+  return { data: JSON.parse(stripFences(text)), usage: normalizeUsage(res.usage), usd: priced.usd, estimate: false, priced: priced.priced, model: res.model, provider: "anthropic" };
 };
 
 export const agentStructured: StructuredFn = async (q) => {

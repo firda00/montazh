@@ -9,13 +9,34 @@ process.env.VEDIT_WORKSPACE = await fs.mkdtemp(path.join(os.tmpdir(), "vedit-ws-
 const { createJob, jobDir, readJson } = await import("../src/lib/workspace.ts");
 const { CostSchema } = await import("../src/schemas/index.ts");
 const { translatePhrases, applyTranslations, retimePhrase, TranslationCacheSchema } = await import("../src/design/translate.ts");
-const { buildDesignTimeline } = await import("../src/design/timeline.ts");
+const { buildDesignTimeline, partKey } = await import("../src/design/timeline.ts");
 const { EdlSchema } = await import("../src/schemas/index.ts");
 const { MEDIA, makeTranscript } = await import("./helpers/plan-fixture.ts");
 import type { StructuredFn } from "../src/lib/llm.ts";
 
 const edl = EdlSchema.parse({ outputs: [{ id: "reel_1", aspect: "9:16", clips: [{ src_start: 0, src_end: 5.75 }, { src_start: 29.37, src_end: 32.07 }], captions: { enabled: true, language: "uz" } }], reasoning: "" });
 const timeline = buildDesignTimeline(edl.outputs[0], makeTranscript(), MEDIA);
+
+test("a phrase cut into two parts is translated part by part", async () => {
+  const job = await createJob("C:/fixture/cafe.mp4");
+  // p2 «Каждое утро мы закладываем рис, морковь и мясо в большой казан.» 8.29–13.08 split by two clips
+  const split = EdlSchema.parse({ outputs: [{ id: "a", aspect: "9:16", clips: [{ src_start: 8.29, src_end: 10.2 }, { src_start: 11.0, src_end: 13.08 }], captions: { enabled: true, language: "uz" } }], reasoning: "" });
+  const tl = buildDesignTimeline(split.outputs[0], makeTranscript(), MEDIA);
+  assert.equal(tl.phrases.length, 2);
+  assert.equal(tl.phrases[0].phrase, tl.phrases[1].phrase, "same transcript phrase, two parts");
+  const sent: string[] = [];
+  const llm: StructuredFn = async (q) => {
+    const items = (JSON.parse(q.prompt.slice(q.prompt.indexOf("{"))) as { items: { i: number; text: string }[] }).items;
+    sent.push(...items.map((it) => it.text));
+    return { data: { items: items.map((it) => ({ i: it.i, text: `UZ(${it.text})` })) }, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, thinking_tokens: 0 }, usd: 0, estimate: true, model: "mock", provider: "mock" };
+  };
+  const t = await translatePhrases(job.id, tl.phrases, "uz", llm);
+  assert.equal(sent.length, 2, "both parts go to the translator");
+  assert.notEqual(sent[0], sent[1]);
+  const applied = applyTranslations(tl.phrases, t, "uz");
+  assert.equal(applied[0].text, `UZ(${tl.phrases[0].text})`);
+  assert.equal(applied[1].text, `UZ(${tl.phrases[1].text})`);
+});
 
 test("retimePhrase spreads translated words over the original span", () => {
   const p = timeline.phrases[0]; // "Добро пожаловать в наше кафе." 0–2.3
@@ -57,5 +78,5 @@ test("translatePhrases batches untranslated phrases, caches them, logs cost; en 
   const t3 = await translatePhrases(job.id, timeline.phrases, "en", llm);
   assert.equal(calls.length, 2);
   assert.ok(!/Thank you/.test(calls[1]));
-  assert.ok(!t3.has(timeline.phrases.find((p) => p.lang === "en")!.phrase));
+  assert.ok(!t3.has(partKey(timeline.phrases.find((p) => p.lang === "en")!)));
 });

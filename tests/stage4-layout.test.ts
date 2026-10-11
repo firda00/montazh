@@ -40,7 +40,7 @@ function makeJob(phrases: OutPhrase[], o: { duration?: number; titles?: OutTitle
     design: DesignSpecSchema.parse(o.design ?? {}),
     preset: "bold_pop",
     captions_language: o.captionsLanguage ?? null,
-    translated: false,
+    translated: false, warnings: [],
   };
 }
 

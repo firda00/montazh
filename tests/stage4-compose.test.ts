@@ -19,7 +19,7 @@ const edl = EdlSchema.parse({ outputs: [{ id: "reel_1", aspect: "9:16", clips: [
 const timeline = buildDesignTimeline(edl.outputs[0], makeTranscript(), MEDIA);
 
 function job(roughPath: string): DesignJob {
-  return { job_id: "test", rough_path: roughPath, timeline, pages: [], design, preset: "bold_pop", captions_language: "ru", translated: false };
+  return { job_id: "test", rough_path: roughPath, timeline, pages: [], design, preset: "bold_pop", captions_language: "ru", translated: false, warnings: [] };
 }
 
 /** A hand-built layout: two pages (one two-line), one title. */

@@ -2,7 +2,7 @@ import path from "node:path";
 import { ffmpeg, ffprobe } from "../lib/ffmpeg.ts";
 import { exists, jobDir, readJson, writeJson } from "../lib/workspace.ts";
 import { TARGET_FPS } from "../ingest/index.ts";
-import type { Aspect, Clip, Edl, Media, Output, Transcript } from "../schemas/index.ts";
+import { ClipSchema, type Aspect, type Clip, type Edl, type Media, type Output, type Transcript } from "../schemas/index.ts";
 import { checkClipBoundaries, snapClipsToWords } from "../plan/validate.ts";
 import { z } from "zod";
 
@@ -20,6 +20,8 @@ export const CutReportSchema = z.object({
       path: z.string().optional(),
       duration: z.number().optional(),
       expected_duration: z.number(),
+      /** the clips actually cut (after clamping and word snapping) — the design stage builds its timeline from these */
+      clips: z.array(ClipSchema).optional(),
       warnings: z.array(z.string()),
       error: z.string().optional(),
     }),
@@ -165,6 +167,7 @@ export async function cut(jobId: string, edl: Edl, media: Media, opts: CutOption
         path: outPath,
         duration: Number(probe.format.duration),
         expected_duration: expected,
+        clips,
         warnings,
       });
     } catch (err) {

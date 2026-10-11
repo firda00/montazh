@@ -1,5 +1,6 @@
-import type { Media, Output, Transcript } from "../schemas/index.ts";
+import type { Clip, Media, Output, Transcript } from "../schemas/index.ts";
 import { OUTPUT_SIZE } from "../cut/index.ts";
+import { TARGET_FPS } from "../ingest/index.ts";
 
 /** A word placed on the OUTPUT timeline (seconds from the start of the rendered video). */
 export interface OutWord {
@@ -57,16 +58,23 @@ const r3 = (n: number) => Math.round(n * 1000) / 1000;
  * Maps transcript words through the EDL clips onto the output timeline. A word belongs to a clip
  * when its midpoint falls inside the clip's source range; its edges are clipped to the clip, and
  * speed changes compress its time. Phrases are split at clip boundaries so a caption never spans a cut.
+ *
+ * Clip placement mirrors the cut exactly: every segment is encoded at TARGET_FPS and rounded UP to
+ * whole frames (its audio is padded), so clip k starts at Σ ceil(len·fps)/fps of the clips before it.
+ * `clips` may be the snapped clips the cut actually used (cut.json) rather than the EDL's.
  */
-export function buildDesignTimeline(output: Output, transcript: Transcript, media: Media): DesignTimeline {
+export function buildDesignTimeline(output: Output, transcript: Transcript, media: Media, usedClips?: Clip[]): DesignTimeline {
   const size = OUTPUT_SIZE[output.aspect];
+  const fps = TARGET_FPS;
   const clips: OutClip[] = [];
   let cursor = 0;
-  output.clips.forEach((c, index) => {
+  (usedClips ?? output.clips).forEach((c, index) => {
     const srcEnd = Math.min(c.src_end, media.duration);
     const len = Math.max(0, srcEnd - c.src_start) / c.speed;
-    clips.push({ index, out_start: r3(cursor), out_end: r3(cursor + len), src_start: c.src_start, src_end: srcEnd, speed: c.speed });
-    cursor += len;
+    const frames = Math.ceil(len * fps - 1e-6);
+    const outLen = frames / fps;
+    clips.push({ index, out_start: r3(cursor), out_end: r3(cursor + outLen), src_start: c.src_start, src_end: srcEnd, speed: c.speed });
+    cursor += outLen;
   });
   const duration = r3(cursor);
 
@@ -78,8 +86,8 @@ export function buildDesignTimeline(output: Output, transcript: Transcript, medi
         const mid = (w.start + w.end) / 2;
         if (mid < clip.src_start || mid >= clip.src_end) continue;
         const start = clip.out_start + (Math.max(w.start, clip.src_start) - clip.src_start) / clip.speed;
-        const end = clip.out_start + (Math.min(w.end, clip.src_end) - clip.src_start) / clip.speed;
-        if (end - start < 0.01) continue;
+        // a word is never dropped for being short (speed-ups shrink it): it keeps at least 10 ms
+        const end = Math.max(clip.out_start + (Math.min(w.end, clip.src_end) - clip.src_start) / clip.speed, start + 0.01);
         words.push({ w: w.w, start: r3(start), end: r3(end), clip: clip.index, phrase: phraseIndex });
       }
       if (words.length === 0) return;
@@ -104,7 +112,12 @@ export function buildDesignTimeline(output: Output, transcript: Transcript, medi
     })
     .filter((t) => t.duration > 0);
 
-  return { output_id: output.id, aspect: output.aspect, width: size.w, height: size.h, fps: media.fps, duration, clips, phrases, titles, captions: output.captions };
+  return { output_id: output.id, aspect: output.aspect, width: size.w, height: size.h, fps, duration, clips, phrases, titles, captions: output.captions };
+}
+
+/** Identity of a phrase part on the output timeline (a transcript phrase split by a cut yields several parts). */
+export function partKey(p: Pick<OutPhrase, "phrase" | "clip">) {
+  return `${p.phrase}:${p.clip}`;
 }
 
 /** Splits a phrase into caption "pages" of at most `maxWords` words (and at most `maxChars` characters). */

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { exists, jobDir, readJson, writeJson } from "../lib/workspace.ts";
 import { EdlSchema, type Edl } from "../schemas/index.ts";
 import { exportDesignJob, type ExportOptions } from "../design/export.ts";
+import { CutReportSchema } from "../cut/index.ts";
 import type { OverlayRenderer, RenderQuality } from "../design/renderer.ts";
 import { finalizeOutput, outputPath } from "./finalize.ts";
 
@@ -58,20 +59,22 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
   const targets = opts.only ? edl.outputs.filter((o) => opts.only!.includes(o.id)) : edl.outputs;
   const report: RenderReport = { renderer: opts.renderer.name, quality, outputs: [], wall_seconds: 0 };
 
+  const cutFile = path.join(dir, "cut.json");
+  const cutReport = (await exists(cutFile)) ? await readJson(cutFile, CutReportSchema) : null;
+
   for (const output of targets) {
     const warnings: string[] = [];
     const rough = path.join(dir, `rough_${output.id}.mp4`);
-    if (!(await exists(rough))) {
-      report.outputs.push({ id: output.id, status: "skipped", warnings, error: `нет ${path.basename(rough)} — сначала vedit cut` });
+    const cutRecord = cutReport?.outputs.find((o) => o.id === output.id);
+    if (!(await exists(rough)) || (cutRecord && cutRecord.status !== "ok")) {
+      report.outputs.push({ id: output.id, status: "skipped", warnings, error: cutRecord && cutRecord.status !== "ok" ? `нарезка ${output.id} не удалась (${cutRecord.error ?? "см. cut.json"}) — старый rough не используется` : `нет ${path.basename(rough)} — сначала vedit cut` });
       continue;
     }
     try {
       opts.onEvent?.(`▸ design ${output.id}`);
       const tb = Date.now();
       const job = await exportDesignJob(jobId, output.id, { translate: opts.translate ?? true, llm: opts.llm, model: opts.model });
-      if (output.captions.enabled && job.captions_language && !job.translated && job.timeline.phrases.some((p) => p.lang !== job.captions_language)) {
-        warnings.push(`субтитры запрошены на ${job.captions_language}, речь на другом языке, перевод не выполнен`);
-      }
+      warnings.push(...job.warnings);
       const projectDir = path.join(dir, "design", output.id);
       await fs.rm(projectDir, { recursive: true, force: true });
       await fs.mkdir(projectDir, { recursive: true });
@@ -107,7 +110,15 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
   }
 
   report.wall_seconds = (Date.now() - t0) / 1000;
-  await writeJson(path.join(dir, "render.json"), RenderReportSchema, report);
+  // render.json keeps the records of outputs a --only run did not touch
+  const reportFile = path.join(dir, "render.json");
+  let stored: RenderReport = report;
+  if (opts.only && (await exists(reportFile))) {
+    const previous = await readJson(reportFile, RenderReportSchema);
+    const touched = new Set(report.outputs.map((o) => o.id));
+    stored = { ...report, outputs: [...previous.outputs.filter((o) => !touched.has(o.id) && edl.outputs.some((e) => e.id === o.id)), ...report.outputs] };
+  }
+  await writeJson(reportFile, RenderReportSchema, stored);
   const failed = report.outputs.filter((o) => o.status !== "ok").length;
   if (targets.length > 0 && failed === targets.length) {
     throw new Error(`все выходы не отрендерились:\n${report.outputs.map((o) => `  ${o.id}: ${o.error}`).join("\n")}`);

@@ -4,7 +4,7 @@ import { addCost } from "../lib/cost.ts";
 import { exists, jobDir, readJson, writeJson } from "../lib/workspace.ts";
 import { zodToApiSchema } from "../plan/schema-sanitize.ts";
 import type { StructuredFn } from "../lib/llm.ts";
-import type { OutPhrase, OutWord } from "./timeline.ts";
+import { partKey, type OutPhrase, type OutWord } from "./timeline.ts";
 
 export const LANGUAGE_NAMES: Record<string, string> = {
   uz: "Uzbek (Latin script, as used in Uzbekistan today)",
@@ -25,36 +25,42 @@ const r3 = (n: number) => Math.round(n * 1000) / 1000;
 
 export const TRANSLATE_SYSTEM = `You translate short-video subtitle lines. Rules: keep each line's meaning; keep it about as long as the original (it is shown as captions, 2–4 words at a time); keep numbers, names and brand names; natural spoken register; no quotes, no explanations. Return JSON {"items":[{"i":<same id>,"text":"<translation>"}]} with exactly one item per input id, in the same order.`;
 
-/** Translates the phrases that are not already in `target`, through a cache in the job dir. Returns the texts by phrase index. */
-export async function translatePhrases(jobId: string, phrases: OutPhrase[], target: string, llm: StructuredFn, opts: { model?: string } = {}): Promise<Map<number, string>> {
+/**
+ * Translates the phrase PARTS that are not already in `target`, through a cache in the job dir.
+ * A transcript phrase cut into several parts is translated part by part (each part has its own
+ * words); the result is keyed by partKey(part) = "phrase:clip".
+ */
+export async function translatePhrases(jobId: string, phrases: OutPhrase[], target: string, llm: StructuredFn, opts: { model?: string } = {}): Promise<Map<string, string>> {
   const dir = jobDir(jobId);
   const cacheFile = path.join(dir, `translations_${target}.json`);
   const cache = (await exists(cacheFile)) ? await readJson(cacheFile, TranslationCacheSchema) : { target, entries: {} as Record<string, string> };
-  const out = new Map<number, string>();
-  const todo: { i: number; text: string; lang: string }[] = [];
-  const seen = new Set<number>();
+  const out = new Map<string, string>();
+  const todo: { i: number; key: string; text: string; lang: string }[] = [];
+  const seen = new Set<string>();
   for (const p of phrases) {
-    if (seen.has(p.phrase)) continue;
-    seen.add(p.phrase);
+    const key = partKey(p);
+    if (seen.has(key)) continue;
+    seen.add(key);
     if (p.lang === target) continue;
-    const key = `${p.lang}|${p.text}`;
-    const hit = cache.entries[key];
-    if (hit) out.set(p.phrase, hit);
-    else todo.push({ i: p.phrase, text: p.text, lang: p.lang });
+    const cacheKey = `${p.lang}|${p.text}`;
+    const hit = cache.entries[cacheKey];
+    if (hit) out.set(key, hit);
+    else todo.push({ i: todo.length, key, text: p.text, lang: p.lang });
   }
   if (todo.length) {
     const langs = [...new Set(todo.map((t) => t.lang))].map((l) => LANGUAGE_NAMES[l] ?? l).join(", ");
     const prompt = `Translate from ${langs} to ${LANGUAGE_NAMES[target] ?? target}.\n${JSON.stringify({ items: todo.map(({ i, text }) => ({ i, text })) })}`;
     const res = await llm({ system: TRANSLATE_SYSTEM, prompt, schema: zodToApiSchema(TranslationSchema), model: opts.model, effort: "low", maxTokens: 8000 });
+    // the call is paid whatever the answer looks like: log it before validating
+    await addCost(jobId, { step: "design", provider: res.provider, model: res.model, units: { ...res.usage, calls: 1, estimate: res.estimate ? 1 : 0, unpriced: res.priced === false ? 1 : 0, phrases: todo.length }, usd: res.usd });
     const parsed = TranslationSchema.safeParse(res.data);
     if (!parsed.success) throw new Error(`перевод: неожиданный формат ответа: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
-    await addCost(jobId, { step: "design", provider: res.provider, model: res.model, units: { ...res.usage, calls: 1, estimate: res.estimate ? 1 : 0, unpriced: 0, phrases: todo.length }, usd: res.usd });
     const byId = new Map(parsed.data.items.map((it) => [it.i, it.text.trim()]));
     for (const t of todo) {
       const text = byId.get(t.i);
-      if (!text) throw new Error(`перевод: нет перевода для фразы ${t.i}`);
+      if (!text) throw new Error(`перевод: нет перевода для части ${t.key}`);
       cache.entries[`${t.lang}|${t.text}`] = text;
-      out.set(t.i, text);
+      out.set(t.key, text);
     }
     await writeJson(cacheFile, TranslationCacheSchema, cache);
   }
@@ -81,9 +87,9 @@ export function retimePhrase(phrase: OutPhrase, text: string, lang: string): Out
   return { ...phrase, lang, text: tokens.join(" "), words };
 }
 
-export function applyTranslations(phrases: OutPhrase[], translations: Map<number, string>, target: string): OutPhrase[] {
+export function applyTranslations(phrases: OutPhrase[], translations: Map<string, string>, target: string): OutPhrase[] {
   return phrases.map((p) => {
-    const text = translations.get(p.phrase);
+    const text = translations.get(partKey(p));
     return text && p.lang !== target ? retimePhrase(p, text, target) : p;
   });
 }

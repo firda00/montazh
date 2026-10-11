@@ -60,7 +60,8 @@ export class HyperFramesRenderer implements OverlayRenderer {
     this.lastPlan = plan;
     const layoutText = await fs.readFile(path.join(projectDir, "layout.json"), "utf8").catch(() => "");
     const frame = layoutText ? ((JSON.parse(layoutText) as { frame?: { duration?: number; fps?: number } }).frame ?? {}) : {};
-    const args = ["render", "--quality", QUALITY_FLAG[o.quality], "-o", outFile, "-w", String(plan.workers), plan.lowMemory ? "--low-memory-mode" : "--no-low-memory-mode", "--quiet"];
+    // no --quiet: it also silences the @hf-progress lines we parse
+    const args = ["render", "--quality", QUALITY_FLAG[o.quality], "-o", outFile, "-w", String(plan.workers), plan.lowMemory ? "--low-memory-mode" : "--no-low-memory-mode"];
     if (frame.fps) args.push("-f", String(frame.fps));
     if (this.opts.framesCacheDir) args.push("--frames-cache-dir", this.opts.framesCacheDir);
     o.onLine?.(`воркеров: ${plan.workers}${plan.lowMemory ? " (low-memory)" : ""}, свободно ${plan.freeMemMB} MB`);
@@ -74,23 +75,31 @@ export class HyperFramesRenderer implements OverlayRenderer {
     let lastPct = -1;
     const log: string[] = [];
     try {
-      const res = await runCli(
-        this.bin,
-        args,
-        projectDir,
-        (line) => {
-          log.push(line);
-          const p = parseProgress(line);
-          if (p) {
-            const bucket = Math.floor(p.pct / 25) * 25;
-            if (bucket !== lastPct) {
-              lastPct = bucket;
-              o.onLine?.(`${p.code} ${p.pct}%`);
-            }
-          } else if (/rendered in|Error|error:/i.test(line)) o.onLine?.(line.slice(0, 200));
-        },
-        ac.signal,
-      );
+      let res: { code: number | null; stdout: string; stderr: string };
+      try {
+        res = await runCli(
+          this.bin,
+          args,
+          projectDir,
+          (line) => {
+            log.push(line);
+            const p = parseProgress(line);
+            if (p) {
+              const bucket = Math.floor(p.pct / 25) * 25;
+              if (bucket !== lastPct) {
+                lastPct = bucket;
+                o.onLine?.(`${p.code} ${p.pct}%`);
+              }
+            } else if (/rendered in|Error|error:/i.test(line)) o.onLine?.(line.slice(0, 200));
+          },
+          ac.signal,
+        );
+      } catch (err) {
+        // an abort (timeout or caller) rejects the spawn promise: keep the log and say why
+        await fs.writeFile(path.join(projectDir, "render.log"), log.join("\n"));
+        if (ac.signal.aborted) throw new Error(`hyperframes render прерван (${o.signal?.aborted ? "отмена" : `таймаут ${Math.round(timeoutMs / 1000)}s`}) после ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+        throw err;
+      }
       const seconds = (Date.now() - t0) / 1000;
       await fs.writeFile(path.join(projectDir, "render.log"), log.join("\n"));
       if (res.code !== 0 || !(await exists(outFile))) {

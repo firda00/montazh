@@ -42,17 +42,20 @@ export async function finalizeOutput(overlay: string, rough: string, output: str
   const roughProbe = await ffprobe(rough);
   const roughDuration = Number(roughProbe.format.duration);
   const before = await measureLoudness(rough, target);
+  // a silent track (ingest adds one to sources without audio) measures -inf: nothing to normalise
+  const silent = !Number.isFinite(before.input_i);
   const filter = `loudnorm=I=${target}:TP=-1.5:LRA=11:measured_I=${before.input_i}:measured_TP=${before.input_tp}:measured_LRA=${before.input_lra}:measured_thresh=${before.input_thresh}:offset=${before.target_offset}:linear=true:print_format=summary`;
   await ffmpeg([
     "-i", overlay, "-i", rough,
     "-map", "0:v:0", "-map", "1:a:0",
     "-c:v", "copy",
-    "-af", filter, "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+    ...(silent ? [] : ["-af", filter]),
+    "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
     "-t", roughDuration.toFixed(3),
     "-movflags", "+faststart",
     output,
   ]);
-  const after = await measureLoudness(output, target);
+  const after = silent ? before : await measureLoudness(output, target);
   const probe = await ffprobe(output);
   const v = probe.streams.find((s) => s.codec_type === "video");
   const a = probe.streams.find((s) => s.codec_type === "audio");
@@ -64,8 +67,8 @@ export async function finalizeOutput(overlay: string, rough: string, output: str
     output,
     preview,
     duration,
-    loudness_before: before.input_i,
-    loudness_after: after.input_i,
+    loudness_before: Number.isFinite(before.input_i) ? before.input_i : -70,
+    loudness_after: Number.isFinite(after.input_i) ? after.input_i : -70,
     video_codec: v?.codec_name ?? null,
     audio_codec: a?.codec_name ?? null,
     width: v?.width ?? 0,

@@ -15,8 +15,8 @@ test("words are mapped through clips onto the output timeline", () => {
   const t = buildDesignTimeline(edl.outputs[0], transcript, MEDIA);
   assert.equal(t.width, 1080);
   assert.equal(t.height, 1920);
-  near(t.duration, 2.3 + (13.08 - 8.29) / 2);
-  assert.deepEqual(t.clips.map((c) => [c.out_start, c.out_end]), [[0, 2.3], [2.3, 4.695]]);
+  near(t.duration, 4.7, "clip 2 is 71.85 frames → rounded up to 72 like the cut does");
+  assert.deepEqual(t.clips.map((c) => [c.out_start, c.out_end]), [[0, 2.3], [2.3, 4.7]]);
   // first phrase lands at 0, second phrase (p2) starts at the clip boundary, compressed 2x
   assert.equal(t.phrases[0].phrase, 0);
   assert.equal(t.phrases[0].start, 0);
@@ -27,7 +27,7 @@ test("words are mapped through clips onto the output timeline", () => {
   // phrases from source ranges outside the clips never appear
   assert.ok(!t.phrases.some((p) => p.phrase === 1));
   // titles: default duration, late title clamped near the end
-  assert.deepEqual(t.titles.map((x) => [x.at, x.duration]), [[0, 2.5], [4.195, 0.5]]);
+  assert.deepEqual(t.titles.map((x) => [x.at, x.duration]), [[0, 2.5], [4.2, 0.5]]);
 });
 
 test("a word is dropped when its midpoint is outside the clip; phrases split at cuts", () => {

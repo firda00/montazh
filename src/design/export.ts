@@ -3,8 +3,9 @@
 //   npx tsx src/design/export.ts <job_id> <output_id> [out.json] [--translate]
 import path from "node:path";
 import fs from "node:fs/promises";
-import { jobDir, readJson } from "../lib/workspace.ts";
+import { exists, jobDir, readJson } from "../lib/workspace.ts";
 import { EdlSchema, MediaSchema, TranscriptSchema, PresetSchema, JobSchema } from "../schemas/index.ts";
+import { CutReportSchema } from "../cut/index.ts";
 import { loadPreset } from "../plan/presets.ts";
 import { buildDesignTimeline, paginate, type DesignTimeline, type OutPhrase } from "./timeline.ts";
 import { applyTranslations, translatePhrases } from "./translate.ts";
@@ -20,6 +21,7 @@ export interface DesignJob {
   preset: string;
   captions_language: string | null;
   translated: boolean;
+  warnings: string[];
 }
 
 export interface ExportOptions {
@@ -33,25 +35,36 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
   const dir = jobDir(jobId);
   const job = await readJson(path.join(dir, "job.json"), JobSchema);
   const media = await readJson(path.join(dir, "media.json"), MediaSchema);
-  const transcript = await readJson(path.join(dir, "transcript.json"), TranscriptSchema);
+  // no transcript (e.g. --skip-understand) → no captions, the overlay still gets titles/outro
+  const transcriptFile = path.join(dir, "transcript.json");
+  const transcript = (await exists(transcriptFile)) ? await readJson(transcriptFile, TranscriptSchema) : { language: "unknown", segments: [] };
   const edl = await readJson(path.join(dir, "edl.json"), EdlSchema);
   const output = edl.outputs.find((o) => o.id === outputId);
   if (!output) throw new Error(`output ${outputId} not in edl.json (${edl.outputs.map((o) => o.id).join(", ")})`);
   const { preset } = await loadPreset(job.preset ?? "bold_pop");
   const design = PresetSchema.parse(preset).design;
-  const timeline = buildDesignTimeline(output, transcript, media);
+  // the cut may have snapped/clamped clip edges: build the timeline from what was actually cut
+  const cutFile = path.join(dir, "cut.json");
+  const cutRecord = (await exists(cutFile)) ? (await readJson(cutFile, CutReportSchema)).outputs.find((o) => o.id === outputId) : undefined;
+  const timeline = buildDesignTimeline(output, transcript, media, cutRecord?.status === "ok" ? cutRecord.clips : undefined);
 
   const target = output.captions.enabled ? (output.captions.language ?? null) : null;
   let translated = false;
+  const warnings: string[] = [];
   if (opts.translate && target && timeline.phrases.some((p) => p.lang !== target)) {
-    const llm = opts.llm ?? selectStructuredLlm();
-    const translations = await translatePhrases(jobId, timeline.phrases, target, llm, { model: opts.model });
-    timeline.phrases = applyTranslations(timeline.phrases, translations, target);
-    translated = translations.size > 0;
+    try {
+      const llm = opts.llm ?? selectStructuredLlm();
+      const translations = await translatePhrases(jobId, timeline.phrases, target, llm, { model: opts.model });
+      timeline.phrases = applyTranslations(timeline.phrases, translations, target);
+      translated = translations.size > 0;
+    } catch (err) {
+      // captions stay in the spoken language rather than failing the whole output
+      warnings.push(`перевод субтитров на ${target} не выполнен: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    }
   }
 
   const pages = timeline.phrases.flatMap((p) => paginate(p, design.captions.max_words, design.captions.max_chars).map((words) => ({ start: words[0].start, end: words[words.length - 1].end, words })));
-  return { job_id: jobId, rough_path: path.join(dir, `rough_${outputId}.mp4`), timeline, pages, design, preset: preset.name, captions_language: target, translated };
+  return { job_id: jobId, rough_path: path.join(dir, `rough_${outputId}.mp4`), timeline, pages, design, preset: preset.name, captions_language: target, translated, warnings };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]).endsWith(path.join("design", "export.ts"))) {
