@@ -84,3 +84,43 @@ test("moduleUsage: counts runs, failures and cost per module from the workspace,
   const bot = s.modules.find((m) => m.id === "bot")!;
   assert.equal(bot.ready, false, "no token in an empty env");
 });
+
+test("presets and limits are part of the registry; VEDIT_BUDGET_* overrides the budget and bad values are refused", async () => {
+  const { presetsCatalog, limitsCatalog } = await import("../src/modules.ts");
+  const { budgetFromEnv, BudgetTracker, DEFAULT_BUDGET } = await import("../src/plan/budget.ts");
+
+  const presets = await presetsCatalog();
+  assert.ok(presets.some((p) => p.name === "bold_pop" && p.source === "file" && p.outro), JSON.stringify(presets));
+  assert.ok(presets.some((p) => p.name === "calm"));
+  // a broken preset file is listed with its error, not hidden
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vedit-presets-"));
+  await fs.writeFile(path.join(dir, "broken.json"), "{ \"name\": \"broken\" }");
+  const withBroken = await presetsCatalog(dir);
+  assert.ok(withBroken.find((p) => p.name === "broken")?.error, "schema error surfaces");
+  assert.ok(withBroken.some((p) => p.name === "bold_pop" && p.source === "builtin"), "built-ins stay listed when the dir lacks them");
+
+  assert.deepEqual(budgetFromEnv({}), DEFAULT_BUDGET);
+  const b = budgetFromEnv({ VEDIT_BUDGET_USD: "3", VEDIT_BUDGET_WALL_S: "600", VEDIT_BUDGET_FRAMES: "2" });
+  assert.deepEqual([b.maxUsd, b.maxWallMs, b.frameBudget, b.maxCalls], [3, 600_000, 2, DEFAULT_BUDGET.maxCalls]);
+  assert.throws(() => budgetFromEnv({ VEDIT_BUDGET_CALLS: "many" }), /VEDIT_BUDGET_CALLS/);
+  assert.throws(() => budgetFromEnv({ VEDIT_BUDGET_USD: "-1" }), /VEDIT_BUDGET_USD/);
+  process.env.VEDIT_BUDGET_REPAIRS = "5";
+  try {
+    assert.equal(new BudgetTracker().budget.maxRepairs, 5, "the tracker reads the environment");
+    assert.equal(new BudgetTracker({ maxRepairs: 1 }).budget.maxRepairs, 1, "an explicit value (flag) wins");
+  } finally {
+    delete process.env.VEDIT_BUDGET_REPAIRS;
+  }
+
+  const limits = limitsCatalog({ VEDIT_BUDGET_USD: "3", VEDIT_PLANNER_MODEL: "claude-sonnet-5-5" });
+  const usd = limits.find((l) => l.id === "budget.maxUsd")!;
+  assert.deepEqual([usd.value, usd.default, usd.set_by], ["$3", "$1.5", "env VEDIT_BUDGET_USD"]);
+  assert.equal(limits.find((l) => l.id === "planner.model")!.value, "claude-sonnet-5-5");
+  assert.ok(limits.some((l) => l.id === "shortlist.long_phrases" && l.value === "250"));
+  const bad = limitsCatalog({ VEDIT_BUDGET_USD: "x" });
+  assert.match(bad.find((l) => l.id === "budget.maxUsd")!.value, /^✖/);
+
+  const s = await moduleStatus({ days: 1, env: {} });
+  const text = formatModules(s, 1);
+  assert.match(text, /ПРЕСЕТЫ[\s\S]*bold_pop[\s\S]*ЛИМИТЫ[\s\S]*budget\.maxUsd/);
+});

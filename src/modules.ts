@@ -10,7 +10,17 @@ import { selectAsr } from "./understand/index.ts";
 import { selectVisionProvider } from "./understand/vision/index.ts";
 import { findAgy } from "./understand/vision/agy.ts";
 import { WHISPER_BIN, WHISPER_MODEL } from "./understand/whisper.ts";
-import { CostSchema, JobSchema, type Cost, type Job, type StepName } from "./schemas/index.ts";
+import { CostSchema, JobSchema, PresetSchema, type Cost, type Job, type Preset, type StepName } from "./schemas/index.ts";
+import { BUDGET_ENV, DEFAULT_BUDGET, budgetFromEnv, type Budget } from "./plan/budget.ts";
+import { BUILTIN_PRESETS, PRESETS_DIR } from "./plan/presets.ts";
+import { COMPACT_ABOVE_TOKENS, MAX_HIGHLIGHTS, MIN_GAP } from "./plan/context.ts";
+import { DEFAULT_MAX_WINDOWS, LONG_PHRASES, LONG_TOKENS } from "./plan/shortlist.ts";
+import { DEFAULT_SCENE_THRESHOLD } from "./understand/shots.ts";
+import { TARGET_FPS } from "./ingest/index.ts";
+import { RESERVE_MB, WORKER_MB } from "./render/workers.ts";
+import { DEFAULT_MODEL } from "./plan/backend/index.ts";
+import { DEFAULT_GEMINI_MODEL } from "./understand/vision/gemini.ts";
+import { DEFAULT_AGY_MODEL } from "./understand/vision/agy.ts";
 
 /**
  * The module registry: every replaceable part of the pipeline, what it depends on (and under
@@ -229,6 +239,88 @@ export const MODULES: ModuleDef[] = [
   },
 ];
 
+// ---- presets: the house styles the planner and the design stage follow ----
+
+export interface PresetEntry {
+  name: string;
+  /** presets/<name>.json, or built-in when the file is missing */
+  source: "file" | "builtin";
+  file?: string;
+  pace: Preset["pace"];
+  clip_seconds: Preset["clip_seconds"];
+  default_aspect: Preset["default_aspect"];
+  caption_style: string;
+  title_style: string;
+  outro: boolean;
+  description: string;
+  /** a file that does not parse is listed with its error instead of hiding it */
+  error?: string;
+}
+
+export async function presetsCatalog(dir = PRESETS_DIR): Promise<PresetEntry[]> {
+  const names = new Map<string, string | null>(Object.keys(BUILTIN_PRESETS).map((n) => [n, null]));
+  try {
+    for (const f of await fs.readdir(dir)) if (f.endsWith(".json")) names.set(f.slice(0, -5), path.join(dir, f));
+  } catch {}
+  const out: PresetEntry[] = [];
+  for (const [name, file] of [...names.entries()].sort()) {
+    try {
+      const p = file ? await readJson(file, PresetSchema) : BUILTIN_PRESETS[name];
+      out.push({ name, source: file ? "file" : "builtin", ...(file ? { file } : {}), pace: p.pace, clip_seconds: p.clip_seconds, default_aspect: p.default_aspect, caption_style: p.caption_style, title_style: p.title_style, outro: p.design.outro.enabled, description: p.description });
+    } catch (err) {
+      out.push({ name, source: "file", file: file ?? undefined, pace: "dynamic", clip_seconds: { min: 0, max: 0 }, default_aspect: "9:16", caption_style: "?", title_style: "?", outro: false, description: "", error: err instanceof Error ? err.message.split("\n")[0] : String(err) });
+    }
+  }
+  return out;
+}
+
+// ---- limits: every number that bounds a run, with where it is set ----
+
+export interface LimitEntry {
+  id: string;
+  module: string;
+  what: string;
+  value: string;
+  default: string;
+  /** "env VEDIT_X" when overridden from the environment, "flag --x" when a flag exists, else "код" */
+  set_by: string;
+}
+
+export function limitsCatalog(env: NodeJS.ProcessEnv = process.env): LimitEntry[] {
+  const out: LimitEntry[] = [];
+  let budget: Budget;
+  let budgetError: string | undefined;
+  try {
+    budget = budgetFromEnv(env);
+  } catch (err) {
+    budget = DEFAULT_BUDGET;
+    budgetError = err instanceof Error ? err.message : String(err);
+  }
+  const flag: Partial<Record<keyof Budget, string>> = { maxUsd: "--budget", maxRepairs: "--max-repairs", frameBudget: "--frames" };
+  for (const key of Object.keys(BUDGET_ENV) as (keyof Budget)[]) {
+    const meta = BUDGET_ENV[key];
+    const show = (v: number) => (key === "maxWallMs" ? `${v / 1000} ${meta.unit}` : `${meta.unit === "$" ? "$" : ""}${v}${meta.unit === "$" ? "" : ` ${meta.unit}`}`);
+    const overridden = !!env[meta.env]?.trim();
+    out.push({ id: `budget.${key}`, module: "planner", what: meta.what, value: budgetError && overridden ? `✖ ${budgetError}` : show(budget[key]), default: show(DEFAULT_BUDGET[key]), set_by: overridden ? `env ${meta.env}` : flag[key] ? `${flag[key]} / env ${meta.env}` : `env ${meta.env}` });
+  }
+  const fixed = (id: string, module: string, what: string, value: string, set_by = "код") => out.push({ id, module, what, value, default: value, set_by });
+  fixed("planner.model", "planner", "модель планировщика", env.VEDIT_PLANNER_MODEL?.trim() || DEFAULT_MODEL, env.VEDIT_PLANNER_MODEL?.trim() ? "env VEDIT_PLANNER_MODEL" : "--model / env VEDIT_PLANNER_MODEL");
+  fixed("planner.compact_above_tokens", "planner", "пак сжимается выше, токенов", String(COMPACT_ABOVE_TOKENS));
+  fixed("planner.max_highlights", "planner", "highlights в паке, не больше", String(MAX_HIGHLIGHTS));
+  fixed("planner.min_gap", "planner", "пауза считается разрезом от, с", String(MIN_GAP));
+  fixed("shortlist.long_phrases", "shortlist", "длинное видео от, фраз", String(LONG_PHRASES), "--long / --no-long");
+  fixed("shortlist.long_tokens", "shortlist", "длинное видео от, токенов пака", String(LONG_TOKENS), "--long / --no-long");
+  fixed("shortlist.max_windows", "shortlist", "окон-кандидатов, не больше", String(DEFAULT_MAX_WINDOWS), "--windows");
+  fixed("vision.model", "vision", "модель понимания кадра", env.VEDIT_VISION_MODEL?.trim() || `${DEFAULT_GEMINI_MODEL} (API) / ${DEFAULT_AGY_MODEL} (agy)`, env.VEDIT_VISION_MODEL?.trim() ? "env VEDIT_VISION_MODEL" : "env VEDIT_VISION_MODEL");
+  fixed("vision.chunk_seconds", "vision", "чанк анализа, с (цель / максимум)", "180 / 300");
+  fixed("scenes.threshold", "scenes", "порог смены шота", String(DEFAULT_SCENE_THRESHOLD));
+  fixed("asr.chunk_seconds", "asr", "кусок речи для whisper.cpp, с", "28");
+  fixed("ingest.fps", "ingest", "кадров в секунду после нормализации", String(TARGET_FPS));
+  fixed("render.worker_mb", "render", "памяти на воркер рендера, МБ (резерв системе)", `${WORKER_MB} (${RESERVE_MB})`, "--workers");
+  fixed("bot.file_mb", "bot", "файл от пользователя / ответ бота, МБ", env.TELEGRAM_API_BASE?.trim() ? "2000 / 2000 (локальный Bot API)" : "20 / 50", "env TELEGRAM_API_BASE");
+  return out;
+}
+
 export interface ModuleUsage {
   runs: number;
   ok: number;
@@ -290,7 +382,14 @@ export async function moduleUsage(days = 30, root = WORKSPACE_ROOT): Promise<Map
   return usage;
 }
 
-export async function moduleStatus(opts: { days?: number; env?: NodeJS.ProcessEnv; root?: string } = {}): Promise<{ modules: ModuleStatus[]; prompts: { files: string[]; hash: string } }> {
+export interface Registry {
+  modules: ModuleStatus[];
+  presets: PresetEntry[];
+  limits: LimitEntry[];
+  prompts: { files: string[]; hash: string };
+}
+
+export async function moduleStatus(opts: { days?: number; env?: NodeJS.ProcessEnv; root?: string; presetsDir?: string } = {}): Promise<Registry> {
   const env = opts.env ?? process.env;
   const usage = await moduleUsage(opts.days ?? 30, opts.root);
   const modules = await Promise.all(
@@ -299,13 +398,24 @@ export async function moduleStatus(opts: { days?: number; env?: NodeJS.ProcessEn
       return { id: m.id, stage: m.stage, title: m.title, ...p, usage: usage.get(m.id)! };
     }),
   );
-  return { modules, prompts: { files: promptNames(), hash: promptsHash() } };
+  return { modules, presets: await presetsCatalog(opts.presetsDir), limits: limitsCatalog(env), prompts: { files: promptNames(), hash: promptsHash() } };
 }
 
-export function formatModules(s: Awaited<ReturnType<typeof moduleStatus>>, days: number): string {
-  const rows = s.modules.map((m) => [m.id, m.stage, m.active, m.ready ? "✔" : "✖", `${m.usage.runs}${m.usage.failed ? ` (${m.usage.failed} ✖)` : ""}`, m.usage.usd ? `$${m.usage.usd.toFixed(2)}` : "—", m.usage.last ? m.usage.last.slice(0, 10) : "—", m.note]);
-  const head = ["модуль", "этап", "бэкенд", "готов", `запусков/${days}д`, "стоимость", "последний", "примечание"];
+function table(head: string[], rows: string[][]): string[] {
   const widths = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
   const line = (r: string[]) => r.map((c, i) => c.padEnd(widths[i])).join("  ").trimEnd();
-  return [line(head), line(widths.map((w) => "─".repeat(w))), ...rows.map(line), "", `промпты: ${s.prompts.files.length} файлов в prompts/, версия ${s.prompts.hash}`].join("\n");
+  return [line(head), line(widths.map((w) => "─".repeat(w))), ...rows.map(line)];
+}
+
+export function formatModules(s: Registry, days: number): string {
+  const modules = table(
+    ["модуль", "этап", "бэкенд", "готов", `запусков/${days}д`, "стоимость", "последний", "примечание"],
+    s.modules.map((m) => [m.id, m.stage, m.active, m.ready ? "✔" : "✖", `${m.usage.runs}${m.usage.failed ? ` (${m.usage.failed} ✖)` : ""}`, m.usage.usd ? `$${m.usage.usd.toFixed(2)}` : "—", m.usage.last ? m.usage.last.slice(0, 10) : "—", m.note]),
+  );
+  const presets = table(
+    ["пресет", "откуда", "темп", "клип, с", "формат", "субтитры", "титры", "аутро", "описание"],
+    s.presets.map((p) => [p.name, p.source === "file" ? "presets/" : "встроенный", p.pace, `${p.clip_seconds.min}–${p.clip_seconds.max}`, p.default_aspect, p.caption_style, p.title_style, p.outro ? "да" : "нет", p.error ? `✖ ${p.error}` : p.description]),
+  );
+  const limits = table(["лимит", "модуль", "что", "значение", "по умолчанию", "задаётся"], s.limits.map((l) => [l.id, l.module, l.what, l.value, l.default, l.set_by]));
+  return [...modules, "", "ПРЕСЕТЫ", ...presets, "", "ЛИМИТЫ", ...limits, "", `промпты: ${s.prompts.files.length} файлов в prompts/, версия ${s.prompts.hash}`].join("\n");
 }

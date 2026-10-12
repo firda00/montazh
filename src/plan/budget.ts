@@ -16,6 +16,29 @@ export const DEFAULT_BUDGET: Budget = {
   frameBudget: 6,
 };
 
+/** Environment overrides of the defaults; flags (--budget, --max-repairs, --frames) win over both. */
+export const BUDGET_ENV: Record<keyof Budget, { env: string; unit: string; what: string }> = {
+  maxUsd: { env: "VEDIT_BUDGET_USD", unit: "$", what: "стоимость одного планирования" },
+  maxWallMs: { env: "VEDIT_BUDGET_WALL_S", unit: "с", what: "время одного планирования" },
+  maxCalls: { env: "VEDIT_BUDGET_CALLS", unit: "запросов", what: "запросов к модели на план" },
+  maxRepairs: { env: "VEDIT_BUDGET_REPAIRS", unit: "раз", what: "попыток исправить план" },
+  maxToolCalls: { env: "VEDIT_BUDGET_TOOL_CALLS", unit: "вызовов", what: "вызовов инструментов на план" },
+  frameBudget: { env: "VEDIT_BUDGET_FRAMES", unit: "кадров", what: "превью-кадров на план" },
+};
+
+/** DEFAULT_BUDGET with VEDIT_BUDGET_* applied; a value that is not a positive number is an error, never silently ignored. */
+export function budgetFromEnv(env: NodeJS.ProcessEnv = process.env): Budget {
+  const b: Budget = { ...DEFAULT_BUDGET };
+  for (const key of Object.keys(BUDGET_ENV) as (keyof Budget)[]) {
+    const raw = env[BUDGET_ENV[key].env]?.trim();
+    if (!raw) continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`${BUDGET_ENV[key].env}: ожидается положительное число, получено "${raw}"`);
+    b[key] = key === "maxWallMs" ? n * 1000 : n;
+  }
+  return b;
+}
+
 export type BudgetExceeded = null | "usd" | "wall" | "calls";
 
 export class BudgetTracker {
@@ -27,7 +50,7 @@ export class BudgetTracker {
   private readonly controller = new AbortController();
 
   constructor(budget: Partial<Budget> = {}, parent?: AbortSignal) {
-    this.budget = { ...DEFAULT_BUDGET, ...budget };
+    this.budget = { ...budgetFromEnv(), ...budget };
     const signals = [this.controller.signal, AbortSignal.timeout(this.budget.maxWallMs)];
     if (parent) signals.push(parent);
     this.signal = AbortSignal.any(signals);
