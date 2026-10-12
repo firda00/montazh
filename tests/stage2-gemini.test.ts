@@ -65,13 +65,22 @@ test("priceUsage: known models priced from the table, unknown ones unpriced", ()
   assert.deepEqual(priceUsage("gemini-9-ultra", { promptTokenCount: 10 }), { usd: 0, priced: false });
 });
 
-test("selectVisionProvider: stub without a key, gemini with one, explicit gemini without key is an error", () => {
-  assert.equal(selectVisionProvider("auto", {}).provider.name, "stub");
-  assert.throws(() => selectVisionProvider("gemini", {}), /GEMINI_API_KEY/);
-  const g = selectVisionProvider("auto", { GEMINI_API_KEY: "k", VEDIT_VISION_MODEL: "gemini-2.5-flash", VEDIT_VISION_RESOLUTION: "low" });
-  assert.equal(g.provider.name, "gemini");
+test("selectVisionProvider: key → gemini, agy on PATH → antigravity-cli, neither → stub; explicit choices fail loudly", async () => {
+  const noAgy = { agy: async () => null };
+  const agy = { agy: async () => "C:/agy/agy.exe" };
+  assert.equal((await selectVisionProvider("auto", {}, noAgy)).provider.name, "stub");
+  await assert.rejects(() => selectVisionProvider("gemini", {}, noAgy), /GEMINI_API_KEY/);
+  await assert.rejects(() => selectVisionProvider("agy", {}, noAgy), /agy/);
+  const g = await selectVisionProvider("auto", { GEMINI_API_KEY: "k", VEDIT_VISION_MODEL: "gemini-2.5-flash", VEDIT_VISION_RESOLUTION: "low" }, agy);
+  assert.equal(g.provider.name, "gemini", "the API key wins over the CLI");
   assert.match(g.note, /gemini-2\.5-flash, low res/);
-  assert.throws(() => selectVisionProvider("auto", { GEMINI_API_KEY: "k", VEDIT_VISION_RESOLUTION: "huge" }), /VEDIT_VISION_RESOLUTION/);
+  await assert.rejects(() => selectVisionProvider("auto", { GEMINI_API_KEY: "k", VEDIT_VISION_RESOLUTION: "huge" }, agy), /VEDIT_VISION_RESOLUTION/);
+  const a = await selectVisionProvider("auto", {}, agy);
+  assert.equal(a.provider.name, "antigravity-cli");
+  assert.match(a.note, /gemini-3\.8-flash-low/);
+  assert.equal((await selectVisionProvider("auto", { VEDIT_VISION: "stub", GEMINI_API_KEY: "k" }, agy)).provider.name, "stub", "VEDIT_VISION overrides auto");
+  assert.equal((await selectVisionProvider("auto", { VEDIT_VISION: "agy", GEMINI_API_KEY: "k", VEDIT_VISION_MODEL: "gemini-3.1-pro-low" }, agy)).note, "vision: antigravity-cli (gemini-3.1-pro-low, вход Google, без ключа)");
+  await assert.rejects(() => selectVisionProvider("auto", { VEDIT_VISION: "nope" }, agy), /VEDIT_VISION/);
 });
 
 const answer = {

@@ -110,7 +110,7 @@ export async function understand(jobId: string, media: Media, opts: UnderstandOp
   }
 
   // 4. vision model per chunk
-  const { provider, note } = selectVisionProvider(opts.vision);
+  const { provider, note } = await selectVisionProvider(opts.vision);
   const chunks = makeChunks(shots, opts.chunkSeconds);
   const scenes: Scenes = [];
   const highlights: Highlights = [];

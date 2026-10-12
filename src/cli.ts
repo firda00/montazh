@@ -200,7 +200,7 @@ withRenderOptions(
       .option("--no-snap", "не подтягивать границы клипов к границам слов")
       .option("--no-render", "остановиться после черновой нарезки")
       .option("--language <code>", "язык речи для whisper (по умолчанию auto)")
-      .option("--vision <provider>", "stub | auto | gemini", "auto"),
+      .option("--vision <provider>", "stub | auto | gemini | agy", "auto"),
   ),
 ).action(async (video: string, opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; render: boolean; language?: string; vision: VisionChoice } & PlannerCliOpts & RenderCliOpts) => {
   try {
@@ -289,7 +289,7 @@ program
   .option("--language <code>", "язык речи для whisper (по умолчанию auto)")
   .option("--threads <n>", "потоки whisper", (v) => Number(v))
   .option("--method <m>", "dtw | tokens — способ пословных таймкодов", "dtw")
-  .option("--vision <provider>", "stub | auto | gemini", "auto")
+  .option("--vision <provider>", "stub | auto | gemini | agy", "auto")
   .action(async (jobId: string, opts: { language?: string; threads?: number; method: "dtw" | "tokens"; vision: VisionChoice }) => {
     try {
       await loadJob(jobId);

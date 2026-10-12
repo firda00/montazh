@@ -83,7 +83,7 @@ export const RESPONSE_SCHEMA = {
   propertyOrdering: ["scenes", "highlights"],
 };
 
-const ModelAnswer = z.object({
+export const ModelAnswerSchema = z.object({
   scenes: z.array(
     z.object({
       shot: z.number(),
@@ -99,7 +99,7 @@ const ModelAnswer = z.object({
   ),
   highlights: z.array(z.object({ start: z.number(), end: z.number(), reason: z.string(), score: z.number() })).default([]),
 });
-export type ModelAnswer = z.infer<typeof ModelAnswer>;
+export type ModelAnswer = z.infer<typeof ModelAnswerSchema>;
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, Number.isFinite(n) ? n : 0));
 const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -271,7 +271,7 @@ export class GeminiVisionProvider implements VisionProvider {
     if (!text) throw new GeminiError(`Gemini returned no text (finishReason ${cand?.finishReason ?? "?"})`);
     let parsed: ModelAnswer;
     try {
-      parsed = ModelAnswer.parse(JSON.parse(text));
+      parsed = ModelAnswerSchema.parse(JSON.parse(text));
     } catch (err) {
       throw new GeminiError(`Gemini answer is not the expected JSON: ${err instanceof Error ? err.message : err}`);
     }
