@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ModelAnswerSchema, RESPONSE_SCHEMA, mapAnswer, type ModelAnswer } from "./gemini.ts";
+import { fill, loadPrompt } from "../../lib/prompts.ts";
 import type { AnalysisChunk, AnalysisContext, VisionProvider, VisionResult } from "./types.ts";
 
 /**
@@ -77,16 +78,7 @@ export function buildAgyPrompt(chunk: AnalysisChunk, ctx: AnalysisContext, frame
     })
     .join("\n");
   const phrases = chunk.phrases.map((p) => `  ${rel(p.start)}-${rel(p.end)}s: ${p.text}`).join("\n");
-  return [
-    "You are a video editor's assistant. Do not write or run anything except viewing the listed image files.",
-    `This is a ${r2(len)} second part of a longer video (it starts at ${r2(chunk.start)}s of the original; all times here and in your answer are relative to this part). Frame is ${ctx.media.width}x${ctx.media.height}; speech language: ${ctx.language}.`,
-    `The part is split into shots by a scene detector; each shot has one representative frame (a JPEG in the current directory). VIEW EVERY FRAME FILE with your file viewing tool before answering, then describe every shot by its index: one scenes[] entry per shot. Describe only what the frame shows — nothing invented. If a frame is too dark or blurred to judge, say so and give a low quality_score.`,
-    `Shots:\n${shots || "  (none)"}`,
-    `Transcript (what is said):\n${phrases || "  (no speech)"}`,
-    "For each shot give focus_x/focus_y: where the main speaker's face (or the main product/subject) is in the frame, as fractions of width and height, so the shot can be cropped to 9:16 around it. Use null for both when there is no clear subject.",
-    "Then list up to 8 highlights: the moments worth a short vertical clip (a strong statement, a visual payoff, emotion, the product shown). Prefer ranges that start and end at sentence boundaries of the transcript. Write reasons in the language of the speech when it is Russian or Uzbek, otherwise in English.",
-    "Answer with the JSON object only.",
-  ].join("\n\n");
+  return fill(loadPrompt("vision.agy.user"), { len: r2(len), start: r2(chunk.start), width: ctx.media.width, height: ctx.media.height, language: ctx.language, shots: shots || "  (none)", transcript: phrases || "  (no speech)" });
 }
 
 /** The CLI's final line in stream-json mode. */

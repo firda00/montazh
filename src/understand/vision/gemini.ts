@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { ffmpeg } from "../../lib/ffmpeg.ts";
+import { fill, loadPrompt } from "../../lib/prompts.ts";
 import type { Highlights, Scenes } from "../../schemas/index.ts";
 import type { AnalysisChunk, AnalysisContext, VisionProvider, VisionResult } from "./types.ts";
 
@@ -109,14 +110,7 @@ export function buildPrompt(chunk: AnalysisChunk, ctx: AnalysisContext): string 
   const rel = (t: number) => r2(Math.min(len, Math.max(0, t - chunk.start)));
   const shots = chunk.shots.map((s) => `  ${s.index}: ${rel(s.start)}-${rel(s.end)}s`).join("\n");
   const phrases = chunk.phrases.map((p) => `  ${rel(p.start)}-${rel(p.end)}s: ${p.text}`).join("\n");
-  return [
-    `This clip is ${r2(len)} seconds of a longer video (it starts at ${r2(chunk.start)}s of the original; all times below and in your answer are relative to the clip start). Frame is ${ctx.media.width}x${ctx.media.height}; speech language: ${ctx.language}.`,
-    "The clip is already split into shots by a scene detector. Describe EVERY shot by its index: one scenes[] entry per shot, nothing invented. If a shot is too short or too dark to judge, say so in the description and give a low quality_score.",
-    `Shots:\n${shots || "  (none)"}`,
-    `Transcript (what is said; the clip itself is silent):\n${phrases || "  (no speech)"}`,
-    "For each shot also give focus_x/focus_y: where the main speaker's face (or the main product/subject) is, as fractions of the frame, so the clip can be cropped to 9:16 around it. Leave both null when there is no clear subject.",
-    "Then list up to 8 highlights: the moments worth a short vertical clip (a strong statement, a visual payoff, emotion, the product shown). Prefer ranges that start and end at sentence boundaries of the transcript. Write reasons in the language of the speech when it is Russian or Uzbek, otherwise in English.",
-  ].join("\n\n");
+  return fill(loadPrompt("vision.gemini.user"), { len: r2(len), start: r2(chunk.start), width: ctx.media.width, height: ctx.media.height, language: ctx.language, shots: shots || "  (none)", transcript: phrases || "  (no speech)" });
 }
 
 export interface GeminiUsage {
@@ -251,7 +245,7 @@ export class GeminiVisionProvider implements VisionProvider {
     const generationConfig: Record<string, unknown> = { responseMimeType: "application/json", responseSchema: RESPONSE_SCHEMA, temperature: 0.2 };
     if (this.o.mediaResolution !== "default") generationConfig.mediaResolution = `MEDIA_RESOLUTION_${this.o.mediaResolution.toUpperCase()}`;
     const body = {
-      systemInstruction: { parts: [{ text: "You are a video editor's assistant. You describe exactly what is in the footage, never guess what you cannot see, and answer only with the requested JSON." }] },
+      systemInstruction: { parts: [{ text: loadPrompt("vision.gemini.system") }] },
       contents: [{ role: "user", parts: [mediaPart, { text: buildPrompt(chunk, ctx) }] }],
       generationConfig,
     };

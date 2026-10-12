@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { StructuredFn } from "../lib/llm.ts";
+import { fill, loadPrompt } from "../lib/prompts.ts";
 import type { Highlights, Transcript } from "../schemas/index.ts";
 import { estimateTokens, round2 } from "./context.ts";
 
@@ -125,16 +126,18 @@ export async function shortlist(a: ShortlistArgs): Promise<ShortlistResult> {
   if (!a.llm) return fallback("shortlist: top highlights (no model)");
   const index = phraseIndex(a.transcript);
   const speakers = [...new Set(a.transcript.segments.map((p) => p.speaker).filter(Boolean))];
-  const prompt = [
-    `INSTRUCTION: ${a.instruction}`,
-    `The video has ${a.transcript.segments.length} phrases (${mmss(a.transcript.segments.at(-1)?.end ?? 0)} of speech).${speakers.length ? ` Speakers: ${speakers.join(", ")} (S1 talks the most).` : ""}`,
-    `Pick up to ${max} candidate windows for the instruction: moments a short-form editor would cut from — a strong claim, a story with a payoff, a concrete tip, emotion, a product shown. A window is a run of consecutive phrases (from pN to pM inclusive), at most ${maxSec} seconds; choose complete thoughts, spread across the whole video unless the instruction says otherwise. Do not pick everything: what you skip will not be seen by the editor.`,
-    "PHRASES:",
+  const prompt = fill(loadPrompt("shortlist.user"), {
+    instruction: a.instruction,
+    count: a.transcript.segments.length,
+    speech: mmss(a.transcript.segments.at(-1)?.end ?? 0),
+    speakers: speakers.length ? ` Speakers: ${speakers.join(", ")} (S1 talks the most).` : "",
+    max,
+    max_seconds: maxSec,
     index,
-  ].join("\n");
+  });
   a.onEvent?.(`  shortlist: ${a.transcript.segments.length} фраз → ≤${max} окон (${estimateTokens(prompt)} токенов)`);
   try {
-    const res = await a.llm({ system: "You pre-select material for a short-form video editor. Answer with JSON only.", prompt, schema: PickSchema, effort: "low", maxTokens: 4000 });
+    const res = await a.llm({ system: loadPrompt("shortlist.system"), prompt, schema: PickSchema, effort: "low", maxTokens: 4000 });
     const out = PickOut.parse(res.data);
     const segs = a.transcript.segments;
     const raw: Omit<Window, "id">[] = [];

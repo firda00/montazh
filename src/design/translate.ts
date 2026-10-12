@@ -4,6 +4,7 @@ import { addCost } from "../lib/cost.ts";
 import { exists, jobDir, readJson, writeJson } from "../lib/workspace.ts";
 import { zodToApiSchema } from "../plan/schema-sanitize.ts";
 import type { StructuredFn } from "../lib/llm.ts";
+import { fill, loadPrompt } from "../lib/prompts.ts";
 import { partKey, type OutPhrase, type OutWord } from "./timeline.ts";
 
 export const LANGUAGE_NAMES: Record<string, string> = {
@@ -23,7 +24,7 @@ export const TranslationCacheSchema = z.object({
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
 
-export const TRANSLATE_SYSTEM = `You translate short-video subtitle lines. Rules: keep each line's meaning; keep it about as long as the original (it is shown as captions, 2–4 words at a time); keep numbers, names and brand names; natural spoken register; no quotes, no explanations. Return JSON {"items":[{"i":<same id>,"text":"<translation>"}]} with exactly one item per input id, in the same order.`;
+export const TRANSLATE_SYSTEM = loadPrompt("translate.system");
 
 /**
  * Translates the phrase PARTS that are not already in `target`, through a cache in the job dir.
@@ -49,7 +50,7 @@ export async function translatePhrases(jobId: string, phrases: OutPhrase[], targ
   }
   if (todo.length) {
     const langs = [...new Set(todo.map((t) => t.lang))].map((l) => LANGUAGE_NAMES[l] ?? l).join(", ");
-    const prompt = `Translate from ${langs} to ${LANGUAGE_NAMES[target] ?? target}.\n${JSON.stringify({ items: todo.map(({ i, text }) => ({ i, text })) })}`;
+    const prompt = fill(loadPrompt("translate.user"), { from: langs, to: LANGUAGE_NAMES[target] ?? target, items: JSON.stringify({ items: todo.map(({ i, text }) => ({ i, text })) }) });
     const res = await llm({ system: TRANSLATE_SYSTEM, prompt, schema: zodToApiSchema(TranslationSchema), model: opts.model, effort: "low", maxTokens: 8000 });
     // the call is paid whatever the answer looks like: log it before validating
     await addCost(jobId, { step: "design", provider: res.provider, model: res.model, units: { ...res.usage, calls: 1, estimate: res.estimate ? 1 : 0, unpriced: res.priced === false ? 1 : 0, phrases: todo.length }, usd: res.usd });

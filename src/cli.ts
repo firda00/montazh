@@ -470,4 +470,31 @@ program
     }
   });
 
+program
+  .command("modules")
+  .description("реестр модулей: бэкенд, готовность, использование и стоимость по задачам")
+  .option("--days <n>", "окно статистики, дней", (v) => Number(v), 30)
+  .option("--json", "вывести JSON")
+  .option("--licenses", "показать зависимости и лицензии каждого бэкенда")
+  .action(async (opts: { days: number; json?: boolean; licenses?: boolean }) => {
+    try {
+      const { moduleStatus, formatModules, MODULES } = await import("./modules.ts");
+      const s = await moduleStatus({ days: opts.days });
+      if (opts.json) {
+        console.log(JSON.stringify({ ...s, registry: MODULES.map((m) => ({ id: m.id, stage: m.stage, title: m.title, what: m.what, selector: m.selector, backends: m.backends })) }, null, 2));
+        return;
+      }
+      console.log(formatModules(s, opts.days));
+      if (opts.licenses) {
+        console.log("");
+        for (const m of MODULES) {
+          console.log(`${m.id} — ${m.title}: ${m.what}\n  выбор: ${m.selector}`);
+          for (const b of m.backends) console.log(`  · ${b.id}: ${b.title} — ${b.deps} — ${b.license}`);
+        }
+      }
+    } catch (err) {
+      fail(err);
+    }
+  });
+
 program.parseAsync();
