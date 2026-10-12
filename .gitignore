@@ -7,3 +7,5 @@ vendor/*
 !vendor/gsap/
 tests/fixtures/*.json
 .repro/
+tools/asr/.venv/
+tools/asr/models/

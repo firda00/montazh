@@ -167,7 +167,7 @@ export const runFullPipeline: PipelineFn = async ({ source, instruction, preset,
   checkCancel(signal);
 
   await progress(`▸ анализ речи… (${media.duration.toFixed(0)} с видео)`);
-  const u = await runStep(job.id, "understand", () => understand(job.id, media, {}));
+  const u = await runStep(job.id, "understand", () => understand(job.id, media, { onLog: (l) => log(`    ${l}`) }));
   checkCancel(signal);
 
   await progress("▸ план…");

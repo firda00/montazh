@@ -240,7 +240,7 @@ export interface TranscribeResult {
   transcript: Transcript;
   chunks: ChunkRecord[];
   model: string;
-  method: TimestampMethod;
+  method: TimestampMethod | "faster-whisper";
   wall_seconds: number;
   warnings: string[];
 }

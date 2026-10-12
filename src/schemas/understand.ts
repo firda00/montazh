@@ -13,10 +13,26 @@ export const TranscriptSchema = z.object({
       text: z.string(),
       words: z.array(WordSchema),
       lang: z.string().optional(), // per-phrase language when the video mixes languages
+      speaker: z.string().optional(), // S1, S2… from speaker labelling (S1 talks the most)
     }),
   ),
 });
 export type Transcript = z.infer<typeof TranscriptSchema>;
+
+/** speakers.json — who talks how much; ids match transcript segments' `speaker`. */
+export const SpeakersSchema = z.object({
+  engine: z.string(),
+  speakers: z.array(
+    z.object({
+      id: z.string(),
+      seconds: z.number(),
+      phrases: z.number().int(),
+      first_at: z.number(),
+      sample: z.string(),
+    }),
+  ),
+});
+export type Speakers = z.infer<typeof SpeakersSchema>;
 
 export const ScenesSchema = z.array(
   z.object({

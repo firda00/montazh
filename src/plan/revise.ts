@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { exists, jobDir, loadJob, readJson, writeJson } from "../lib/workspace.ts";
-import { EdlSchema, ReviseReportSchema, type Edl, type ReviseReport } from "../schemas/index.ts";
+import { EdlSchema, PlanReportSchema, ReviseReportSchema, type Edl, type ReviseReport } from "../schemas/index.ts";
 import { PlanError } from "./backend/types.ts";
 import { diffEdl, needsCut } from "./diff.ts";
 import { buildReport, loadPlanInputs, runPlanning, type PlanOptions } from "./index.ts";
@@ -26,7 +26,10 @@ export async function revise(jobId: string, opts: ReviseOptions): Promise<Revise
   const edlFile = path.join(dir, "edl.json");
   if (!(await exists(edlFile))) throw new PlanError(`в задаче ${jobId} нет edl.json — сначала vedit plan ${jobId} -p "…"`, "missing_inputs");
   const current = await readJson(edlFile, EdlSchema);
-  const inputs = await loadPlanInputs(jobId, opts.preset ?? job.preset ?? "bold_pop");
+  // the pack must be the one the current plan was built from, or its refs (pN, wN) would point elsewhere
+  const planFile = path.join(dir, "plan.json");
+  const previous = (await exists(planFile)) ? await readJson(planFile, PlanReportSchema) : null;
+  const inputs = await loadPlanInputs(jobId, opts.preset ?? job.preset ?? "bold_pop", { reuse: { speaker: previous?.speaker, windows: previous?.windows }, onEvent: opts.onEvent });
 
   const task: LoopTask = { kind: "revise", instruction: opts.edit, currentEdl: current, presetName: inputs.presetName };
   const run = await runPlanning({ jobId, ctx: inputs.ctx, task, opts: { ...opts, instruction: opts.edit }, step: "revise" });

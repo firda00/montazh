@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import type { Highlights, Media, Preset, Scenes, Transcript } from "../schemas/index.ts";
+import type { Highlights, Media, Preset, Scenes, Speakers, Transcript } from "../schemas/index.ts";
+import type { Window } from "./shortlist.ts";
 
 type Word = Transcript["segments"][number]["words"][number];
 
@@ -11,6 +12,7 @@ export interface CtxPhrase {
   lang: string;
   text: string;
   words: Word[];
+  speaker?: string;
 }
 export interface CtxScene {
   id: string;
@@ -41,7 +43,7 @@ export interface CtxHighlight {
   reason: string;
 }
 
-export type PackMode = "full" | "compact";
+export type PackMode = "full" | "compact" | "shortlist";
 
 export interface PlanContext {
   media: Media;
@@ -52,6 +54,12 @@ export interface PlanContext {
   scenes: CtxScene[];
   gaps: CtxGap[];
   highlights: CtxHighlight[];
+  speakers: Speakers["speakers"];
+  /** long-video mode: only these windows of the video are in the pack */
+  windows: Window[];
+  /** who is talking in the pack: all phrases belong to this speaker */
+  speaker?: string;
+  omitted: { phrases: number; scenes: number };
   mode: PackMode;
   packText: string;
   packHash: string;
@@ -73,14 +81,18 @@ export function phrasesOverlapping(ctx: Pick<PlanContext, "phrases">, start: num
   return ctx.phrases.filter((p) => p.start < end && p.end > start);
 }
 
-function gapsFromPhrases(phrases: CtxPhrase[], duration: number): CtxGap[] {
+function gapsFromPhrases(phrases: CtxPhrase[], duration: number, windows: Window[] = []): CtxGap[] {
   const spans: { start: number; end: number }[] = [];
-  let cursor = 0;
-  for (const p of phrases) {
-    if (p.start - cursor >= MIN_GAP) spans.push({ start: cursor, end: p.start });
-    cursor = Math.max(cursor, p.end);
+  // silences are only meaningful inside the ranges the pack covers: the whole video, or each window
+  const ranges = windows.length ? windows.map((w) => [w.start, w.end] as const) : [[0, duration] as const];
+  for (const [lo, hi] of ranges) {
+    let cursor = lo;
+    for (const p of phrases.filter((p) => p.start < hi && p.end > lo)) {
+      if (p.start - cursor >= MIN_GAP) spans.push({ start: cursor, end: p.start });
+      cursor = Math.max(cursor, p.end);
+    }
+    if (hi - cursor >= MIN_GAP) spans.push({ start: cursor, end: hi });
   }
-  if (duration - cursor >= MIN_GAP) spans.push({ start: cursor, end: duration });
   return spans.map((s, i) => ({ id: `g${i}`, start: round2(s.start), end: round2(s.end) }));
 }
 
@@ -90,16 +102,23 @@ export interface ContextInput {
   scenes: Scenes;
   highlights: Highlights;
   preset: Preset;
+  speakers?: Speakers;
+  /** keep only this speaker's phrases (and the highlights that touch them) */
+  speaker?: string;
+  /** long-video mode: keep only what lies inside these windows */
+  windows?: Window[];
 }
 
 export function buildPlanContext(input: ContextInput): PlanContext {
   const duration = input.media.duration;
-  const phrases: CtxPhrase[] = [...input.transcript.segments]
-    .sort((a, b) => a.start - b.start)
-    .map((s, i) => ({ id: `p${i}`, index: i, start: s.start, end: s.end, lang: s.lang ?? input.transcript.language, text: s.text, words: s.words }));
+  const windows = input.windows ?? [];
+  const inWindows = (start: number, end: number) => !windows.length || windows.some((w) => start < w.end && end > w.start);
+  const allSegments = [...input.transcript.segments].sort((a, b) => a.start - b.start);
+  const keptSegments = allSegments.filter((s) => (!input.speaker || s.speaker === input.speaker) && inWindows(s.start, s.end));
+  const phrases: CtxPhrase[] = keptSegments.map((s, i) => ({ id: `p${i}`, index: i, start: s.start, end: s.end, lang: s.lang ?? input.transcript.language, text: s.text, words: s.words, ...(s.speaker ? { speaker: s.speaker } : {}) }));
   const base = { phrases };
-  const scenes: CtxScene[] = [...input.scenes]
-    .sort((a, b) => a.start - b.start)
+  const keptScenes = [...input.scenes].sort((a, b) => a.start - b.start).filter((s) => inWindows(s.start, s.end));
+  const scenes: CtxScene[] = keptScenes
     .map((s, i) => ({
       id: `s${i}`,
       index: i,
@@ -114,16 +133,18 @@ export function buildPlanContext(input: ContextInput): PlanContext {
       is_stub: s.description.startsWith("[stub]"),
       phrases: phrasesOverlapping(base, s.start, s.end).map((p) => p.id),
     }));
-  const gaps = gapsFromPhrases(phrases, duration);
+  const gaps = gapsFromPhrases(phrases, duration, windows);
   const highlights: CtxHighlight[] = [...input.highlights]
     .sort((a, b) => b.score - a.score)
+    .filter((h) => inWindows(h.start, h.end) && (!input.speaker || phrasesOverlapping(base, h.start, h.end).length > 0))
     .slice(0, MAX_HIGHLIGHTS)
     .map((h, i) => ({ id: `h${i}`, rank: i + 1, score: h.score, start: h.start, end: h.end, phrases: phrasesOverlapping(base, h.start, h.end).map((p) => p.id), reason: h.reason }));
 
-  const partial = { media: input.media, transcript: input.transcript, preset: input.preset, duration, phrases, scenes, gaps, highlights };
-  let mode: PackMode = "full";
+  const omitted = { phrases: allSegments.length - keptSegments.length, scenes: input.scenes.length - keptScenes.length };
+  const partial = { media: input.media, transcript: input.transcript, preset: input.preset, duration, phrases, scenes, gaps, highlights, speakers: input.speakers?.speakers ?? [], windows, speaker: input.speaker, omitted };
+  let mode: PackMode = windows.length ? "shortlist" : "full";
   let packText = renderPack({ ...partial, mode });
-  if (estimateTokens(packText) > COMPACT_ABOVE_TOKENS) {
+  if (mode === "full" && estimateTokens(packText) > COMPACT_ABOVE_TOKENS) {
     mode = "compact";
     packText = renderPack({ ...partial, mode });
   }
@@ -136,7 +157,7 @@ const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` 
 export function renderPack(ctx: Omit<PlanContext, "packText" | "packHash" | "tokenEstimate">): string {
   const compact = ctx.mode === "compact";
   const langs = [...new Set(ctx.phrases.map((p) => p.lang))].sort();
-  const pack = {
+  const pack: Record<string, unknown> = {
     media: {
       duration_s: round2(ctx.duration),
       fps: ctx.media.fps,
@@ -156,7 +177,10 @@ export function renderPack(ctx: Omit<PlanContext, "packText" | "packHash" | "tok
       default_aspect: ctx.preset.default_aspect,
       notes: ctx.preset.notes,
     },
-    phrases: ctx.phrases.map((p) => ({ id: p.id, start: round2(p.start), end: round2(p.end), lang: p.lang, text: compact ? cut(p.text, 60) : p.text })),
+    ...(ctx.speakers.length ? { speakers: ctx.speakers.map((s) => ({ id: s.id, seconds: round2(s.seconds), phrases: s.phrases, sample: cut(s.sample, 80) })), ...(ctx.speaker ? { speaker_filter: ctx.speaker } : {}) } : {}),
+    ...(ctx.windows.length ? { windows: ctx.windows.map((w) => ({ id: w.id, start: round2(w.start), end: round2(w.end), why: w.why, phrases: phrasesOverlapping(ctx, w.start, w.end).map((p) => p.id) })) } : {}),
+    ...(ctx.omitted.phrases || ctx.omitted.scenes ? { omitted: ctx.omitted } : {}),
+    phrases: ctx.phrases.map((p) => ({ id: p.id, start: round2(p.start), end: round2(p.end), lang: p.lang, ...(p.speaker ? { spk: p.speaker } : {}), text: compact ? cut(p.text, 60) : p.text })),
     gaps: ctx.gaps.map((g) => ({ id: g.id, start: round2(g.start), end: round2(g.end) })),
     scenes: ctx.scenes.map((s) => ({
       id: s.id,

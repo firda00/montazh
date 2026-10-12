@@ -9,10 +9,12 @@ import {
   MediaSchema,
   PlanReportSchema,
   ScenesSchema,
+  SpeakersSchema,
   TranscriptSchema,
   type Edl,
   type PlanReport,
   type ToolCallRecord,
+  type Transcript,
 } from "../schemas/index.ts";
 import { DEFAULT_MODEL, selectBackend, type BackendChoice, type Effort } from "./backend/index.ts";
 import { PlanError, type Contract, type PlannerBackend, type Turn } from "./backend/types.ts";
@@ -23,6 +25,9 @@ import { loadPreset } from "./presets.ts";
 import { PROMPT_VERSION, SUBMIT_ADDENDUM, SYSTEM_PROMPT } from "./prompt.ts";
 import { draftJsonSchema } from "./schema-sanitize.ts";
 import { makePlannerTools, newToolState, type ToolDeps } from "./tools.ts";
+import { isLong, shortlist, type Window } from "./shortlist.ts";
+import { resolveSpeaker } from "../understand/asr.ts";
+import { selectStructuredLlm, type StructuredFn } from "../lib/llm.ts";
 
 export interface PlanOptions {
   instruction: string;
@@ -39,6 +44,13 @@ export interface PlanOptions {
   onEvent?: (line: string) => void;
   /** test hook: replaces ffmpeg frame extraction */
   extractFrame?: ToolDeps["extractFrame"];
+  /** plan only this person's phrases: S<n>, a time in the video (mm:ss) or "most" */
+  speaker?: string;
+  /** long-video mode (shortlist stage); default: by size */
+  long?: boolean;
+  maxWindows?: number;
+  /** test hook: the shortlist call */
+  shortlistLlm?: StructuredFn;
 }
 
 export interface PlanResult {
@@ -53,7 +65,18 @@ export interface LoadedInputs {
   presetName: string;
 }
 
-export async function loadPlanInputs(jobId: string, presetName: string): Promise<LoadedInputs> {
+export interface SelectOptions {
+  speaker?: string;
+  long?: boolean;
+  maxWindows?: number;
+  instruction?: string;
+  llm?: StructuredFn;
+  onEvent?: (line: string) => void;
+  /** revise: the speaker/windows of the plan being edited, so the pack (and its refs) is the same */
+  reuse?: { speaker?: string; windows?: Window[] };
+}
+
+export async function loadPlanInputs(jobId: string, presetName: string, sel: SelectOptions = {}): Promise<LoadedInputs> {
   const dir = jobDir(jobId);
   const mediaFile = path.join(dir, "media.json");
   if (!(await exists(mediaFile))) throw new PlanError(`нет media.json в задаче ${jobId}: сначала vedit ingest / vedit run`, "missing_inputs");
@@ -65,12 +88,45 @@ export async function loadPlanInputs(jobId: string, presetName: string): Promise
     warnings.push(`${name} отсутствует — планирование без него`);
     return empty;
   };
-  const transcript = await optional("transcript.json", TranscriptSchema, { language: "unknown", segments: [] });
+  const transcript = await optional<Transcript>("transcript.json", TranscriptSchema, { language: "unknown", segments: [] });
   const scenes = await optional("scenes.json", ScenesSchema, []);
   const highlights = await optional("highlights.json", HighlightsSchema, []);
   const { preset, note } = await loadPreset(presetName);
   if (note) warnings.push(note);
-  const ctx = buildPlanContext({ media, transcript, scenes, highlights, preset });
+  const speakersFile = path.join(dir, "speakers.json");
+  const speakers = (await exists(speakersFile)) ? await readJson(speakersFile, SpeakersSchema) : undefined;
+
+  // who: an explicit speaker, or the one the plan being revised was built for
+  let speaker = sel.reuse?.speaker;
+  if (sel.speaker) {
+    if (!speakers) throw new PlanError(`--speaker: в задаче ${jobId} нет speakers.json — говорящие размечаются на этапе understand (нужен сайдкар tools/asr)`, "missing_inputs");
+    speaker = resolveSpeaker(sel.speaker, transcript, speakers);
+    warnings.push(`только говорящий ${speaker} (${speakers.speakers.find((s) => s.id === speaker)?.seconds ?? 0}s речи)`);
+  }
+
+  // long video: shortlist stage picks the windows the planner will see
+  let windows = sel.reuse?.windows;
+  if (!windows) {
+    const probe = buildPlanContext({ media, transcript, scenes, highlights, preset, speakers, speaker });
+    const filtered = speaker ? { ...transcript, segments: transcript.segments.filter((s) => s.speaker === speaker) } : transcript;
+    const long = sel.long ?? isLong(filtered, probe.tokenEstimate);
+    if (long) {
+      let llm = sel.llm;
+      if (!llm) {
+        try {
+          llm = selectStructuredLlm();
+        } catch {}
+      }
+      const r = await shortlist({ transcript: filtered, highlights, instruction: sel.instruction ?? "", llm, maxWindows: sel.maxWindows, onEvent: sel.onEvent });
+      windows = r.windows;
+      warnings.push(r.note);
+      if (r.usage) {
+        await addCost(jobId, { step: "plan", provider: r.provider === "anthropic" ? "anthropic" : (r.provider ?? "shortlist"), model: r.model ?? "shortlist", units: { ...r.usage, calls: 1, shortlist: 1, estimate: r.estimate ? 1 : 0 }, usd: r.usd });
+      }
+    }
+  }
+  const ctx = buildPlanContext({ media, transcript, scenes, highlights, preset, speakers, speaker, windows });
+  if (ctx.windows.length) sel.onEvent?.(`  окна: ${ctx.windows.map((w) => `${w.id} ${Math.round(w.start)}-${Math.round(w.end)}s`).join(", ")}`);
   return { ctx, warnings, presetName: preset.name };
 }
 
@@ -169,6 +225,8 @@ export function buildReport(kind: "plan" | "revise", loop: LoopResult, extra: { 
     model: extra.backend.model,
     effort: extra.effort,
     mode: extra.ctx.mode,
+    speaker: extra.ctx.speaker,
+    windows: extra.ctx.windows.length ? extra.ctx.windows : undefined,
     pack_hash: extra.ctx.packHash,
     pack_tokens_estimate: extra.ctx.tokenEstimate,
     prompt_version: PROMPT_VERSION,
@@ -200,7 +258,7 @@ export async function plan(jobId: string, opts: PlanOptions): Promise<PlanResult
   const dir = jobDir(jobId);
   const job = await loadJob(jobId);
   const presetName = opts.preset ?? job.preset ?? "bold_pop";
-  const inputs = await loadPlanInputs(jobId, presetName);
+  const inputs = await loadPlanInputs(jobId, presetName, { speaker: opts.speaker, long: opts.long, maxWindows: opts.maxWindows, instruction: opts.instruction, llm: opts.shortlistLlm, onEvent: opts.onEvent });
   await writeJson(path.join(dir, "job.json"), JobSchema, { ...job, prompt: opts.instruction, preset: inputs.presetName });
 
   const task: LoopTask = { kind: "plan", instruction: opts.instruction, presetName: inputs.presetName };

@@ -1,7 +1,7 @@
 import type { PlanDraft, PlanIssue } from "../schemas/index.ts";
 import { formatIssuesForModel } from "./resolve.ts";
 
-export const PROMPT_VERSION = "2026-10-10.1";
+export const PROMPT_VERSION = "2026-10-12.1";
 
 // Frozen: no interpolation, no job data, no dates — this block is prompt-cached across jobs.
 export const SYSTEM_PROMPT = `You are the planning stage of an automated short-form video editor. You receive an analysis PACK of one source video and an INSTRUCTION from the user, and you return a cut plan as JSON. You never render anything; a harness cuts the video from your plan.
@@ -9,7 +9,8 @@ export const SYSTEM_PROMPT = `You are the planning stage of an automated short-f
 PACK FORMAT
 - media: duration_s, fps, size, speech language(s), mode (full = complete phrase texts; compact = texts truncated, fetch details with tools).
 - preset: pace, clip length range, caption/title styles, default aspect, notes — the house style to follow.
-- phrases: pN with start/end seconds, language and text, in time order. These are the speech units.
+- phrases: pN with start/end seconds, language and text, in time order. These are the speech units. "spk" (S1, S2...) is the speaker label from voice clustering; "speakers" lists who talks how much (S1 the most). When "speaker_filter" is set, the pack holds only that person's phrases and every clip must come from them.
+- windows (mode shortlist, long videos): only the listed windows wN of the video are in the pack; "omitted" counts what was left out. Cut only inside windows: refs outside them do not exist.
 - gaps: gN — silences of 0.5 s or more between phrases (and leading/trailing silence).
 - scenes: sN — shot boundaries from a cut detector with start/end and metadata. If is_stub is true, the description carries NO visual information (no model saw the frames); only the boundaries are real.
 - highlights: hN — candidate moments ranked by a heuristic (complete phrase, length, loudness). Reasons are heuristics, not judgments.
@@ -62,8 +63,9 @@ Tool names are prefixed mcp__vedit__ in this environment.`;
 export const NUDGE_TEXT = "You ended without an accepted plan. Call submit_edl now with the complete plan.";
 export const TOOL_BUDGET_NUDGE_TEXT = "The tool budget for this plan is used up. Decide from what you already have and return the complete plan now.";
 
-export function buildTaskText(o: { instruction: string; presetName: string; mode: "full" | "compact"; toolsAvailable: boolean }) {
-  return `INSTRUCTION:\n${o.instruction}\nPRESET: ${o.presetName}\nMODE: ${o.mode.toUpperCase()}\nTOOLS: ${o.toolsAvailable ? "available" : "none — decide from the pack"}\nProduce the plan now.`;
+export function buildTaskText(o: { instruction: string; presetName: string; mode: "full" | "compact" | "shortlist"; toolsAvailable: boolean; speaker?: string }) {
+  const speaker = o.speaker ? `\nSPEAKER: only ${o.speaker}'s phrases are in the pack; every clip must be cut from them.` : "";
+  return `INSTRUCTION:\n${o.instruction}\nPRESET: ${o.presetName}\nMODE: ${o.mode.toUpperCase()}${speaker}\nTOOLS: ${o.toolsAvailable ? "available" : "none — decide from the pack"}\nProduce the plan now.`;
 }
 
 export function buildRepairText(issues: PlanIssue[], attempt: number, max: number) {

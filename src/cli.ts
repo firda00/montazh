@@ -4,6 +4,7 @@ import { Command } from "commander";
 import { ingest } from "./ingest/index.ts";
 import { cut, loadScenes, type CutReport } from "./cut/index.ts";
 import type { VisionChoice } from "./understand/vision/index.ts";
+import type { AsrChoice } from "./understand/asr.ts";
 import { understand, UnderstandReportSchema } from "./understand/index.ts";
 import { plan, loadPlanInputs, type PlanOptions, type PlanResult } from "./plan/index.ts";
 import { revise, type ReviseResult } from "./plan/revise.ts";
@@ -56,6 +57,7 @@ function printUnderstand(r: Awaited<ReturnType<typeof understand>>) {
     const langs = r.transcriber.languages.length > 1 ? ` [${r.transcriber.languages.join(", ")}]` : "";
     console.log(`  речь: ${r.transcriber.language}${langs}, ${r.phrases} фраз, ${r.words} слов, ${r.transcriber.speech_chunks} чанк(ов) речи (${r.transcriber.engine} ${r.transcriber.model}, ${r.transcriber.method}, ${r.transcriber.wall_seconds.toFixed(1)}s)`);
   }
+  if (r.speakers) console.log(`  говорящие: ${r.speakers.count} (${r.speakers.engine}, ${r.speakers.wall_seconds.toFixed(1)}s)`);
   console.log(`  сцены: ${r.shots} шотов, ${r.chunks.length} чанк(ов), ${r.vision.note}`);
   for (const h of r.highlights.slice(0, 3)) console.log(`  ★ ${h.score.toFixed(2)} ${h.start.toFixed(1)}–${h.end.toFixed(1)}s ${h.reason}`);
   for (const w of r.warnings) console.log(`  ⚠ ${w}`);
@@ -147,6 +149,9 @@ interface PlannerCliOpts {
   cacheTtl?: "5m" | "1h";
   contract?: "format" | "submit";
   verbose?: boolean;
+  speaker?: string;
+  long?: boolean;
+  windows?: number;
 }
 
 function withPlannerOptions(cmd: Command) {
@@ -160,6 +165,10 @@ function withPlannerOptions(cmd: Command) {
     .option("--frames <n>", "лимит превью-кадров", (v) => Number(v))
     .option("--cache-ttl <ttl>", "5m | 1h — TTL кэша промпта (бэкенд api)")
     .option("--contract <kind>", "format | submit — способ получить план от модели")
+    .option("--speaker <who>", "резать только этого человека: S1 | S2 | время (12:34) | most")
+    .option("--long", "режим длинного видео: сначала отобрать окна-кандидаты (по умолчанию — по размеру)")
+    .option("--no-long", "никогда не отбирать окна, планировать по всему видео")
+    .option("--windows <n>", "сколько окон отобрать в режиме длинного видео", (v) => Number(v))
     .option("--verbose", "печатать вызовы инструментов");
 }
 
@@ -171,10 +180,14 @@ function plannerOpts(o: PlannerCliOpts): Omit<PlanOptions, "instruction"> {
   if (!EFFORTS.includes(o.effort)) throw new Error(`--effort: ожидается ${EFFORTS.join(" | ")}, получено "${o.effort}"`);
   if (o.contract !== undefined && !["format", "submit"].includes(o.contract)) throw new Error(`--contract: ожидается format | submit`);
   if (o.cacheTtl !== undefined && !["5m", "1h"].includes(o.cacheTtl)) throw new Error(`--cache-ttl: ожидается 5m | 1h`);
+  if (o.windows !== undefined && (!Number.isInteger(o.windows) || o.windows < 1)) throw new Error(`--windows: ожидается целое число ≥ 1`);
   for (const [name, v] of [["--budget", o.budget], ["--max-repairs", o.maxRepairs], ["--frames", o.frames]] as const) {
     if (v !== undefined && !(Number.isFinite(v) && v >= 0)) throw new Error(`${name}: ожидается неотрицательное число`);
   }
   return {
+    speaker: o.speaker,
+    long: o.long,
+    maxWindows: o.windows,
     backend: o.backend,
     model: o.model,
     effort: o.effort,
@@ -200,9 +213,12 @@ withRenderOptions(
       .option("--no-snap", "не подтягивать границы клипов к границам слов")
       .option("--no-render", "остановиться после черновой нарезки")
       .option("--language <code>", "язык речи для whisper (по умолчанию auto)")
-      .option("--vision <provider>", "stub | auto | gemini | agy", "auto"),
+      .option("--vision <provider>", "stub | auto | gemini | agy", "auto")
+      .option("--asr <engine>", "auto | cpp | faster — движок распознавания речи (env VEDIT_ASR)", "auto")
+      .option("--no-diarize", "не размечать говорящих")
+      .option("--speakers <n>", "сколько говорящих ожидать (по умолчанию определяется)", (v) => Number(v)),
   ),
-).action(async (video: string, opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; render: boolean; language?: string; vision: VisionChoice } & PlannerCliOpts & RenderCliOpts) => {
+).action(async (video: string, opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; render: boolean; language?: string; vision: VisionChoice; asr: AsrChoice; diarize: boolean; speakers?: number } & PlannerCliOpts & RenderCliOpts) => {
   try {
     if (opts.edl) await readJson(path.resolve(opts.edl), EdlSchema); // validate the plan before spending time on ingest
     if (opts.prompt && opts.skipUnderstand) throw new PlanError("--skip-understand вместе с --prompt: планировать не по чему (нет фраз и сцен)", "nothing_to_plan");
@@ -219,7 +235,7 @@ withRenderOptions(
     let scenes: Scenes | undefined;
     if (!opts.skipUnderstand) {
       console.log("▸ understand");
-      const r = await runStep(job.id, "understand", () => understand(job.id, media, { language: opts.language, vision: opts.vision }));
+      const r = await runStep(job.id, "understand", () => understand(job.id, media, { language: opts.language, vision: opts.vision, asr: opts.asr, diarize: opts.diarize, numSpeakers: opts.speakers, onLog: (l) => console.log(`    ${l}`) }));
       printUnderstand(r);
       transcript = r.transcript;
       scenes = r.scenes;
@@ -290,11 +306,14 @@ program
   .option("--threads <n>", "потоки whisper", (v) => Number(v))
   .option("--method <m>", "dtw | tokens — способ пословных таймкодов", "dtw")
   .option("--vision <provider>", "stub | auto | gemini | agy", "auto")
-  .action(async (jobId: string, opts: { language?: string; threads?: number; method: "dtw" | "tokens"; vision: VisionChoice }) => {
+  .option("--asr <engine>", "auto | cpp | faster — движок распознавания речи (env VEDIT_ASR)", "auto")
+  .option("--no-diarize", "не размечать говорящих")
+  .option("--speakers <n>", "сколько говорящих ожидать (по умолчанию определяется)", (v) => Number(v))
+  .action(async (jobId: string, opts: { language?: string; threads?: number; method: "dtw" | "tokens"; vision: VisionChoice; asr: AsrChoice; diarize: boolean; speakers?: number }) => {
     try {
       await loadJob(jobId);
       const media = await readJson(path.join(jobDir(jobId), "media.json"), MediaSchema);
-      const r = await runStep(jobId, "understand", () => understand(jobId, media, opts));
+      const r = await runStep(jobId, "understand", () => understand(jobId, media, { ...opts, numSpeakers: opts.speakers, onLog: (l) => console.log(`    ${l}`) }));
       printUnderstand(r);
     } catch (err) {
       fail(err);

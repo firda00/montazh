@@ -140,7 +140,10 @@ export const PlanReportSchema = z.object({
   contract: z.enum(["format", "submit"]),
   model: z.string(),
   effort: z.string(),
-  mode: z.enum(["full", "compact"]),
+  mode: z.enum(["full", "compact", "shortlist"]),
+  /** speaker filter / long-video windows used to build the pack; revise reuses them so refs stay stable */
+  speaker: z.string().optional(),
+  windows: z.array(z.object({ id: z.string(), start: z.number(), end: z.number(), why: z.string(), source: z.enum(["model", "highlights"]) })).optional(),
   pack_hash: z.string(),
   pack_tokens_estimate: z.number(),
   prompt_version: z.string(),
