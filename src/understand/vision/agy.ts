@@ -96,6 +96,7 @@ interface AgyResult {
   error?: string;
   usage?: { input_tokens?: number; output_tokens?: number; thinking_tokens?: number; cache_read_tokens?: number };
   duration_seconds?: number;
+  structured_output?: unknown;
 }
 
 export function parseAgyStream(stdout: string): AgyResult {
@@ -182,7 +183,9 @@ export class AgyVisionProvider implements VisionProvider {
       if (result.status !== "SUCCESS") throw new AgyError(`agy: ${result.status ?? `exit ${r.code}`}: ${result.error ?? r.stderr.slice(-400)}`);
       let parsed: ModelAnswer;
       try {
-        parsed = ModelAnswerSchema.parse(extractJson(result.response ?? ""));
+        // the CLI validates against --json-schema itself and echoes the object as structured_output
+        const raw = result.structured_output && typeof result.structured_output === "object" ? result.structured_output : extractJson(result.response ?? "");
+        parsed = ModelAnswerSchema.parse(raw);
       } catch (err) {
         throw new AgyError(`agy: answer does not match the schema: ${err instanceof Error ? err.message : err}`);
       }
