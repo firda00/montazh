@@ -28,6 +28,8 @@ export const ScenesSchema = z.array(
     emotion: z.string(),
     shot_type: z.string(),
     quality_score: z.number().min(0).max(1),
+    /** where the main face/subject sits, as fractions of the frame — drives crop: auto_face; absent from the stub */
+    focus: z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }).optional(),
   }),
 );
 export type Scenes = z.infer<typeof ScenesSchema>;

@@ -76,7 +76,7 @@ for (const [i, f] of files.entries()) {
     row.plan_usd = p.report.usd;
     row.outputs = p.report.outputs.map((o) => ({ id: o.id, duration_s: o.duration_s, target_s: o.target_s, warnings: p.report.issues.filter((x) => x.output === o.id).length }));
     console.log(`  план: ${p.report.status}, ${p.report.calls} запрос(ов), ${p.report.repairs} испр., ≈$${p.report.usd.toFixed(2)}; ${row.outputs.map((o) => `${o.id} ${o.duration_s}s`).join(", ")}`);
-    const c = await runStep(job.id, "cut", () => cut(job.id, p.edl!, media, { transcript: u.transcript, snap: true }));
+    const c = await runStep(job.id, "cut", () => cut(job.id, p.edl!, media, { transcript: u.transcript, snap: true, scenes: u.scenes }));
     row.cut_warnings = c.outputs.flatMap((o) => o.warnings.filter((w) => !/auto_face/.test(w)));
     if (doRender) {
       const tr = Date.now();

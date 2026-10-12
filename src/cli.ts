@@ -2,7 +2,8 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { Command } from "commander";
 import { ingest } from "./ingest/index.ts";
-import { cut, type CutReport } from "./cut/index.ts";
+import { cut, loadScenes, type CutReport } from "./cut/index.ts";
+import type { VisionChoice } from "./understand/vision/index.ts";
 import { understand, UnderstandReportSchema } from "./understand/index.ts";
 import { plan, loadPlanInputs, type PlanOptions, type PlanResult } from "./plan/index.ts";
 import { revise, type ReviseResult } from "./plan/revise.ts";
@@ -11,7 +12,7 @@ import { renderOutputs, RenderReportSchema, type RenderReport } from "./render/i
 import { HyperFramesRenderer } from "./render/hyperframes.ts";
 import type { RenderQuality } from "./design/renderer.ts";
 import { createJob, exists, jobDir, loadJob, readJson, runStep, writeJson } from "./lib/workspace.ts";
-import { EdlSchema, MediaSchema, CostSchema, TranscriptSchema, HighlightsSchema, PlanReportSchema, ReviseReportSchema, type Edl, type Transcript, type PlanReport } from "./schemas/index.ts";
+import { EdlSchema, MediaSchema, CostSchema, TranscriptSchema, HighlightsSchema, PlanReportSchema, ReviseReportSchema, type Edl, type Scenes, type Transcript, type PlanReport } from "./schemas/index.ts";
 
 try {
   process.loadEnvFile(); // .env in cwd, optional
@@ -199,9 +200,9 @@ withRenderOptions(
       .option("--no-snap", "не подтягивать границы клипов к границам слов")
       .option("--no-render", "остановиться после черновой нарезки")
       .option("--language <code>", "язык речи для whisper (по умолчанию auto)")
-      .option("--vision <provider>", "stub | auto", "auto"),
+      .option("--vision <provider>", "stub | auto | gemini", "auto"),
   ),
-).action(async (video: string, opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; render: boolean; language?: string; vision: "auto" | "stub" } & PlannerCliOpts & RenderCliOpts) => {
+).action(async (video: string, opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; render: boolean; language?: string; vision: VisionChoice } & PlannerCliOpts & RenderCliOpts) => {
   try {
     if (opts.edl) await readJson(path.resolve(opts.edl), EdlSchema); // validate the plan before spending time on ingest
     if (opts.prompt && opts.skipUnderstand) throw new PlanError("--skip-understand вместе с --prompt: планировать не по чему (нет фраз и сцен)", "nothing_to_plan");
@@ -215,11 +216,13 @@ withRenderOptions(
     console.log(`  ${media.width}x${media.height} @ ${media.fps}fps, ${media.duration.toFixed(2)}s, audio: ${media.has_audio}`);
 
     let transcript: Transcript | undefined;
+    let scenes: Scenes | undefined;
     if (!opts.skipUnderstand) {
       console.log("▸ understand");
       const r = await runStep(job.id, "understand", () => understand(job.id, media, { language: opts.language, vision: opts.vision }));
       printUnderstand(r);
       transcript = r.transcript;
+      scenes = r.scenes;
     }
 
     let edl: Edl;
@@ -237,7 +240,7 @@ withRenderOptions(
     }
 
     console.log("▸ cut");
-    const report = await runStep(job.id, "cut", () => cut(job.id, edl, media, { transcript, snap: opts.snap }));
+    const report = await runStep(job.id, "cut", () => cut(job.id, edl, media, { transcript, snap: opts.snap, scenes }));
     printCutReport(report);
     if (opts.render) {
       const okIds = report.outputs.filter((o) => o.status === "ok").map((o) => o.id);
@@ -286,8 +289,8 @@ program
   .option("--language <code>", "язык речи для whisper (по умолчанию auto)")
   .option("--threads <n>", "потоки whisper", (v) => Number(v))
   .option("--method <m>", "dtw | tokens — способ пословных таймкодов", "dtw")
-  .option("--vision <provider>", "stub | auto", "auto")
-  .action(async (jobId: string, opts: { language?: string; threads?: number; method: "dtw" | "tokens"; vision: "auto" | "stub" }) => {
+  .option("--vision <provider>", "stub | auto | gemini", "auto")
+  .action(async (jobId: string, opts: { language?: string; threads?: number; method: "dtw" | "tokens"; vision: VisionChoice }) => {
     try {
       await loadJob(jobId);
       const media = await readJson(path.join(jobDir(jobId), "media.json"), MediaSchema);
@@ -326,8 +329,9 @@ withPlannerOptions(
     if (opts.cut) {
       const media = await readJson(path.join(jobDir(jobId), "media.json"), MediaSchema);
       const transcript = await loadTranscript(jobId);
+      const scenes = await loadScenes(jobId);
       console.log("▸ cut");
-      printCutReport(await runStep(jobId, "cut", () => cut(jobId, r.edl!, media, { transcript, snap: opts.snap })));
+      printCutReport(await runStep(jobId, "cut", () => cut(jobId, r.edl!, media, { transcript, snap: opts.snap, scenes })));
     } else console.log(`нарезать: vedit cut ${jobId}`);
   } catch (err) {
     fail(err);
@@ -358,8 +362,9 @@ withRenderOptions(
     if (r.affected.length) {
       const media = await readJson(path.join(jobDir(jobId), "media.json"), MediaSchema);
       const transcript = await loadTranscript(jobId);
+      const scenes = await loadScenes(jobId);
       console.log(`▸ cut (${r.affected.join(", ")})`);
-      printCutReport(await runStep(jobId, "cut", () => cut(jobId, r.edl, media, { only: r.affected, transcript, snap: opts.snap })));
+      printCutReport(await runStep(jobId, "cut", () => cut(jobId, r.edl, media, { only: r.affected, transcript, snap: opts.snap, scenes })));
     } else console.log("  нарезка не нужна: клипы не менялись");
     // design/render-stage changes (captions, titles) need a new overlay even when the cut is untouched
     const toRender = [...d.added, ...d.changed.map((c) => c.id)].filter((id, i, arr) => arr.indexOf(id) === i && (d.stages[id] ?? []).some((s) => s === "design" || s === "render"));
@@ -385,7 +390,8 @@ program
       const media = await readJson(path.join(dir, "media.json"), MediaSchema);
       const edl = opts.edl ? await stageEdl(jobId, opts.edl) : await readJson(path.join(dir, "edl.json"), EdlSchema);
       const transcript = await loadTranscript(jobId);
-      const report = await runStep(jobId, "cut", () => cut(jobId, edl, media, { only: opts.only, transcript, snap: opts.snap }));
+      const scenes = await loadScenes(jobId);
+      const report = await runStep(jobId, "cut", () => cut(jobId, edl, media, { only: opts.only, transcript, snap: opts.snap, scenes }));
       printCutReport(report);
     } catch (err) {
       fail(err);

@@ -2,7 +2,7 @@ import path from "node:path";
 import { ffmpeg, ffprobe } from "../lib/ffmpeg.ts";
 import { exists, jobDir, readJson, writeJson } from "../lib/workspace.ts";
 import { TARGET_FPS } from "../ingest/index.ts";
-import { ClipSchema, type Aspect, type Clip, type Edl, type Media, type Output, type Transcript } from "../schemas/index.ts";
+import { ClipSchema, ScenesSchema, type Aspect, type Clip, type Edl, type Media, type Output, type Scenes, type Transcript } from "../schemas/index.ts";
 import { checkClipBoundaries, snapClipsToWords } from "../plan/validate.ts";
 import { z } from "zod";
 
@@ -45,13 +45,46 @@ export function atempoChain(speed: number): string[] {
   return parts;
 }
 
-/** Center crop to the target aspect ratio, then scale to the delivery size. */
-export function cropScaleFilter(aspect: Aspect): string {
+/** A point of interest in the source frame, as fractions (0..1) of width and height. */
+export type Focus = { x: number; y: number };
+
+/** crop offset that centres the window on the focus point and stays inside the frame (even, for yuv420p) */
+const offsetExpr = (full: "iw" | "ih", out: "ow" | "oh", f: number) => `trunc(clip(${full}*${f.toFixed(4)}-${out}/2\\,0\\,${full}-${out})/2)*2`;
+
+/** Crop to the target aspect ratio — centred, or around a focus point (crop: auto_face) — then scale to the delivery size. */
+export function cropScaleFilter(aspect: Aspect, focus?: Focus | null): string {
   const { w, h } = OUTPUT_SIZE[aspect];
   const r = w / h;
   const cw = `trunc(min(iw\\,ih*${r})/2)*2`;
   const ch = `trunc(min(ih\\,iw/${r})/2)*2`;
-  return `crop=${cw}:${ch},scale=${w}:${h}:flags=lanczos,setsar=1`;
+  const at = focus ? `:${offsetExpr("iw", "ow", focus.x)}:${offsetExpr("ih", "oh", focus.y)}` : "";
+  return `crop=${cw}:${ch}${at},scale=${w}:${h}:flags=lanczos,setsar=1`;
+}
+
+/**
+ * Where to keep the frame for one clip: the overlap-weighted mean of the focus points of the
+ * scenes it spans (one static crop per clip — no reframing jitter inside a clip). null when the
+ * vision step produced no focus for these shots (stub, or no clear subject).
+ */
+export function clipFocus(clip: Pick<Clip, "src_start" | "src_end">, scenes: Scenes): Focus | null {
+  let wx = 0;
+  let wy = 0;
+  let wsum = 0;
+  for (const s of scenes) {
+    if (!s.focus) continue;
+    const overlap = Math.min(s.end, clip.src_end) - Math.max(s.start, clip.src_start);
+    if (overlap <= 0) continue;
+    wx += s.focus.x * overlap;
+    wy += s.focus.y * overlap;
+    wsum += overlap;
+  }
+  return wsum > 0 ? { x: wx / wsum, y: wy / wsum } : null;
+}
+
+/** scenes.json of a job, when the understand step has run. */
+export async function loadScenes(jobId: string): Promise<Scenes | undefined> {
+  const file = path.join(jobDir(jobId), "scenes.json");
+  return (await exists(file)) ? readJson(file, ScenesSchema) : undefined;
 }
 
 /** Clamp clips to the media and report anything we had to change. */
@@ -59,8 +92,6 @@ export function sanitizeClips(clips: Clip[], media: Media) {
   const warnings: string[] = [];
   const kept: Clip[] = [];
   const indices: number[] = []; // EDL index of each kept clip
-  const autoFace = clips.filter((c) => c.crop === "auto_face").length;
-  if (autoFace) warnings.push(`auto_face not implemented yet, using center crop (${autoFace} clip${autoFace > 1 ? "s" : ""})`);
   clips.forEach((c, i) => {
     if (c.src_start >= media.duration) {
       warnings.push(`clip ${i}: starts at ${c.src_start}s, after end of video (${media.duration.toFixed(2)}s) — skipped`);
@@ -82,16 +113,16 @@ export function expectedDuration(clips: Clip[]) {
 }
 
 /** Builds the ffmpeg argument list for one output. Each clip is a separately-seeked input. */
-export function buildCutArgs(output: Output, clips: Clip[], media: Media, outPath: string): string[] {
+export function buildCutArgs(output: Output, clips: Clip[], media: Media, outPath: string, focuses: (Focus | null)[] = []): string[] {
   const args: string[] = [];
   for (const c of clips) {
     args.push("-ss", c.src_start.toFixed(3), "-to", c.src_end.toFixed(3), "-i", media.normalized_path);
   }
-  const vf = cropScaleFilter(output.aspect);
   const chains: string[] = [];
   const concatInputs: string[] = [];
   clips.forEach((c, i) => {
     const setpts = c.speed === 1 ? "PTS-STARTPTS" : `(PTS-STARTPTS)/${c.speed}`;
+    const vf = cropScaleFilter(output.aspect, c.crop === "auto_face" ? focuses[i] : null);
     chains.push(`[${i}:v]setpts=${setpts},${vf},fps=${TARGET_FPS},format=yuv420p[v${i}]`);
     const audio = ["asetpts=PTS-STARTPTS", ...atempoChain(c.speed), "aresample=48000"].join(",");
     chains.push(`[${i}:a]${audio}[a${i}]`);
@@ -123,6 +154,8 @@ export interface CutOptions {
   transcript?: Transcript;
   /** move offending edges to the nearest word boundary instead of only warning */
   snap?: boolean;
+  /** scenes with focus points (Gemini) — needed for crop: auto_face; without them auto_face falls back to centre */
+  scenes?: Scenes;
 }
 
 export async function cut(jobId: string, edl: Edl, media: Media, opts: CutOptions = {}): Promise<CutReport & { partial: boolean }> {
@@ -136,9 +169,9 @@ export async function cut(jobId: string, edl: Edl, media: Media, opts: CutOption
 
   for (const output of targets) {
     let { clips, warnings, indices } = sanitizeClips(output.clips, media);
+    // warnings number clips as in the EDL, even after sanitizeClips dropped one
+    const edlIndex = (i: number) => indices[i] ?? i;
     if (opts.transcript) {
-      // word checks number clips as in the EDL, even after sanitizeClips dropped one
-      const edlIndex = (i: number) => indices[i] ?? i;
       if (opts.snap) {
         const snapped = snapClipsToWords(clips, opts.transcript);
         clips = snapped.clips;
@@ -157,9 +190,17 @@ export async function cut(jobId: string, edl: Edl, media: Media, opts: CutOption
       report.outputs.push({ id: output.id, status: "failed", expected_duration: 0, warnings, error: "no usable clips" });
       continue;
     }
+    // auto_face: one static crop per clip around the subject the vision step located
+    const hasFocus = opts.scenes?.some((s) => s.focus) ?? false;
+    const focuses = clips.map((c, i) => {
+      if (c.crop !== "auto_face") return null;
+      const f = opts.scenes ? clipFocus(c, opts.scenes) : null;
+      if (!f) warnings.push(`clip ${edlIndex(i)}: auto_face — ${hasFocus ? "no subject located in these shots" : "no focus data (vision stub)"}, center crop`);
+      return f;
+    });
     const outPath = path.join(dir, `rough_${output.id}.mp4`);
     try {
-      await ffmpeg(buildCutArgs(output, clips, media, outPath));
+      await ffmpeg(buildCutArgs(output, clips, media, outPath, focuses));
       const probe = await ffprobe(outPath);
       report.outputs.push({
         id: output.id,

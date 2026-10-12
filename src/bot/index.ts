@@ -177,7 +177,7 @@ export const runFullPipeline: PipelineFn = async ({ source, instruction, preset,
   checkCancel(signal);
 
   await progress("▸ нарезка…");
-  const cutReport = await runStep(job.id, "cut", () => cut(job.id, edl, media, { transcript: u.transcript, snap: true }));
+  const cutReport = await runStep(job.id, "cut", () => cut(job.id, edl, media, { transcript: u.transcript, snap: true, scenes: u.scenes }));
   const failed = cutReport.outputs.filter((o) => o.status !== "ok").map((o) => ({ id: o.id, error: o.error ?? "ошибка нарезки" }));
   const okIds = cutReport.outputs.filter((o) => o.status === "ok").map((o) => o.id);
   checkCancel(signal);
@@ -189,7 +189,7 @@ export const runFullPipeline: PipelineFn = async ({ source, instruction, preset,
 /** revise(job) → cut affected → render outputs whose design/render changed (same rule as `vedit revise`). */
 export const runRevisePipeline: ReviseFn = async ({ jobId, edit, progress, signal, log }) => {
   const { revise } = await import("../plan/revise.ts");
-  const { cut } = await import("../cut/index.ts");
+  const { cut, loadScenes } = await import("../cut/index.ts");
   await loadJob(jobId);
 
   await progress("▸ правка плана…");
@@ -208,7 +208,8 @@ export const runRevisePipeline: ReviseFn = async ({ jobId, edit, progress, signa
     await progress(`▸ нарезка (${r.affected.join(", ")})…`);
     const media = await readJson(path.join(jobDir(jobId), "media.json"), MediaSchema);
     const transcript = await loadTranscript(jobId);
-    const rep = await runStep(jobId, "cut", () => cut(jobId, r.edl, media, { only: r.affected, transcript, snap: true }));
+    const scenes = await loadScenes(jobId);
+    const rep = await runStep(jobId, "cut", () => cut(jobId, r.edl, media, { only: r.affected, transcript, snap: true, scenes }));
     failed.push(...rep.outputs.filter((o) => o.status !== "ok").map((o) => ({ id: o.id, error: o.error ?? "ошибка нарезки" })));
   }
   checkCancel(signal);
