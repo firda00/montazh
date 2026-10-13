@@ -184,13 +184,19 @@ node bin/vedit.mjs run D:/видео/podcast.mp4 -p "10 рилсов по 30 с�
   `python -m venv tools/asr/.venv && tools/asr/.venv/Scripts/pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu && tools/asr/.venv/Scripts/pip install faster-whisper speechbrain scipy`
   (на сервере с NVIDIA — обычный `torch` с CUDA). Лицензии: faster-whisper/CTranslate2 (MIT), веса Whisper (MIT),
   SpeechBrain и веса ECAPA (Apache-2.0). Модели качаются при первом запуске в `tools/asr/models/` (~1.7 ГБ).
-- **Движок речи `--asr auto|cpp|faster`** (`VEDIT_ASR`). `auto` берёт faster-whisper только при наличии NVIDIA GPU
-  (`nvidia-smi` в PATH): на CPU он не быстрее whisper.cpp (8 с аудио — 37 с против 32 с на i7-13700), а whisper.cpp
+- **Движок речи `--asr auto|cpp|faster`** (`VEDIT_ASR`). `auto` берёт faster-whisper при наличии NVIDIA GPU
+  (`nvidia-smi` в PATH) или для файлов длиннее 20 минут даже на CPU: whisper.cpp грузит модель на каждый 28-секундный
+  кусок (327 загрузок на 2 ч), faster-whisper — один раз. На коротком файле на CPU он не быстрее whisper.cpp
+  (8 с аудио — 37 с против 32 с на i7-13700), а whisper.cpp
   определяет язык на каждом куске речи, что нужно смешанным ru/uz видео; faster-whisper определяет язык один раз на файл
   (английскую фразу в ru-ролике он перевёл на русский). На GPU от 4 ГБ faster-whisper делает час речи за 3–5 минут.
   Сырой вывод — `whisper/faster.json`; WAV читается самим сайдкаром (PyAV-путь faster-whisper ломается между версиями).
+  Кусок, на котором whisper-cli упал, повторяется один раз, затем распознаётся faster-whisper (если сайдкар установлен);
+  такой кусок помечен `engine: "faster-whisper"` в `whisper/chunks.json`.
 - **Говорящие** (`speakers.json`, `speaker` у каждой фразы): эмбеддинг ECAPA-TDNN на фразу + агломеративная кластеризация
-  по косинусному расстоянию (порог 0.72, или `--speakers N`). S1 — тот, кто говорит больше всех. Это разметка **по фразам**:
+  по косинусному расстоянию (порог 0.72, или `--speakers N`); кластеры короче 10 с речи или из < 3 фраз (смех, междометия)
+  сливаются с ближайшим по центроиду (`--min-cluster-seconds` сайдкара, проверка — `vedit_asr.py selftest`).
+  S1 — тот, кто говорит больше всех. Это разметка **по фразам**:
   фраза, где перебивают, получает одного говорящего. Отключить — `--no-diarize` / `VEDIT_DIARIZE=0`. На фикстуре с двумя
   SAPI-голосами: 6 русских фраз → S1, английская → S2, 5 с на CPU.
 - **Нарезки одного человека** — `--speaker S2`, `--speaker 12:34` (кто говорит в этот момент) или `--speaker most`:
@@ -199,7 +205,8 @@ node bin/vedit.mjs run D:/видео/podcast.mp4 -p "10 рилсов по 30 с�
 - **Режим длинного видео** (`--long` / `--no-long`, по умолчанию — когда фраз > 250 или пак > 60k токенов): сначала
   дешёвый structured-вызов по индексу «одна строка на фразу» (`pN mm:ss S1 ru: текст…`, ~25 токенов на фразу, час речи ≈
   22k токенов ≈ $0.05–0.1 на Opus) выбирает до 24 окон-кандидатов под инструкцию; окна расширяются до целых фраз
-  с контекстом ±1 фраза, длинные режутся по 120 с. Планировщик видит пак в режиме `shortlist`: только фразы, сцены,
+  с контекстом ±1 фраза, длинные режутся по 120 с. Больше 2000 фраз — индекс уходит двумя вызовами по половинам
+  (окна делятся пропорционально, стоимость суммируется). Планировщик видит пак в режиме `shortlist`: только фразы, сцены,
   паузы и highlights внутри окон, список `windows` и счётчик `omitted`. Без модели (или при её ошибке) окна берутся
   из топа highlights. Стоимость шортлиста пишется в `cost.json` (`shortlist: 1`).
 
@@ -246,7 +253,7 @@ scenes, vision, planner, shortlist, cut, translate, render, bot, cli.
   Лечится отключением плагина в настройках Antigravity (`"enabled": false` в `~/.gemini/config/config.json`).
   Gemini CLI (`@google/gemini-cli`) с бесплатным входом Google больше не работает (`UNSUPPORTED_CLIENT`,
   Google переводит на Antigravity), поэтому бэкенда под него нет.
-- Подложка под субтитры по яркости кадра, проверка caption-zone (`hyperframes check --caption-zone`), «fill»-анимация слова, intro-карточка — в бэклоге; аутро-CTA есть.
+- Оформление bold_pop (2026-10-13): титр в карточке, подложка под строками субтитров (`captions.backing`), затемнение нижней трети (`captions.shade`), титр уходит под лицо, если лицо стоит высоко (`titles.avoid_face` по `scenes[].focus`), лёгкий unsharp в нарезке при апскейле ≥1.25× (9:16 из 1080p). Проверка caption-zone, «fill»-анимация слова, intro-карточка — в бэклоге; аутро-CTA есть.
 - Перевод субтитров даёт пословную подсветку по пропорции длины слов (не по речи) — для переведённых субтитров синхрон приблизительный.
 - Рендер на Windows идёт скриншотами (~17 fps при 3 воркерах); на машине с 8 ГБ RAM — 1 воркер. Прод-рендер — на Linux (beginframe) с ≥16 ГБ.
 - Remotion-адаптер к `OverlayRenderer` не написан (только прототип в `tools/remotion-overlay/`).

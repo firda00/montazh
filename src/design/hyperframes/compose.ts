@@ -154,14 +154,23 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       .cap { padding: ${capPad.top}px ${safeX}px ${capPad.bottom}px; }
       .ttl { padding: ${ttlPad.top}px ${safeX}px ${ttlPad.bottom}px; }
       .cap-line {
-        display: block;
+        display: ${D.captions.backing.enabled ? "inline-block" : "block"};
         white-space: nowrap;
         text-align: center;
         font-weight: ${layout.font.weight};
         line-height: ${D.captions.line_height};
         letter-spacing: -0.01em;
-        color: ${C.text};
+        color: ${C.text};${
+          D.captions.backing.enabled
+            ? `
+        background: ${D.captions.backing.color};
+        padding: ${r3(D.captions.backing.padding * scale)}px ${r3((D.captions.backing.padding + 8) * scale)}px;
+        border-radius: ${r3(D.captions.backing.radius * scale)}px;
+        margin: ${r3(3 * scale)}px 0;`
+            : ""
+        }
       }
+      .shade { position: absolute; inset: 0; display: block; pointer-events: none; background: linear-gradient(to bottom, rgba(0,0,0,0) ${r3(D.captions.shade.from * 100)}%, rgba(0,0,0,${r3(D.captions.shade.strength)}) 100%); }
       .w {
         display: inline-block; /* transforms need a box; NO CSS transform here (GSAP owns scale) */
         margin: 0 calc(var(--gap) / 2);
@@ -206,7 +215,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       data-fps="${FPS}"
     >
       <video id="a-roll" src="${assets.videoRel}" data-start="0" data-duration="${DUR}" data-track-index="0" muted playsinline></video>
-${capHtml.join("\n")}
+${D.captions.shade.enabled && layout.pages.length ? `      <section id="shade" class="clip shade" data-start="0" data-duration="${DUR}" data-track-index="1"></section>\n` : ""}${capHtml.join("\n")}
 ${ttlHtml.join("\n")}
 ${outroHtml.join("\n")}
     </div>

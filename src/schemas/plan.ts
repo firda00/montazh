@@ -216,6 +216,22 @@ export const DesignSpecSchema = z.object({
     word_animation: z.enum(["pop", "fill", "none"]).default("pop"),
     pop_scale: z.number().default(1.12),
     page_animation: z.enum(["fade_up", "none"]).default("fade_up"),
+    /** rounded translucent box behind every caption line (legibility over faces and busy backgrounds) */
+    backing: z.object({
+      enabled: z.boolean().default(false),
+      color: z.string().default("rgba(0,0,0,0.42)"),
+      /** px at 1080 wide, vertical / horizontal */
+      padding: z.number().default(10),
+      radius: z.number().default(18),
+    }).prefault({}),
+    /** soft dark gradient over the lower part of the frame, under the captions */
+    shade: z.object({
+      enabled: z.boolean().default(false),
+      /** opacity at the bottom edge */
+      strength: z.number().min(0).max(1).default(0.45),
+      /** where the gradient starts, fraction of the height */
+      from: z.number().min(0).max(1).default(0.55),
+    }).prefault({}),
   }).prefault({}),
   titles: z.object({
     anchor_y: z.number().default(0.18),
@@ -224,6 +240,9 @@ export const DesignSpecSchema = z.object({
     animation: z.enum(["slide_up", "fade", "none"]).default("slide_up"),
     padding: z.number().default(24),
     radius: z.number().default(20),
+    /** when the located face sits high in the frame (centre above face_zone), the title moves below it, above the captions */
+    avoid_face: z.boolean().default(true),
+    face_zone: z.number().default(0.42),
   }).prefault({}),
   safe_area: z.object({ x: z.number().default(0.06), y: z.number().default(0.08) }).prefault({}),
   /** call-to-action card over the last seconds (overlay only: the cut and its audio are untouched) */

@@ -50,7 +50,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { DesignSpecSchema } from "../schemas/index.ts";
+import { DesignSpecSchema, type DesignSpec } from "../schemas/index.ts";
 import type { DesignJob } from "./export.ts";
 import type { OutPhrase, OutWord } from "./timeline.ts";
 import type { FontMetrics, Layout, LayoutLine, LayoutOptions, LayoutPage, LayoutTitle, LayoutWord } from "./layout-types.ts";
@@ -575,6 +575,16 @@ function dominantLang(phrases: OutPhrase[]): string | null {
   return best;
 }
 
+/**
+ * Where the title sits. Normally at titles.anchor_y (top). When the vision step located the face
+ * high in the frame (its centre above titles.face_zone), a top title would cover the forehead, so
+ * it moves to the band between the face and the captions.
+ */
+export function titleAnchor(D: DesignSpec, faceY?: number): number {
+  if (!D.titles.avoid_face || faceY === undefined || !(faceY < D.titles.face_zone)) return D.titles.anchor_y;
+  return r2(clamp(D.captions.anchor_y - 0.17, 0.5, Math.max(0.5, D.captions.anchor_y - 0.1)));
+}
+
 export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOptions = {}): Layout {
   const D = DesignSpecSchema.parse(job.design ?? {});
   const t = job.timeline;
@@ -653,7 +663,7 @@ export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOp
   return {
     frame: { width: W, height: H, fps, duration },
     captions: { anchorY: D.captions.anchor_y, maxWidth: r2(capMax), baseFontSize: r2(capBase), strokeWidth: r2(D.captions.stroke_width * scale), uppercase: D.captions.uppercase, language },
-    titles: { anchorY: D.titles.anchor_y, maxWidth: r2(ttlMax), baseFontSize: r2(ttlBase) },
+    titles: { anchorY: titleAnchor(D, job.face_y), maxWidth: r2(ttlMax), baseFontSize: r2(ttlBase) },
     pages,
     titlesOut,
     font: { family: metrics.family, file: metrics.file, weight: D.font.weight, source: metrics.source },

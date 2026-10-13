@@ -51,14 +51,29 @@ export type Focus = { x: number; y: number };
 /** crop offset that centres the window on the focus point and stays inside the frame (even, for yuv420p) */
 const offsetExpr = (full: "iw" | "ih", out: "ow" | "oh", f: number) => `trunc(clip(${full}*${f.toFixed(4)}-${out}/2\\,0\\,${full}-${out})/2)*2`;
 
-/** Crop to the target aspect ratio — centred, or around a focus point (crop: auto_face) — then scale to the delivery size. */
-export function cropScaleFilter(aspect: Aspect, focus?: Focus | null): string {
+/** Above this upscale factor (delivery width / cropped source width) a mild unsharp mask compensates the softness of the upscale. */
+export const SHARPEN_ABOVE_UPSCALE = 1.25;
+
+/** delivery width over the width of the region that will be cropped from a source of the given size */
+export function upscaleFactor(aspect: Aspect, media: Pick<Media, "width" | "height">): number {
+  const { w, h } = OUTPUT_SIZE[aspect];
+  const cw = Math.min(media.width, media.height * (w / h));
+  return cw > 0 ? w / cw : 1;
+}
+
+/**
+ * Crop to the target aspect ratio — centred, or around a focus point (crop: auto_face) — then scale to the
+ * delivery size. A 9:16 crop from a 1080p source is a 608 px strip blown up 1.78×; above SHARPEN_ABOVE_UPSCALE
+ * a light luma unsharp (radius 5, amount 0.7) is added after the scale.
+ */
+export function cropScaleFilter(aspect: Aspect, focus?: Focus | null, upscale = 1): string {
   const { w, h } = OUTPUT_SIZE[aspect];
   const r = w / h;
   const cw = `trunc(min(iw\\,ih*${r})/2)*2`;
   const ch = `trunc(min(ih\\,iw/${r})/2)*2`;
   const at = focus ? `:${offsetExpr("iw", "ow", focus.x)}:${offsetExpr("ih", "oh", focus.y)}` : "";
-  return `crop=${cw}:${ch}${at},scale=${w}:${h}:flags=lanczos,setsar=1`;
+  const sharpen = upscale >= SHARPEN_ABOVE_UPSCALE ? ",unsharp=5:5:0.7:5:5:0" : "";
+  return `crop=${cw}:${ch}${at},scale=${w}:${h}:flags=lanczos${sharpen},setsar=1`;
 }
 
 /**
@@ -122,7 +137,7 @@ export function buildCutArgs(output: Output, clips: Clip[], media: Media, outPat
   const concatInputs: string[] = [];
   clips.forEach((c, i) => {
     const setpts = c.speed === 1 ? "PTS-STARTPTS" : `(PTS-STARTPTS)/${c.speed}`;
-    const vf = cropScaleFilter(output.aspect, c.crop === "auto_face" ? focuses[i] : null);
+    const vf = cropScaleFilter(output.aspect, c.crop === "auto_face" ? focuses[i] : null, upscaleFactor(output.aspect, media));
     chains.push(`[${i}:v]setpts=${setpts},${vf},fps=${TARGET_FPS},format=yuv420p[v${i}]`);
     const audio = ["asetpts=PTS-STARTPTS", ...atempoChain(c.speed), "aresample=48000"].join(",");
     chains.push(`[${i}:a]${audio}[a${i}]`);

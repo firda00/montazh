@@ -7,7 +7,7 @@
     "max": 6
   },
   "caption_style": "bold_pop",
-  "title_style": "hero",
+  "title_style": "card",
   "default_aspect": "9:16",
   "music_default": false,
   "notes": [
@@ -29,24 +29,28 @@
       "title_bg": "rgba(0,0,0,0.55)"
     },
     "captions": {
-      "anchor_y": 0.72,
+      "anchor_y": 0.8,
       "max_words": 4,
       "max_chars": 22,
-      "font_size": 72,
+      "font_size": 68,
       "line_height": 1.15,
       "uppercase": true,
-      "stroke_width": 8,
+      "stroke_width": 6,
       "word_animation": "pop",
       "pop_scale": 1.12,
-      "page_animation": "fade_up"
+      "page_animation": "fade_up",
+      "backing": { "enabled": true, "color": "rgba(0,0,0,0.42)", "padding": 10, "radius": 18 },
+      "shade": { "enabled": true, "strength": 0.45, "from": 0.55 }
     },
     "titles": {
-      "anchor_y": 0.18,
-      "font_size": 88,
+      "anchor_y": 0.12,
+      "font_size": 68,
       "max_lines": 2,
       "animation": "slide_up",
-      "padding": 24,
-      "radius": 20
+      "padding": 20,
+      "radius": 22,
+      "avoid_face": true,
+      "face_zone": 0.42
     },
     "safe_area": {
       "x": 0.06,
