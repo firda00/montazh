@@ -26,6 +26,8 @@ export const WindowSchema = z.object({ id: z.string(), start: z.number(), end: z
 export const LONG_PHRASES = 250;
 export const LONG_TOKENS = 60_000;
 export const DEFAULT_MAX_WINDOWS = 24;
+/** Above this many phrases the index is sent in two halves (one model call each): ~25 tokens per phrase. */
+export const SPLIT_PHRASES = 2000;
 /** phrases of context kept on each side of a chosen window */
 const CONTEXT_PHRASES = 1;
 
@@ -36,9 +38,12 @@ export function isLong(transcript: Transcript, packTokens: number): boolean {
 const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const mmss = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
 
-/** One line per phrase: id, time, speaker, truncated text. ~25 tokens per phrase. */
-export function phraseIndex(transcript: Transcript): string {
-  return transcript.segments.map((p, i) => `p${i} ${mmss(p.start)}-${mmss(p.end)}${p.speaker ? ` ${p.speaker}` : ""}${p.lang ? ` ${p.lang}` : ""}: ${cut(p.text.replace(/\s+/g, " "), 90)}`).join("\n");
+/** One line per phrase: id, time, speaker, truncated text. ~25 tokens per phrase. `from`/`to` (exclusive) pick a range; ids stay global. */
+export function phraseIndex(transcript: Transcript, from = 0, to = transcript.segments.length): string {
+  return transcript.segments
+    .slice(from, to)
+    .map((p, k) => `p${from + k} ${mmss(p.start)}-${mmss(p.end)}${p.speaker ? ` ${p.speaker}` : ""}${p.lang ? ` ${p.lang}` : ""}: ${cut(p.text.replace(/\s+/g, " "), 90)}`)
+    .join("\n");
 }
 
 const PickSchema = {
@@ -78,6 +83,8 @@ export interface ShortlistResult {
   windows: Window[];
   usd: number;
   usage?: { input_tokens: number; output_tokens: number };
+  /** model calls made (2 for a transcript over SPLIT_PHRASES phrases) */
+  calls?: number;
   model?: string;
   provider?: string;
   estimate?: boolean;
@@ -124,40 +131,62 @@ export async function shortlist(a: ShortlistArgs): Promise<ShortlistResult> {
   const maxSec = a.maxWindowSeconds ?? 120;
   const fallback = (note: string): ShortlistResult => ({ windows: windowsFromHighlights(a.transcript, a.highlights, max), usd: 0, note });
   if (!a.llm) return fallback("shortlist: top highlights (no model)");
-  const index = phraseIndex(a.transcript);
-  const speakers = [...new Set(a.transcript.segments.map((p) => p.speaker).filter(Boolean))];
-  const prompt = fill(loadPrompt("shortlist.user"), {
-    instruction: a.instruction,
-    count: a.transcript.segments.length,
-    speech: mmss(a.transcript.segments.at(-1)?.end ?? 0),
-    speakers: speakers.length ? ` Speakers: ${speakers.join(", ")} (S1 talks the most).` : "",
-    max,
-    max_seconds: maxSec,
-    index,
-  });
-  a.onEvent?.(`  shortlist: ${a.transcript.segments.length} фраз → ≤${max} окон (${estimateTokens(prompt)} токенов)`);
-  try {
-    const res = await a.llm({ system: loadPrompt("shortlist.system"), prompt, schema: PickSchema, effort: "low", maxTokens: 4000 });
-    const out = PickOut.parse(res.data);
-    const segs = a.transcript.segments;
-    const raw: Omit<Window, "id">[] = [];
-    for (const w of out.windows) {
-      const from = Number(/^p(\d+)$/.exec(w.from.trim())?.[1]);
-      const to = Number(/^p(\d+)$/.exec(w.to.trim())?.[1]);
-      if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to >= segs.length || to < from) continue;
-      // split over-long picks at phrase boundaries
-      let s = from;
-      while (s <= to) {
-        let e = s;
-        while (e + 1 <= to && segs[e + 1].end - segs[s].start <= maxSec) e++;
-        raw.push({ start: segs[s].start, end: segs[e].end, why: w.why, source: "model" });
-        s = e + 1;
+  const segs = a.transcript.segments;
+  const speakers = [...new Set(segs.map((p) => p.speaker).filter(Boolean))];
+  // a very long transcript goes in two halves by phrase count, each with its share of the windows
+  const half = Math.ceil(segs.length / 2);
+  const parts: [number, number][] = segs.length > SPLIT_PHRASES ? [[0, half], [half, segs.length]] : [[0, segs.length]];
+
+  const raw: Omit<Window, "id">[] = [];
+  const errors: string[] = [];
+  let usd = 0;
+  const usage = { input_tokens: 0, output_tokens: 0 };
+  let model: string | undefined;
+  let provider: string | undefined;
+  let estimate = false;
+  for (const [n, [from, to]] of parts.entries()) {
+    const partMax = parts.length > 1 ? Math.ceil((max * (to - from)) / segs.length) : max;
+    const prompt = fill(loadPrompt("shortlist.user"), {
+      instruction: a.instruction,
+      count: to - from,
+      speech: mmss((segs[to - 1]?.end ?? 0) - (n > 0 ? segs[from].start : 0)),
+      speakers: speakers.length ? ` Speakers: ${speakers.join(", ")} (S1 talks the most).` : "",
+      max: partMax,
+      max_seconds: maxSec,
+      index: phraseIndex(a.transcript, from, to),
+    });
+    const pass = parts.length > 1 ? ` [проход ${n + 1}/${parts.length}: p${from}–p${to - 1}]` : "";
+    a.onEvent?.(`  shortlist${pass}: ${to - from} фраз → ≤${partMax} окон (${estimateTokens(prompt)} токенов)`);
+    try {
+      const res = await a.llm({ system: loadPrompt("shortlist.system"), prompt, schema: PickSchema, effort: "low", maxTokens: 4000 });
+      usd += res.usd;
+      usage.input_tokens += res.usage.input_tokens;
+      usage.output_tokens += res.usage.output_tokens;
+      model = res.model;
+      provider = res.provider;
+      estimate ||= res.estimate;
+      const out = PickOut.parse(res.data);
+      for (const w of out.windows) {
+        const f = Number(/^p(\d+)$/.exec(w.from.trim())?.[1]);
+        const t = Number(/^p(\d+)$/.exec(w.to.trim())?.[1]);
+        // ids outside this pass's range were not shown to the model
+        if (!Number.isInteger(f) || !Number.isInteger(t) || f < from || t >= to || t < f) continue;
+        // split over-long picks at phrase boundaries
+        let s = f;
+        while (s <= t) {
+          let e = s;
+          while (e + 1 <= t && segs[e + 1].end - segs[s].start <= maxSec) e++;
+          raw.push({ start: segs[s].start, end: segs[e].end, why: w.why, source: "model" });
+          s = e + 1;
+        }
       }
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
     }
-    if (!raw.length) return fallback("shortlist: model returned no usable windows, using top highlights");
-    const windows = mergeWindows(raw, a.transcript).slice(0, max);
-    return { windows, usd: res.usd, usage: { input_tokens: res.usage.input_tokens, output_tokens: res.usage.output_tokens }, model: res.model, provider: res.provider, estimate: res.estimate, note: `shortlist: ${windows.length} окон от модели (${res.model})` };
-  } catch (err) {
-    return fallback(`shortlist: model call failed (${err instanceof Error ? err.message : err}), using top highlights`);
   }
+  const failed = errors.length ? `model call failed (${errors.join("; ")})` : "";
+  if (!raw.length) return fallback(`shortlist: ${failed || "model returned no usable windows"}, using top highlights`);
+  const windows = mergeWindows(raw, a.transcript).slice(0, max);
+  const how = parts.length > 1 ? `${parts.length} прохода, ${model}` : model;
+  return { windows, usd, usage, calls: parts.length, model, provider, estimate, note: `shortlist: ${windows.length} окон от модели (${how})${failed ? `; ${failed}` : ""}` };
 }

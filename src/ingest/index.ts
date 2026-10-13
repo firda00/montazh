@@ -5,12 +5,24 @@ import { MediaSchema, type Media } from "../schemas/index.ts";
 
 export const TARGET_FPS = 30;
 const MAX_LONG_SIDE = 1920;
+/** x264 quality of normalized.mp4: an intermediate, re-encoded again at render; 18 cost +40% size for no visible gain */
+export const X264_CRF = 20;
 
 /** Even dimensions that fit inside MAX_LONG_SIDE, preserving aspect. */
 function normalizedSize(w: number, h: number) {
   const scale = Math.min(1, MAX_LONG_SIDE / Math.max(w, h));
   const even = (n: number) => Math.max(2, Math.round((n * scale) / 2) * 2);
   return { width: even(w), height: even(h) };
+}
+
+/**
+ * Video filter of the normalized copy for a source shown at displayW×displayH. The scaler runs
+ * only when the size changes (too large, or odd dimensions); lanczos on an unchanged size only costs time.
+ */
+export function normalizeFilter(displayW: number, displayH: number): { width: number; height: number; vf: string } {
+  const { width, height } = normalizedSize(displayW, displayH);
+  const scale = width === displayW && height === displayH ? "" : `scale=${width}:${height}:flags=lanczos,`;
+  return { width, height, vf: `${scale}fps=${TARGET_FPS},format=yuv420p,setsar=1` };
 }
 
 /**
@@ -34,7 +46,7 @@ export async function ingest(jobId: string, sourcePath: string): Promise<Media> 
   const rotated = rotation === 90 || rotation === 270;
   const displayW = rotated ? v.height : v.width;
   const displayH = rotated ? v.width : v.height;
-  const { width, height } = normalizedSize(displayW, displayH);
+  const { width, height, vf } = normalizeFilter(displayW, displayH);
 
   const normalized = path.join(dir, "normalized.mp4");
   const args = ["-i", sourcePath];
@@ -42,8 +54,8 @@ export async function ingest(jobId: string, sourcePath: string): Promise<Media> 
   args.push(
     "-map", "0:v:0",
     "-map", a ? "0:a:0" : "1:a:0",
-    "-vf", `scale=${width}:${height}:flags=lanczos,fps=${TARGET_FPS},format=yuv420p,setsar=1`,
-    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+    "-vf", vf,
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", String(X264_CRF),
     "-g", String(TARGET_FPS), "-keyint_min", String(TARGET_FPS),
     "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
     "-t", String(duration),

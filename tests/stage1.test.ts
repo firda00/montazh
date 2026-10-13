@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { atempoChain, cropScaleFilter, expectedDuration, sanitizeClips } from "../src/cut/index.ts";
 import { EdlSchema, type Media } from "../src/schemas/index.ts";
+import { normalizeFilter, X264_CRF } from "../src/ingest/index.ts";
 
 const media = { duration: 60, fps: 30, normalized_path: "n.mp4" } as Media;
 
@@ -52,4 +53,13 @@ test("EDL schema fills defaults and rejects bad plans", () => {
     EdlSchema.safeParse({ outputs: [{ id: "a", aspect: "1:1", clips: [{ src_start: 3, src_end: 1 }] }] }).success,
     false,
   );
+});
+
+test("ingest: scale only when the size changes, CRF 20", () => {
+  assert.deepEqual(normalizeFilter(1920, 1080), { width: 1920, height: 1080, vf: "fps=30,format=yuv420p,setsar=1" });
+  assert.deepEqual(normalizeFilter(1080, 1920), { width: 1080, height: 1920, vf: "fps=30,format=yuv420p,setsar=1" });
+  assert.deepEqual(normalizeFilter(3840, 2160), { width: 1920, height: 1080, vf: "scale=1920:1080:flags=lanczos,fps=30,format=yuv420p,setsar=1" });
+  // odd sizes still need the scaler: yuv420p wants even dimensions
+  assert.equal(normalizeFilter(1279, 719).vf, "scale=1280:720:flags=lanczos,fps=30,format=yuv420p,setsar=1");
+  assert.equal(X264_CRF, 20);
 });

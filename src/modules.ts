@@ -79,7 +79,7 @@ export const MODULES: ModuleDef[] = [
     stage: "understand",
     title: "Распознавание речи",
     what: "фразы и пословные таймкоды",
-    selector: "--asr auto|cpp|faster, VEDIT_ASR; auto = faster только с NVIDIA GPU",
+    selector: "--asr auto|cpp|faster, VEDIT_ASR; auto = faster с NVIDIA GPU или для файлов > 20 мин",
     backends: [
       { id: "cpp", title: "whisper.cpp large-v3-turbo", deps: "whisper-cli, ggml-модель", license: "MIT (код и веса Whisper)" },
       { id: "faster", title: "faster-whisper", deps: "tools/asr/.venv: faster-whisper, CTranslate2", license: "MIT" },
@@ -87,11 +87,11 @@ export const MODULES: ModuleDef[] = [
     step: "understand",
     cost: (e) => /whisper/.test(e.provider),
     probe: async (env) => {
-      const sel = await selectAsr("auto", env).catch(() => ({ engine: "whisper.cpp" as const, python: null }));
-      if (sel.engine === "faster-whisper") return { active: "faster", ready: true, note: "GPU" };
+      const sel = await selectAsr("auto", env).catch(() => ({ engine: "whisper.cpp" as const, python: null, reason: "" }));
+      if (sel.engine === "faster-whisper") return { active: "faster", ready: true, note: sel.reason };
       const ok = (await has(WHISPER_BIN)) && (await has(WHISPER_MODEL));
       const sidecar = await findAsrPython(env);
-      return { active: "cpp", ready: ok, note: ok ? (sidecar ? "faster-whisper установлен, на CPU не используется" : "") : `нет ${(await has(WHISPER_BIN)) ? "модели" : "whisper-cli"}` };
+      return { active: "cpp", ready: ok, note: ok ? (sidecar ? "faster-whisper установлен: на CPU — для файлов > 20 мин" : "") : `нет ${(await has(WHISPER_BIN)) ? "модели" : "whisper-cli"}` };
     },
   },
   {

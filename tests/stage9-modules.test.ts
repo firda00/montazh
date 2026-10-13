@@ -31,6 +31,7 @@ test("prompts: every file loads, templates fill, unknown keys fail, comments are
   assert.ok(!SYSTEM_PROMPT.includes("<!--"), "editor comments never reach the model");
   assert.match(SYSTEM_PROMPT, /^You are the planning stage/);
   assert.match(SYSTEM_PROMPT, /never create new "tS" refs\.$/);
+  assert.match(SYSTEM_PROMPT, /within ±10% of its target.*prefer landing slightly under the target rather than over it\./, "duration rule leans under the target");
   assert.equal(fill("a {{x}} b {{ y }}", { x: 1, y: "z" }), "a 1 b z");
   assert.throws(() => fill("{{nope}}", {}), /no value for \{\{nope\}\}/);
   assert.match(PROMPT_VERSION, /^\d{4}-\d{2}-\d{2}\.\d+\+[0-9a-f]{10}$/);

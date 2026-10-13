@@ -7,17 +7,24 @@ import path from "node:path";
 process.env.VEDIT_WORKSPACE = await fs.mkdtemp(path.join(os.tmpdir(), "vedit-ws-"));
 
 const { createJob, jobDir, readJson, writeJson } = await import("../src/lib/workspace.ts");
-const { transcriptFromFaster, labelSpeakers, resolveSpeaker } = await import("../src/understand/asr.ts");
+const { transcriptFromFaster, labelSpeakers, resolveSpeaker, ASR_SCRIPT } = await import("../src/understand/asr.ts");
 const { selectAsr } = await import("../src/understand/index.ts");
+const { transcribe } = await import("../src/understand/whisper.ts");
 const { buildPlanContext } = await import("../src/plan/context.ts");
-const { shortlist, mergeWindows, windowsFromHighlights, isLong, phraseIndex } = await import("../src/plan/shortlist.ts");
+const { shortlist, mergeWindows, windowsFromHighlights, isLong, phraseIndex, SPLIT_PHRASES } = await import("../src/plan/shortlist.ts");
 const { loadPlanInputs } = await import("../src/plan/index.ts");
 const { BUILTIN_PRESETS } = await import("../src/plan/presets.ts");
 const { MediaSchema, PresetSchema, ScenesSchema, SpeakersSchema, TranscriptSchema, HighlightsSchema, CostSchema } = await import("../src/schemas/index.ts");
 const { MEDIA, makeTranscript } = await import("./helpers/plan-fixture.ts");
 import type { StructuredFn } from "../src/lib/llm.ts";
 import type { SidecarRunner } from "../src/understand/asr.ts";
+import type { ChunkFallback, WhisperCliRunner, WhisperJson } from "../src/understand/whisper.ts";
 import type { Speakers, Transcript } from "../src/schemas/index.ts";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const VENV_PYTHON = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "tools", "asr", ".venv", ...(process.platform === "win32" ? ["Scripts", "python.exe"] : ["bin", "python"]));
 
 const preset = PresetSchema.parse(BUILTIN_PRESETS.bold_pop);
 
@@ -86,15 +93,120 @@ test("labelSpeakers: phrases get speakers from the sidecar, speakers.json is wri
   assert.throws(() => resolveSpeaker("abc", r.transcript, speakers), /expected S<n>/);
 });
 
-test("selectAsr: cpp on a CPU box, faster only with a GPU or when asked, explicit faster needs the sidecar", async () => {
+test("selectAsr: cpp for short files on a CPU box, faster with a GPU, for files over 20 min or when asked; explicit faster needs the sidecar", async () => {
   const venv = { VEDIT_ASR_PYTHON: process.execPath }; // any existing file stands in for the venv python
-  assert.equal((await selectAsr("auto", venv, { gpu: async () => false })).engine, "whisper.cpp");
-  assert.equal((await selectAsr("auto", venv, { gpu: async () => true })).engine, "faster-whisper");
+  const cpu = { gpu: async () => false };
+  assert.equal((await selectAsr("auto", venv, cpu)).engine, "whisper.cpp", "old signature: no duration → short-file rule");
+  assert.deepEqual(await selectAsr("auto", venv, cpu, 19 * 60), { engine: "whisper.cpp", python: null, reason: "CPU, short file" });
+  const long = await selectAsr("auto", venv, cpu, 137 * 60);
+  assert.equal(long.engine, "faster-whisper");
+  assert.equal(long.python, process.execPath);
+  assert.match(long.reason, /^long file \(137 min > 20 min/);
+  const gpu = await selectAsr("auto", venv, { gpu: async () => true });
+  assert.deepEqual([gpu.engine, gpu.reason], ["faster-whisper", "GPU"]);
+  assert.deepEqual(await selectAsr("auto", { VEDIT_ASR_PYTHON: "C:/nope/python.exe" }, cpu, 137 * 60), { engine: "whisper.cpp", python: null, reason: "sidecar not installed" }, "long file without the sidecar stays on whisper.cpp");
+  assert.equal((await selectAsr("cpp", venv, cpu, 137 * 60)).engine, "whisper.cpp", "explicit cpp wins over the long-file rule");
   assert.equal((await selectAsr("faster", venv, { gpu: async () => false })).engine, "faster-whisper");
   assert.equal((await selectAsr("auto", { ...venv, VEDIT_ASR: "faster" }, { gpu: async () => false })).engine, "faster-whisper");
   assert.equal((await selectAsr("cpp", venv)).engine, "whisper.cpp");
   await assert.rejects(() => selectAsr("faster", { VEDIT_ASR_PYTHON: "C:/nope/python.exe" }), /сайдкар не установлен/);
   await assert.rejects(() => selectAsr("auto", { VEDIT_ASR: "turbo" }), /VEDIT_ASR/);
+});
+
+test("speaker sidecar selftest: micro-clusters merge into the nearest speaker (numpy only)", { skip: existsSync(VENV_PYTHON) ? false : `no ASR venv at ${VENV_PYTHON} — selftest skipped` }, () => {
+  const r = spawnSync(VENV_PYTHON, ["-I", ASR_SCRIPT, "selftest"], { encoding: "utf8", windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+  assert.equal(r.status, 0, `selftest failed:\n${r.stdout}\n${r.stderr}`);
+  assert.match(r.stdout, /selftest ok: merge_small_clusters/);
+});
+
+/** 16 kHz mono 16-bit WAV: a 440 Hz tone where `speech` says so, digital silence elsewhere. */
+async function writeToneWav(file: string, seconds: number, speech: [number, number][]) {
+  const rate = 16000;
+  const n = Math.round(seconds * rate);
+  const buf = Buffer.alloc(44 + n * 2);
+  buf.write("RIFF", 0);
+  buf.writeUInt32LE(36 + n * 2, 4);
+  buf.write("WAVEfmt ", 8);
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(rate, 24);
+  buf.writeUInt32LE(rate * 2, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write("data", 36);
+  buf.writeUInt32LE(n * 2, 40);
+  for (let i = 0; i < n; i++) {
+    const t = i / rate;
+    const on = speech.some(([a, b]) => t >= a && t < b);
+    buf.writeInt16LE(on ? Math.round(12000 * Math.sin(2 * Math.PI * 440 * t)) : 0, 44 + i * 2);
+  }
+  await fs.writeFile(file, buf);
+}
+
+function whisperJson(text: string): WhisperJson {
+  const words = text.split(" ");
+  return {
+    result: { language: "ru" },
+    transcription: [{ offsets: { from: 0, to: words.length * 400 }, text: ` ${text}`, tokens: words.map((w, i) => ({ text: ` ${w}`, offsets: { from: i * 400, to: i * 400 + 350 }, p: 0.9, t_dtw: -1 })) }],
+  };
+}
+
+test("transcribe: a failed whisper-cli chunk is retried once, then handed to faster-whisper with chunk-offset times", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vedit-whisper-"));
+  const audio = path.join(dir, "audio.wav");
+  await writeToneWav(audio, 10, [[0, 3], [4, 7], [8, 10]]);
+
+  const calls: string[] = [];
+  // chunk 0 works, chunk 1 crashes once, chunk 2 crashes every time
+  const runCli: WhisperCliRunner = async (wav, outBase) => {
+    const name = path.basename(outBase);
+    calls.push(name);
+    assert.ok(existsSync(wav), "the chunk WAV exists while whisper-cli runs");
+    if (name === "chunk_2" || (name === "chunk_1" && calls.filter((c) => c === name).length === 1)) throw new Error("whisper-cli.exe exited with code 3221226505:\nstack overrun");
+    await fs.writeFile(`${outBase}.json`, JSON.stringify(whisperJson(name === "chunk_0" ? "Первый кусок." : "Второй кусок.")));
+  };
+  const fbCalls: { wav: string; duration: number }[] = [];
+  const fasterFallback: ChunkFallback = async (wav, duration, outDir) => {
+    assert.ok(existsSync(wav), "the chunk WAV is still there for the fallback");
+    fbCalls.push({ wav, duration });
+    return {
+      transcript: { language: "ru", segments: [{ start: 0.5, end: 1.5, text: "Третий кусок.", lang: "ru", words: [{ w: "Третий", start: 0.5, end: 1 }, { w: "кусок.", start: 1, end: 1.5 }] }] },
+      chunks: [{ index: 0, start: 0, end: duration, json: path.join(outDir, "whisper", "faster.json"), language: "ru", wall_seconds: 1 }],
+      model: "large-v3-turbo (faster-whisper, cpu/int8)",
+      method: "faster-whisper",
+      wall_seconds: 1,
+      warnings: ['dropped likely hallucination "Субтитры сделал DimaTorzok"'],
+    };
+  };
+  const r = await transcribe(audio, 10, dir, { chunk: { target: 4 }, runCli, fasterFallback });
+  assert.deepEqual(calls, ["chunk_0", "chunk_1", "chunk_1", "chunk_2", "chunk_2"]);
+  assert.equal(fbCalls.length, 1);
+  assert.equal(path.basename(fbCalls[0].wav), "chunk_2.wav");
+  assert.deepEqual(r.transcript.segments.map((s) => s.text), ["Первый кусок.", "Второй кусок.", "Третий кусок."]);
+  assert.equal(r.chunks.length, 3);
+  assert.deepEqual(r.chunks.map((c) => c.engine), [undefined, undefined, "faster-whisper"]);
+  const c2 = r.chunks[2];
+  assert.ok(Math.abs(fbCalls[0].duration - (c2.end - c2.start)) < 1e-9);
+  const third = r.transcript.segments[2];
+  assert.ok(Math.abs(third.start - (c2.start + 0.5)) < 0.002 && Math.abs(third.end - (c2.start + 1.5)) < 0.002, JSON.stringify({ third, c2 }));
+  assert.ok(Math.abs(third.words[1].start - (c2.start + 1)) < 0.002, "words are shifted too");
+  assert.ok(r.warnings.some((w) => /^chunk 1: retry after whisper-cli\.exe exited with code 3221226505:$/.test(w)), r.warnings.join("\n"));
+  assert.ok(r.warnings.some((w) => /^chunk 2: retry after /.test(w)));
+  assert.ok(r.warnings.some((w) => /^chunk 2 \(.*\): whisper-cli crashed twice, transcribed with faster-whisper$/.test(w)));
+  assert.ok(r.warnings.some((w) => /^chunk 2: dropped likely hallucination/.test(w)));
+  assert.ok(!r.warnings.some((w) => /failed/.test(w)), "nothing is reported as failed");
+  assert.ok(!existsSync(path.join(dir, "whisper", "chunk_2.wav")), "chunk WAVs are cleaned up");
+  const manifest = JSON.parse(await fs.readFile(path.join(dir, "whisper", "chunks.json"), "utf8")) as { chunks: { engine?: string }[] };
+  assert.equal(manifest.chunks[2].engine, "faster-whisper");
+
+  // the fallback fails too → the old warning, with both reasons; no fallback → just whisper-cli's
+  const r2 = await transcribe(audio, 10, dir, { chunk: { target: 4 }, runCli, fasterFallback: async () => { throw new Error("no module torch"); } });
+  assert.equal(r2.chunks.length, 2);
+  assert.ok(r2.warnings.some((w) => /^chunk 2 \(.*\) failed: whisper-cli\.exe exited.*; faster-whisper: no module torch$/s.test(w)), r2.warnings.join("\n"));
+  const r3 = await transcribe(audio, 10, dir, { chunk: { target: 4 }, runCli, fasterFallback: null });
+  assert.equal(r3.chunks.length, 2);
+  assert.ok(r3.warnings.some((w) => /^chunk 2 \(.*\) failed: whisper-cli\.exe exited with code 3221226505:\nstack overrun$/.test(w)), r3.warnings.join("\n"));
 });
 
 function labelled(): Transcript {
@@ -196,6 +308,55 @@ test("shortlist: model windows are expanded to whole phrases with context, merge
   assert.match(r5.note, /failed \(quota\)/);
 
   assert.deepEqual(mergeWindows([{ start: 10, end: 11, why: "a", source: "model" }], { language: "ru", segments: [] }), [{ id: "w0", start: 10, end: 11, why: "a", source: "model" }], "no phrases → windows kept as given");
+});
+
+test("shortlist: over 2000 phrases the index goes in two halves, windows split proportionally, merged and capped; cost summed", async () => {
+  const n = 2100;
+  const t: Transcript = {
+    language: "ru",
+    segments: Array.from({ length: n }, (_v, i) => ({ start: i * 2, end: i * 2 + 1.5, text: `фраза ${i}.`, lang: "ru", words: [{ w: "фраза", start: i * 2, end: i * 2 + 0.7 }, { w: `${i}.`, start: i * 2 + 0.8, end: i * 2 + 1.5 }] })),
+  };
+  assert.ok(n > SPLIT_PHRASES);
+  const prompts: string[] = [];
+  const ids = (p: string) => [...p.matchAll(/^p(\d+) /gm)].map((m) => Number(m[1]));
+  const usage = { input_tokens: 20_000, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, thinking_tokens: 0 };
+  const llm: StructuredFn = async (q) => {
+    prompts.push(q.prompt);
+    const first = ids(q.prompt)[0] === 0;
+    // each half also names an id from the other half, which it never saw: ignored
+    const windows = first
+      ? [{ from: "p10", to: "p12", why: "a" }, { from: "p500", to: "p501", why: "b" }, { from: "p1500", to: "p1501", why: "foreign" }]
+      : [{ from: "p1100", to: "p1102", why: "c" }, { from: "p2099", to: "p2099", why: "d" }, { from: "p5", to: "p6", why: "foreign" }];
+    return { data: { windows }, usage, usd: 0.05, estimate: false, model: "mock-model", provider: "mock" };
+  };
+  const events: string[] = [];
+  const r = await shortlist({ transcript: t, highlights: [], instruction: "лучшее", llm, maxWindows: 3, onEvent: (l) => events.push(l) });
+  assert.equal(prompts.length, 2, "one call per half");
+  const a = ids(prompts[0]);
+  const b = ids(prompts[1]);
+  assert.deepEqual([a.length, a[0], a.at(-1)], [1050, 0, 1049]);
+  assert.deepEqual([b.length, b[0], b.at(-1)], [1050, 1050, 2099]);
+  assert.match(prompts[0], /Pick up to 2 candidate windows/, "ceil(3 × 1050 / 2100) = 2 per half");
+  assert.match(prompts[1], /Pick up to 2 candidate windows/);
+  assert.match(prompts[0], /The video has 1050 phrases/);
+  assert.equal(r.windows.length, 3, "4 usable picks, capped at max");
+  assert.deepEqual(r.windows.map((w) => w.why), ["a", "b", "c"]);
+  assert.ok(!r.windows.some((w) => /foreign/.test(w.why)));
+  assert.equal(r.usd, 0.1);
+  assert.deepEqual(r.usage, { input_tokens: 40_000, output_tokens: 200 });
+  assert.equal(r.calls, 2);
+  assert.match(r.note, /^shortlist: 3 окон от модели \(2 прохода, mock-model\)$/);
+  assert.ok(events.some((e) => /проход 2\/2: p1050–p2099/.test(e)), events.join("\n"));
+
+  // one half failing keeps the other half's windows and says so
+  let k = 0;
+  const flaky: StructuredFn = async (q) => {
+    if (k++ === 0) throw new Error("overloaded");
+    return llm(q);
+  };
+  const r2 = await shortlist({ transcript: t, highlights: [], instruction: "лучшее", llm: flaky, maxWindows: 3 });
+  assert.deepEqual(r2.windows.map((w) => w.why), ["c", "d"]);
+  assert.match(r2.note, /2 прохода.*; model call failed \(overloaded\)/);
 });
 
 test("loadPlanInputs: --speaker needs speakers.json, resolves it, long mode shortlists and revise reuses the same pack", async () => {

@@ -14,6 +14,8 @@ export const UnderstandReportSchema = z.object({
   transcriber: z
     .object({
       engine: z.string(),
+      /** why this engine was chosen (GPU, long file, requested...) */
+      reason: z.string().optional(),
       model: z.string(),
       method: z.string(),
       language: z.string(),
@@ -48,18 +50,35 @@ export interface UnderstandOptions {
   onLog?: (line: string) => void;
 }
 
+/** Above this length `auto` takes faster-whisper even on a CPU: whisper.cpp reloads its model for every ~28 s chunk. */
+export const LONG_ASR_SECONDS = 20 * 60;
+
 /**
- * Which transcriber runs. `faster` needs the sidecar. `auto` takes faster-whisper only when the
- * sidecar is installed AND an NVIDIA GPU is present (nvidia-smi on PATH): on a CPU it is no faster
- * than whisper.cpp, and whisper.cpp detects the language per chunk, which mixed ru/uz videos need.
+ * Which transcriber runs. `faster` needs the sidecar. `auto` takes faster-whisper when the sidecar
+ * is installed AND either an NVIDIA GPU is present (nvidia-smi on PATH) or the file is longer than
+ * 20 minutes (`duration`, seconds): whisper.cpp loads the model once per ~28 s chunk (327 loads on a
+ * 2 h file), while faster-whisper loads it once and has its own VAD. Short files on a CPU stay on
+ * whisper.cpp, which detects the language per chunk, as mixed ru/uz videos need.
+ * `reason` says why the engine was chosen.
  */
-export async function selectAsr(choice: AsrChoice = "auto", env: NodeJS.ProcessEnv = process.env, probe: { gpu?: () => Promise<boolean> } = {}): Promise<{ engine: "faster-whisper" | "whisper.cpp"; python: string | null }> {
+export async function selectAsr(
+  choice: AsrChoice = "auto",
+  env: NodeJS.ProcessEnv = process.env,
+  probe: { gpu?: () => Promise<boolean> } = {},
+  duration?: number,
+): Promise<{ engine: "faster-whisper" | "whisper.cpp"; python: string | null; reason: string }> {
   const want = choice === "auto" ? ((env.VEDIT_ASR?.trim() || "auto") as AsrChoice) : choice;
   if (!["auto", "cpp", "faster"].includes(want)) throw new Error(`VEDIT_ASR: ожидается auto | cpp | faster, получено "${want}"`);
-  const python = want === "cpp" ? null : await findAsrPython(env);
-  if (want === "faster" && !python) throw new Error("--asr faster: сайдкар не установлен (tools/asr/.venv) — см. README «Длинное видео»");
-  if (want === "auto" && python && !(await (probe.gpu ?? (() => hasNvidiaGpu(env)))())) return { engine: "whisper.cpp", python: null };
-  return python ? { engine: "faster-whisper", python } : { engine: "whisper.cpp", python: null };
+  if (want === "cpp") return { engine: "whisper.cpp", python: null, reason: "requested" };
+  const python = await findAsrPython(env);
+  if (want === "faster") {
+    if (!python) throw new Error("--asr faster: сайдкар не установлен (tools/asr/.venv) — см. README «Длинное видео»");
+    return { engine: "faster-whisper", python, reason: "requested" };
+  }
+  if (!python) return { engine: "whisper.cpp", python: null, reason: "sidecar not installed" };
+  if (await (probe.gpu ?? (() => hasNvidiaGpu(env)))()) return { engine: "faster-whisper", python, reason: "GPU" };
+  if (duration !== undefined && duration > LONG_ASR_SECONDS) return { engine: "faster-whisper", python, reason: `long file (${Math.round(duration / 60)} min > ${LONG_ASR_SECONDS / 60} min on CPU: whisper.cpp would reload the model per chunk)` };
+  return { engine: "whisper.cpp", python: null, reason: "CPU, short file" };
 }
 
 async function hasNvidiaGpu(env: NodeJS.ProcessEnv): Promise<boolean> {
@@ -102,7 +121,8 @@ export async function understand(jobId: string, media: Media, opts: UnderstandOp
   // 1. speech → words with timestamps
   let transcript: Transcript = { language: "unknown", segments: [] };
   let transcriber: UnderstandReport["transcriber"] = null;
-  const asr = await selectAsr(opts.asr);
+  const asr = await selectAsr(opts.asr, process.env, {}, media.duration);
+  opts.onLog?.(`speech: ${asr.engine} (${asr.reason})`);
   let speakersReport: UnderstandReport["speakers"] = null;
   if (media.audio_path) {
     try {
@@ -113,6 +133,7 @@ export async function understand(jobId: string, media: Media, opts: UnderstandOp
       transcript = r.transcript;
       transcriber = {
         engine: asr.engine,
+        reason: asr.reason,
         model: r.model,
         method: r.method,
         language: transcript.language,

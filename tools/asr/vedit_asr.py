@@ -6,7 +6,8 @@ and write one JSON file; progress goes to stderr, nothing else goes to stdout.
   transcribe --audio in.wav --out transcript.json [--model large-v3-turbo] [--language ru]
              [--device auto|cpu|cuda] [--compute int8|float16|...] [--threads N]
   speakers   --audio in.wav --phrases phrases.json --out speakers.json
-             [--num-speakers N] [--threshold 0.72] [--min-seconds 0.6]
+             [--num-speakers N] [--threshold 0.72] [--min-seconds 0.6] [--min-cluster-seconds 10]
+  selftest   checks merge_small_clusters on synthetic embeddings (numpy only, no torch/speechbrain)
 
 Licences: faster-whisper (MIT), CTranslate2 (MIT), Whisper weights (MIT), SpeechBrain (Apache-2.0),
 ECAPA-TDNN weights trained on VoxCeleb (speechbrain/spkrec-ecapa-voxceleb, Apache-2.0).
@@ -121,6 +122,47 @@ def read_wav(path: str):
     return data, rate
 
 
+def merge_small_clusters(labels, embs, seconds_per_phrase, min_seconds: float = 10.0, min_phrases: int = 3) -> list[int]:
+    """Folds micro-clusters (laughter, interjections, a repeated name) into real speakers.
+
+    labels: cluster id per phrase; embs: (n, d) L2-normalised embeddings in the same order;
+    seconds_per_phrase: speech seconds of each phrase. While more than one cluster remains, the
+    smallest cluster with < min_seconds of speech or < min_phrases phrases is merged into the
+    cluster whose centroid is nearest by cosine distance. Returns labels renumbered 0..k-1 in
+    order of first appearance.
+    """
+    import numpy as np
+
+    X = np.asarray(embs, dtype=np.float64)
+    lab = [int(l) for l in labels]
+    secs = [float(x) for x in seconds_per_phrase]
+    if not (len(lab) == len(X) == len(secs)):
+        raise ValueError("labels, embs and seconds_per_phrase must have the same length")
+    while True:
+        ids = sorted(set(lab))
+        if len(ids) <= 1:
+            break
+        total = {c: 0.0 for c in ids}
+        count = {c: 0 for c in ids}
+        for l, sec in zip(lab, secs):
+            total[l] += sec
+            count[l] += 1
+        small = [c for c in ids if total[c] < min_seconds or count[c] < min_phrases]
+        if not small:
+            break
+        victim = min(small, key=lambda c: (total[c], count[c], c))
+        cents = {}
+        for c in ids:
+            m = X[[i for i, l in enumerate(lab) if l == c]].mean(axis=0)
+            cents[c] = m / (np.linalg.norm(m) + 1e-9)
+        target = min((c for c in ids if c != victim), key=lambda c: (1.0 - float(np.dot(cents[victim], cents[c])), c))
+        lab = [target if l == victim else l for l in lab]
+    order: dict[int, int] = {}
+    for l in lab:
+        order.setdefault(l, len(order))
+    return [order[l] for l in lab]
+
+
 def cmd_speakers(a: argparse.Namespace) -> None:
     import numpy as np
     import torch
@@ -181,9 +223,16 @@ def cmd_speakers(a: argparse.Namespace) -> None:
         else:
             # cosine distance threshold: ECAPA same-speaker pairs sit well below ~0.7 on VoxCeleb
             cl = fcluster(Z, t=a.threshold, criterion="distance")
+        cl = [int(c) - 1 for c in cl]
+        if a.min_cluster_seconds > 0 and not a.num_speakers:
+            # micro-clusters (laughter, "Grok, Grok", interjections) join the nearest real speaker
+            before = len(set(cl))
+            cl = merge_small_clusters(cl, X, [float(phrases[i]["end"]) - float(phrases[i]["start"]) for i in valid], a.min_cluster_seconds)
+            if len(set(cl)) < before:
+                log(f"  merged {before - len(set(cl))} small cluster(s) (< {a.min_cluster_seconds:g} s or < 3 phrases)")
         for i, c in zip(valid, cl):
-            labels[i] = int(c) - 1
-        n_speakers = int(cl.max())
+            labels[i] = c
+        n_speakers = len(set(cl))
 
     # phrases without an embedding inherit the nearest labelled neighbour in time
     for i, l in enumerate(labels):
@@ -220,12 +269,57 @@ def cmd_speakers(a: argparse.Namespace) -> None:
         {
             "engine": "speechbrain/spkrec-ecapa-voxceleb + agglomerative",
             "threshold": a.threshold,
+            "min_cluster_seconds": a.min_cluster_seconds,
             "num_speakers": n_speakers,
             "speakers": speakers,
             "phrases": out_phrases,
             "wall_seconds": round(time.time() - t0, 2),
         },
     )
+
+
+# ---------------------------------------------------------------- selftest
+
+def cmd_selftest(a: argparse.Namespace) -> None:
+    """Synthetic check of merge_small_clusters: two real voices plus micro-clusters near each."""
+    import numpy as np
+
+    rng = np.random.default_rng(7)
+    d = 192
+
+    def unit(v):
+        return v / np.linalg.norm(v)
+
+    voice_a, voice_b = unit(rng.normal(size=d)), unit(rng.normal(size=d))
+    near = lambda base, k: [unit(base + 0.15 * rng.normal(size=d)) for _ in range(k)]
+    # A: 20 phrases x 4 s; B: 12 x 3 s; micro 2 (near A): 2 x 1.5 s; micro 3 (near B): 5 x 1 s; micro 4 (near A): 1 x 20 s
+    embs = near(voice_a, 20) + near(voice_b, 12) + near(voice_a, 2) + near(voice_b, 5) + near(voice_a, 1)
+    labels = [0] * 20 + [1] * 12 + [2] * 2 + [3] * 5 + [4] * 1
+    secs = [4.0] * 20 + [3.0] * 12 + [1.5] * 2 + [1.0] * 5 + [20.0] * 1
+
+    out = merge_small_clusters(labels, np.stack(embs), secs, 10.0)
+    assert len(out) == len(labels)
+    assert len(set(out)) == 2, f"expected 2 clusters, got {len(set(out))}: {out}"
+    a_id, b_id = out[0], out[20]
+    assert a_id != b_id
+    assert all(x == a_id for x in out[:20]) and all(x == b_id for x in out[20:32]), "real clusters stay intact"
+    assert out[32] == out[33] == a_id, "short micro-cluster near A merged into A"
+    assert all(x == b_id for x in out[34:39]), "5-phrase micro-cluster under 10 s merged into B"
+    assert out[39] == a_id, "a single phrase (< 3 phrases) merges even with 20 s of speech"
+
+    # every cluster small: merging stops at one cluster, never at zero
+    one = merge_small_clusters([0, 1, 2], np.stack(near(voice_a, 1) + near(voice_b, 2)), [1.0, 1.0, 1.0], 10.0)
+    assert one == [0, 0, 0], one
+    # nothing small: labels unchanged (renumbered by first appearance)
+    same = merge_small_clusters([5] * 3 + [2] * 3, np.stack(near(voice_a, 3) + near(voice_b, 3)), [5.0] * 6, 10.0)
+    assert same == [0, 0, 0, 1, 1, 1], same
+    # threshold 0 disables the seconds rule but keeps the phrase-count rule
+    kept = merge_small_clusters([0] * 3 + [1] * 3, np.stack(near(voice_a, 3) + near(voice_b, 3)), [0.5] * 6, 0.0)
+    assert len(set(kept)) == 2, kept
+    # single cluster and empty input
+    assert merge_small_clusters([3], np.stack(near(voice_a, 1)), [0.2], 10.0) == [0]
+    assert merge_small_clusters([], np.zeros((0, d)), [], 10.0) == []
+    print("selftest ok: merge_small_clusters")
 
 
 def main() -> None:
@@ -250,7 +344,11 @@ def main() -> None:
     s.add_argument("--num-speakers", type=int, default=0)
     s.add_argument("--threshold", type=float, default=0.72)
     s.add_argument("--min-seconds", type=float, default=0.6)
+    s.add_argument("--min-cluster-seconds", type=float, default=10.0, help="merge clusters with less speech (or < 3 phrases) into the nearest one; 0 = off")
     s.set_defaults(fn=cmd_speakers)
+
+    st = sub.add_parser("selftest")
+    st.set_defaults(fn=cmd_selftest)
 
     a = ap.parse_args()
     a.fn(a)

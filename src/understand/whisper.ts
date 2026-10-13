@@ -227,13 +227,26 @@ export interface TranscribeOptions {
   language?: string; // whisper code; default: auto-detect per chunk
   method?: TimestampMethod;
   chunk?: ChunkOptions;
+  /** runs whisper-cli on one chunk WAV (tests inject a fake) */
+  runCli?: WhisperCliRunner;
+  /**
+   * second engine for a chunk whisper-cli failed on twice; default: faster-whisper when its
+   * sidecar is installed (tools/asr/.venv); null = none, the chunk is skipped with a warning
+   */
+  fasterFallback?: ChunkFallback | null;
 }
+
+export type WhisperCliRunner = (wav: string, outBase: string, o: { threads: number; language: string; preset: string | null }) => Promise<void>;
+/** Transcribes one chunk WAV; times in the result are relative to the chunk start. */
+export type ChunkFallback = (wav: string, duration: number, outDir: string, o: { language?: string; threads: number }) => Promise<TranscribeResult>;
 
 export interface ChunkRecord extends Span {
   index: number;
   json: string;
   language: string;
   wall_seconds: number;
+  /** set when the chunk did not come from whisper.cpp */
+  engine?: "faster-whisper";
 }
 
 export interface TranscribeResult {
@@ -247,13 +260,14 @@ export interface TranscribeResult {
 
 /**
  * Transcribes a 16 kHz mono WAV with whisper.cpp. Raw per-chunk output is kept in
- * <outDir>/whisper/chunk_<n>.json plus a chunks.json manifest.
+ * <outDir>/whisper/chunk_<n>.json plus a chunks.json manifest. A chunk whisper-cli fails on is
+ * retried once, then handed to faster-whisper (when installed); only then is it skipped.
  */
 export async function transcribe(audioPath: string, duration: number, outDir: string, opts: TranscribeOptions = {}): Promise<TranscribeResult> {
-  if (!(await exists(WHISPER_BIN))) {
+  if (!opts.runCli && !(await exists(WHISPER_BIN))) {
     throw new Error(`whisper-cli not found at ${WHISPER_BIN}. Download a whisper.cpp release into vendor/whisper/bin or set WHISPER_BIN.`);
   }
-  if (!(await exists(WHISPER_MODEL))) {
+  if (!opts.runCli && !(await exists(WHISPER_MODEL))) {
     throw new Error(`whisper model not found at ${WHISPER_MODEL}. See README (stage 2) or set WHISPER_MODEL.`);
   }
   const warnings: string[] = [];
@@ -274,18 +288,55 @@ export async function transcribe(audioPath: string, duration: number, outDir: st
   const t0 = Date.now();
   const chunks: ChunkRecord[] = [];
   const segments: Segment[] = [];
+  const cli = opts.runCli ?? runWhisperCli;
+  // resolved on the first chunk that needs it
+  let fallbackFn: Promise<ChunkFallback | null> | undefined;
   for (const [index, span] of spans.entries()) {
     const wav = path.join(workDir, `chunk_${index}.wav`);
     const base = path.join(workDir, `chunk_${index}`);
     await ffmpeg(["-ss", span.start.toFixed(3), "-t", (span.end - span.start).toFixed(3), "-i", audioPath, "-c:a", "pcm_s16le", wav]);
     const tc = Date.now();
+    const cliOpts = { threads, language: opts.language ?? "auto", preset };
+    let cliError: string | null = null;
+    let fallback: TranscribeResult | null = null;
+    let fallbackError: string | null = null;
     try {
-      await runWhisperCli(wav, base, { threads, language: opts.language ?? "auto", preset });
-    } catch (err) {
-      warnings.push(`chunk ${index} (${span.start.toFixed(1)}-${span.end.toFixed(1)}s) failed: ${err instanceof Error ? err.message : String(err)}`);
-      continue;
+      try {
+        await cli(wav, base, cliOpts);
+      } catch (err) {
+        // whisper-cli now and then crashes on one chunk (0xC0000409 on Windows); a second run usually goes through
+        warnings.push(`chunk ${index}: retry after ${errorText(err).split("\n")[0]}`);
+        try {
+          await cli(wav, base, cliOpts);
+        } catch (err2) {
+          cliError = errorText(err2);
+        }
+      }
+      if (cliError) {
+        fallbackFn ??= opts.fasterFallback !== undefined ? Promise.resolve(opts.fasterFallback) : sidecarChunkFallback();
+        const fb = await fallbackFn;
+        if (fb) {
+          try {
+            fallback = await fb(wav, span.end - span.start, path.join(workDir, `chunk_${index}_faster`), { language: opts.language, threads });
+          } catch (err) {
+            fallbackError = errorText(err);
+          }
+        }
+      }
     } finally {
       await fs.rm(wav, { force: true });
+    }
+    const where = `chunk ${index} (${span.start.toFixed(1)}-${span.end.toFixed(1)}s)`;
+    if (cliError && !fallback) {
+      warnings.push(`${where} failed: ${cliError}${fallbackError ? `; faster-whisper: ${fallbackError}` : ""}`);
+      continue;
+    }
+    if (fallback) {
+      warnings.push(`${where}: whisper-cli crashed twice, transcribed with faster-whisper`);
+      for (const w of fallback.warnings) warnings.push(`chunk ${index}: ${w}`);
+      segments.push(...shiftSegments(fallback.transcript.segments, span.start));
+      chunks.push({ index, ...span, json: fallback.chunks[0]?.json ?? "", language: fallback.transcript.language, wall_seconds: (Date.now() - tc) / 1000, engine: "faster-whisper" });
+      continue;
     }
     const raw = JSON.parse(await fs.readFile(`${base}.json`, "utf8")) as WhisperJson;
     const part = parseWhisperJson(raw, method, span.start, silences);
@@ -311,7 +362,25 @@ export async function transcribe(audioPath: string, duration: number, outDir: st
   };
 }
 
-async function runWhisperCli(wav: string, outBase: string, o: { threads: number; language: string; preset: string | null }) {
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Moves chunk-relative phrases (and their words) to file time. */
+export function shiftSegments(segs: Segment[], by: number): Segment[] {
+  const t = (x: number) => Math.round((x + by) * 1000) / 1000;
+  return segs.map((s) => ({ ...s, start: t(s.start), end: t(s.end), words: s.words.map((w) => ({ ...w, start: t(w.start), end: t(w.end) })) }));
+}
+
+/** faster-whisper on one chunk, when the sidecar is installed. */
+async function sidecarChunkFallback(): Promise<ChunkFallback | null> {
+  // loaded lazily: asr.ts imports this module
+  const { findAsrPython, transcribeFaster } = await import("./asr.ts");
+  const python = await findAsrPython();
+  return python ? (wav, duration, dir, o) => transcribeFaster(wav, duration, dir, { python, language: o.language, threads: o.threads }) : null;
+}
+
+export const runWhisperCli: WhisperCliRunner = async (wav, outBase, o) => {
   // whisper.cpp (Windows build) aborts with 0xC0000409 when a *model* path contains
   // non-ASCII characters; audio/output paths are fine. So the process runs inside the
   // model's directory and gets the model by file name.
@@ -327,4 +396,4 @@ async function runWhisperCli(wav: string, outBase: string, o: { threads: number;
   ];
   if (o.preset) args.push("-dtw", o.preset);
   await runProcess(WHISPER_BIN, args, { cwd });
-}
+};

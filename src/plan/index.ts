@@ -121,7 +121,7 @@ export async function loadPlanInputs(jobId: string, presetName: string, sel: Sel
       windows = r.windows;
       warnings.push(r.note);
       if (r.usage) {
-        await addCost(jobId, { step: "plan", provider: r.provider === "anthropic" ? "anthropic" : (r.provider ?? "shortlist"), model: r.model ?? "shortlist", units: { ...r.usage, calls: 1, shortlist: 1, estimate: r.estimate ? 1 : 0 }, usd: r.usd });
+        await addCost(jobId, { step: "plan", provider: r.provider === "anthropic" ? "anthropic" : (r.provider ?? "shortlist"), model: r.model ?? "shortlist", units: { ...r.usage, calls: r.calls ?? 1, shortlist: 1, estimate: r.estimate ? 1 : 0 }, usd: r.usd });
       }
     }
   }
