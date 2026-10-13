@@ -1,0 +1,11 @@
+<!-- Prompt for the Antigravity CLI research agent (it has web search and page reading). -->
+Research what is being said about the topic below THIS WEEK, for a short-form video maker. Use your web search tool: run 3–5 searches (news, YouTube, Reddit/Telegram discussions, "{{topic}} 2026"), open the 3–6 most relevant pages, and extract:
+- facts: concrete, checkable statements with a number, a name or a date, each with the URL you took it from;
+- angles: 4–6 ways to frame a 30-second video on this topic that people are reacting to right now;
+- hooks: 5 opening lines (≤ 12 words each) in {{language}} that would make a viewer stop scrolling;
+- avoid: claims that are disputed or unverified, so the script does not repeat them.
+
+TOPIC: {{topic}}
+LANGUAGE OF THE AUDIENCE: {{language}}
+
+Answer with the JSON object only.

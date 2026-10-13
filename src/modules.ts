@@ -215,6 +215,25 @@ export const MODULES: ModuleDef[] = [
     },
   },
   {
+    id: "make",
+    stage: "design",
+    title: "Ролик из ничего",
+    what: "тема → тренды → сценарий → иконки и моушн-графика → MP4 (без голоса)",
+    selector: "vedit make <тема> / Telegram /make; --no-trends, --music, --script",
+    backends: [
+      { id: "agy-trends", title: "Тренды: Antigravity CLI (поиск в вебе)", deps: "agy + вход Google", license: "условия Antigravity; $0" },
+      { id: "claude-script", title: "Сценарий: structured-вызов Claude", deps: "как планировщик", license: "как планировщик" },
+      { id: "lucide", title: "Иконки Lucide", deps: "lucide-static (npm)", license: "ISC" },
+      { id: "hyperframes", title: "Композиция и рендер HyperFrames", deps: "hyperframes, Chromium, GSAP, Inter", license: "Apache-2.0; GSAP Standard; OFL-1.1" },
+    ],
+    job: (j) => /make:/.test(j.source),
+    probe: async (env) => {
+      const script = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || env.CLAUDE_CODE_OAUTH_TOKEN || claudeLoginExists(env));
+      const agy = !!(await findAgy(env));
+      return { active: agy ? "agy-trends+claude-script" : "claude-script", ready: script, note: script ? (agy ? "" : "без agy тренды пропускаются") : "нет входа Claude для сценария" };
+    },
+  },
+  {
     id: "bot",
     stage: "delivery",
     title: "Telegram-бот",
@@ -234,7 +253,7 @@ export const MODULES: ModuleDef[] = [
     what: "vedit run/plan/revise/render, batch по папке",
     selector: "всегда",
     backends: [{ id: "commander", title: "commander", deps: "commander", license: "MIT" }],
-    job: (j) => !/[\\/]_bot[\\/]/.test(j.source),
+    job: (j) => !/[\\/]_bot[\\/]/.test(j.source) && !/make:/.test(j.source),
     probe: async () => ({ active: "commander", ready: true, note: "" }),
   },
 ];

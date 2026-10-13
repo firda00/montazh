@@ -32,6 +32,7 @@ export const MSG = {
     "Команды:",
     "/status — состояние последней задачи",
     "/revise <что изменить> — правка последнего монтажа (перережу и перерендерю только затронутое)",
+    "/make <тема> — ролик по теме из ничего: тренды, сценарий, иконки и моушн-графика (без голоса)",
     "/cancel — отменить текущую работу (после текущего шага)",
     "/start — эта справка",
   ].join("\n"),
@@ -41,6 +42,8 @@ export const MSG = {
   notVideo: "Это не похоже на видео. Пришлите ролик как видео или файлом с типом video/*.",
   noJob: "Пока нет задач. Пришлите видео и напишите задачу.",
   reviseUsage: "Напишите, что изменить: /revise в reel_1 убери приветствие",
+  makeUsage: "Напишите тему: /make почему кофе дорожает в 2026",
+  makeStart: "Делаю ролик по теме: тренды → сценарий → графика → рендер. Это 3–6 минут.",
   reviseNoJob: "Нечего править: сначала смонтируйте видео (пришлите видео и задачу).",
   nothingToCancel: "Сейчас ничего не выполняется.",
   cancelling: "Отменяю — остановлюсь после текущего шага.",
@@ -92,6 +95,29 @@ export interface ReviseArgs {
 }
 export type PipelineFn = (args: PipelineArgs) => Promise<PipelineResult>;
 export type ReviseFn = (args: ReviseArgs) => Promise<PipelineResult>;
+export interface MakeArgs {
+  topic: string;
+  progress: (text: string) => Promise<void>;
+  onJob: (jobId: string) => void;
+  signal: AbortSignal;
+  log: (line: string) => void;
+}
+export type MakeFn = (args: MakeArgs) => Promise<PipelineResult>;
+
+/** /make: topic → video from nothing (trends → script → motion graphics → render). */
+export const runMakePipeline: MakeFn = async ({ topic, progress, onJob, signal, log }) => {
+  const { make } = await import("../make/index.ts");
+  const r = await make(topic, {
+    signal,
+    onEvent: (l) => {
+      if (/^job /.test(l)) onJob(l.slice(4).trim());
+      else if (/^▸/.test(l)) void progress(l);
+      else log(`  ${l.trim()}`);
+    },
+  });
+  const notes = r.warnings.slice(0, 3);
+  return { jobId: r.jobId, outputs: [{ id: "make", file: r.output, duration: r.duration, aspect: "9:16" }], reasoning: `${r.title}\n${r.script.beats.map((b) => `· ${b.text}`).join("\n")}${r.script.hashtags.length ? `\n#${r.script.hashtags.join(" #")}` : ""}`, notes };
+};
 
 class CancelledError extends Error {
   constructor() {
@@ -241,7 +267,7 @@ export type ChatState = z.infer<typeof ChatStateSchema>;
 export type BotState = z.infer<typeof BotStateSchema>;
 
 interface Running {
-  kind: "run" | "revise";
+  kind: "run" | "revise" | "make";
   stage: string;
   startedAt: number;
   ac: AbortController;
@@ -265,6 +291,7 @@ export interface BotOptions {
   limits?: Partial<Limits>;
   pipeline?: PipelineFn;
   revise?: ReviseFn;
+  make?: MakeFn;
   /** long-polling timeout, seconds (default 30) */
   pollTimeout?: number;
   /** pause after a failed getUpdates, ms (default 3000) */
@@ -317,6 +344,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   const api = o.api ?? makeBotApi(o.token, { callMethod: o.callMethod, download: o.download, apiBase: o.apiBase, limits: o.limits });
   const pipelineFn = o.pipeline ?? runFullPipeline;
   const reviseFn = o.revise ?? runRevisePipeline;
+  const makeFn = o.make ?? runMakePipeline;
   const preset = o.preset ?? "bold_pop";
   const botDir = path.join(path.resolve(o.workspace ?? WORKSPACE_ROOT), "_bot");
   const stateFile = path.join(botDir, "state.json");
@@ -438,6 +466,13 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     );
   }
 
+  async function startMake(chatId: number, topic: string) {
+    if (!topic) return say(chatId, MSG.makeUsage);
+    await updateChat(chatId, { prompt: topic });
+    await say(chatId, MSG.makeStart);
+    launch(chatId, "make", (r) => makeFn({ topic, progress: progressFor(chatId, r), onJob: (jobId) => void updateChat(chatId, { jobId }), signal: r.ac.signal, log: (l) => log(`[${chatId}] ${l}`) }));
+  }
+
   async function startRevise(chatId: number, edit: string) {
     const jobId = chat(chatId).jobId;
     if (!edit) return say(chatId, MSG.reviseUsage);
@@ -450,7 +485,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const c = chat(chatId);
     const r = running.get(chatId);
     const lines: string[] = [];
-    if (r) lines.push(`Сейчас: ${r.kind === "run" ? "монтаж" : "правка"}, шаг «${r.stage}», ${((Date.now() - r.startedAt) / 1000).toFixed(0)} с${r.ac.signal.aborted ? " (отменяется)" : ""}`);
+    if (r) lines.push(`Сейчас: ${r.kind === "run" ? "монтаж" : r.kind === "make" ? "ролик по теме" : "правка"}, шаг «${r.stage}», ${((Date.now() - r.startedAt) / 1000).toFixed(0)} с${r.ac.signal.aborted ? " (отменяется)" : ""}`);
     if (c.source) lines.push(`Видео: ${path.basename(c.source)}`);
     if (c.prompt) lines.push(`Задача: ${excerpt(c.prompt, 200)}`);
     if (c.jobId) {
@@ -521,6 +556,9 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         case "revise":
           if (running.has(chatId)) return say(chatId, MSG.busy);
           return startRevise(chatId, arg);
+        case "make":
+          if (running.has(chatId)) return say(chatId, MSG.busy);
+          return startMake(chatId, arg);
         default:
           return say(chatId, MSG.unknownCommand);
       }

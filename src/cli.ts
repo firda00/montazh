@@ -507,6 +507,32 @@ program
   });
 
 program
+  .command("make")
+  .description("ролик по теме из ничего: тренды (Antigravity) → сценарий (Claude) → иконки и моушн-графика (HyperFrames) → MP4")
+  .argument("<topic>", "тема ролика")
+  .option("--lang <code>", "язык: ru | uz | en", "ru")
+  .option("--seconds <n>", "целевая длина, с", (v) => Number(v), 35)
+  .option("--audience <text>", "для кого ролик")
+  .option("--no-trends", "без исследования трендов")
+  .option("--music <file>", "музыкальная подложка (mp3/ogg/wav), зацикливается, −14 LUFS")
+  .option("--quality <q>", "draft | looks | delivery", "looks")
+  .option("--model <id>", "модель сценариста")
+  .option("--script <file>", "отрендерить сохранённый script.json как есть (без трендов и модели)")
+  .action(async (topic: string, opts: { lang: string; seconds: number; audience?: string; trends: boolean; music?: string; quality: "draft" | "looks" | "delivery"; model?: string; script?: string }) => {
+    try {
+      if (!["draft", "looks", "delivery"].includes(opts.quality)) throw new Error("--quality: ожидается draft | looks | delivery");
+      if (!Number.isFinite(opts.seconds) || opts.seconds < 15 || opts.seconds > 90) throw new Error("--seconds: ожидается 15–90");
+      const { make } = await import("./make/index.ts");
+      const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, quality: opts.quality, model: opts.model, scriptFile: opts.script, onEvent: (l) => console.log(l) });
+      console.log(`\n✔ ${r.output} (${r.duration.toFixed(1)} с, ${r.beats} битов, рендер ${r.render_seconds.toFixed(0)} с${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""})`);
+      if (r.script.hashtags.length) console.log(`  #${r.script.hashtags.join(" #")}`);
+      for (const w of r.warnings) console.log(`  ⚠ ${w}`);
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+program
   .command("modules")
   .description("реестр модулей: бэкенд, готовность, использование и стоимость по задачам")
   .option("--days <n>", "окно статистики, дней", (v) => Number(v), 30)
