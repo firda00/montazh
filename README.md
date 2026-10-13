@@ -214,6 +214,26 @@ node bin/vedit.mjs run D:/видео/podcast.mp4 -p "10 рилсов по 30 с�
 vision через agy ~10–15 мин, шортлист + план 2–4 мин, рендер ~1 мин на 30-секундный рилс. На сервере с GPU — минус
 час на распознавании. Не проверено на реальном часовом ролике: нужен файл.
 
+## Внешний GPU для речи (Google Colab T4)
+
+Распознавание 2 ч 17 мин речи на этом ноутбуке заняло 157 минут; на бесплатном Colab с T4 это ~5 минут, а
+остальной пайплайн (сцены, Antigravity, план, нарезка, рендер) остаётся локальным. Схема:
+
+```bash
+node bin/vedit.mjs ingest video.mp4               # → job
+node bin/vedit.mjs asr-export <job>               # → workspace/<job>/asr_upload.ogg (Opus 48 кбит/с, ~20 МБ на час)
+# Colab: открыть tools/asr/colab_vedit_asr.ipynb (GPU T4), загрузить asr_upload.ogg и tools/asr/vedit_asr.py,
+# выполнить все ячейки → скачается asr_bundle.zip (faster.json, phrases.json, speakers_raw.json)
+node bin/vedit.mjs asr-import <job> asr_bundle.zip   # → transcript.json, speakers.json, asr_import.json
+node bin/vedit.mjs understand <job> --asr import     # сцены + vision поверх импортированной речи
+node bin/vedit.mjs plan <job> -p "…" --speaker most --cut && node bin/vedit.mjs render <job>
+```
+
+В Colab работает тот же `vedit_asr.py` (команда `pipeline`: faster-whisper large-v3-turbo float16 на CUDA →
+говорящие ECAPA на CUDA → папка бандла). Говорящие размечаются на сырых сегментах whisper; при импорте каждая
+фраза после разбиения по предложениям берёт метку сегмента, в который попадает её середина. Ограничения Colab:
+бесплатная сессия до ~5 часов, ~12 ГБ RAM, файлы загружаются через браузер (поэтому Opus, а не WAV).
+
 ## Модули и промпты
 
 Проект собран из сменных модулей; `vedit modules` показывает, какой бэкенд активен, готов ли он на этой машине и

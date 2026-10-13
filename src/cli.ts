@@ -214,7 +214,7 @@ withRenderOptions(
       .option("--no-render", "остановиться после черновой нарезки")
       .option("--language <code>", "язык речи для whisper (по умолчанию auto)")
       .option("--vision <provider>", "stub | auto | gemini | agy", "auto")
-      .option("--asr <engine>", "auto | cpp | faster — движок распознавания речи (env VEDIT_ASR)", "auto")
+      .option("--asr <engine>", "auto | cpp | faster | import — движок распознавания речи (import = из vedit asr-import, env VEDIT_ASR)", "auto")
       .option("--no-diarize", "не размечать говорящих")
       .option("--speakers <n>", "сколько говорящих ожидать (по умолчанию определяется)", (v) => Number(v)),
   ),
@@ -306,7 +306,7 @@ program
   .option("--threads <n>", "потоки whisper", (v) => Number(v))
   .option("--method <m>", "dtw | tokens — способ пословных таймкодов", "dtw")
   .option("--vision <provider>", "stub | auto | gemini | agy", "auto")
-  .option("--asr <engine>", "auto | cpp | faster — движок распознавания речи (env VEDIT_ASR)", "auto")
+  .option("--asr <engine>", "auto | cpp | faster | import — движок распознавания речи (import = из vedit asr-import, env VEDIT_ASR)", "auto")
   .option("--no-diarize", "не размечать говорящих")
   .option("--speakers <n>", "сколько говорящих ожидать (по умолчанию определяется)", (v) => Number(v))
   .action(async (jobId: string, opts: { language?: string; threads?: number; method: "dtw" | "tokens"; vision: VisionChoice; asr: AsrChoice; diarize: boolean; speakers?: number }) => {
@@ -465,6 +465,42 @@ program
         const est = cost.entries.some((e) => e.units.estimate === 1);
         console.log(`стоимость API: ${est ? "≈" : ""}$${cost.total_usd.toFixed(4)}`);
       }
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+program
+  .command("asr-export")
+  .description("упаковать звук задачи для распознавания на внешнем GPU (Colab): <job>/asr_upload.ogg")
+  .argument("<job_id>")
+  .action(async (jobId: string) => {
+    try {
+      await loadJob(jobId);
+      const { exportAsrAudio } = await import("./understand/asr-import.ts");
+      const r = await exportAsrAudio(jobId);
+      console.log(`✔ ${r.file} (${(r.bytes / 1024 / 1024).toFixed(1)} МБ)`);
+      console.log("дальше: загрузите файл и tools/asr/vedit_asr.py в tools/asr/colab_vedit_asr.ipynb (Colab, GPU T4), скачайте asr_bundle.zip и выполните:");
+      console.log(`  vedit asr-import ${jobId} asr_bundle.zip && vedit understand ${jobId} --asr import`);
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+program
+  .command("asr-import")
+  .description("импортировать распознанную на внешнем GPU речь (asr_bundle.zip или папку с faster.json)")
+  .argument("<job_id>")
+  .argument("<bundle>", "zip или папка с faster.json, phrases.json, speakers_raw.json")
+  .action(async (jobId: string, bundle: string) => {
+    try {
+      await loadJob(jobId);
+      const { importAsrBundle } = await import("./understand/asr-import.ts");
+      const r = await importAsrBundle(jobId, bundle);
+      console.log(`✔ речь: ${r.marker.language}, ${r.transcript.segments.length} фраз, ${r.transcript.segments.reduce((n, s) => n + s.words.length, 0)} слов (${r.marker.model} на ${r.marker.device}, ${r.marker.wall_seconds}s)`);
+      if (r.speakers) console.log(`✔ говорящие: ${r.speakers.speakers.map((s) => `${s.id} ${s.seconds}s`).join(", ")}`);
+      for (const w of r.warnings) console.log(`  ⚠ ${w}`);
+      console.log(`дальше: vedit understand ${jobId} --asr import`);
     } catch (err) {
       fail(err);
     }

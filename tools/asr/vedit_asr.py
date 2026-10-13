@@ -176,15 +176,22 @@ def cmd_speakers(a: argparse.Namespace) -> None:
     if rate != 16000:
         raise SystemExit(f"expected 16 kHz audio, got {rate}")
 
+    # a cached encoder must not wait on the Hub (unauthenticated requests can stall for minutes)
+    cached = MODELS_DIR / "spkrec-ecapa-voxceleb"
+    if (cached / "hyperparams.yaml").exists() and (cached / "embedding_model.ckpt").exists():
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
     from speechbrain.inference.speaker import EncoderClassifier
     from speechbrain.utils.fetching import LocalStrategy
 
-    log("loading ECAPA speaker encoder")
+    device = getattr(a, "device", "auto")
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    log(f"loading ECAPA speaker encoder on {device}")
     # COPY_SKIP_CACHE: files land in savedir directly; the default SYMLINK strategy needs admin rights on Windows
     enc = EncoderClassifier.from_hparams(
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir=str(MODELS_DIR / "spkrec-ecapa-voxceleb"),
-        run_opts={"device": "cpu"},
+        run_opts={"device": device},
         local_strategy=LocalStrategy.COPY_SKIP_CACHE,
     )
 
@@ -201,7 +208,7 @@ def cmd_speakers(a: argparse.Namespace) -> None:
             embs.append(None)
             continue
         with torch.no_grad():
-            v = enc.encode_batch(torch.from_numpy(seg).unsqueeze(0)).squeeze().cpu().numpy()
+            v = enc.encode_batch(torch.from_numpy(seg).unsqueeze(0).to(device)).squeeze().cpu().numpy()
         v = v / (np.linalg.norm(v) + 1e-9)
         embs.append(v)
         valid.append(i)
@@ -322,6 +329,26 @@ def cmd_selftest(a: argparse.Namespace) -> None:
     print("selftest ok: merge_small_clusters")
 
 
+def cmd_pipeline(a: argparse.Namespace) -> None:
+    """transcribe → phrases.json (raw segments) → speakers; everything lands in --out-dir for `vedit asr-import`."""
+    out = Path(a.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    a.out = str(out / "faster.json")
+    cmd_transcribe(a)
+    with open(a.out, encoding="utf-8") as f:
+        segs = json.load(f)["segments"]
+    phrases = [{"start": s["start"], "end": s["end"]} for s in segs if s.get("text", "").strip()]
+    with open(out / "phrases.json", "w", encoding="utf-8") as f:
+        json.dump(phrases, f)
+    if len(phrases) >= 2:
+        a.phrases = str(out / "phrases.json")
+        a.out = str(out / "speakers_raw.json")
+        cmd_speakers(a)
+    else:
+        log("fewer than 2 phrases: speakers skipped")
+    log(f"bundle ready in {out}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -344,8 +371,24 @@ def main() -> None:
     s.add_argument("--num-speakers", type=int, default=0)
     s.add_argument("--threshold", type=float, default=0.72)
     s.add_argument("--min-seconds", type=float, default=0.6)
+    s.add_argument("--device", default="auto", help="auto | cpu | cuda")
     s.add_argument("--min-cluster-seconds", type=float, default=10.0, help="merge clusters with less speech (or < 3 phrases) into the nearest one; 0 = off")
     s.set_defaults(fn=cmd_speakers)
+
+    pl = sub.add_parser("pipeline", help="transcribe + speakers into one folder (what the Colab notebook runs)")
+    pl.add_argument("--audio", required=True)
+    pl.add_argument("--out-dir", required=True)
+    pl.add_argument("--model", default="large-v3-turbo")
+    pl.add_argument("--language", default=None)
+    pl.add_argument("--device", default="auto")
+    pl.add_argument("--compute", default=None)
+    pl.add_argument("--threads", type=int, default=0)
+    pl.add_argument("--beam-size", type=int, default=5)
+    pl.add_argument("--num-speakers", type=int, default=0)
+    pl.add_argument("--threshold", type=float, default=0.72)
+    pl.add_argument("--min-seconds", type=float, default=0.6)
+    pl.add_argument("--min-cluster-seconds", type=float, default=10.0)
+    pl.set_defaults(fn=cmd_pipeline)
 
     st = sub.add_parser("selftest")
     st.set_defaults(fn=cmd_selftest)

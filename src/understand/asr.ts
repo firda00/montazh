@@ -17,7 +17,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 export const ASR_SCRIPT = path.join(ROOT, "tools", "asr", "vedit_asr.py");
 const VENV_PYTHON = path.join(ROOT, "tools", "asr", ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
 
-export type AsrChoice = "auto" | "cpp" | "faster";
+export type AsrChoice = "auto" | "cpp" | "faster" | "import";
 
 /** Python of the sidecar venv, or VEDIT_ASR_PYTHON; null when the sidecar is not installed. */
 export async function findAsrPython(env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
@@ -53,7 +53,7 @@ function sidecarError(what: string, r: SidecarRun) {
 
 // ---- faster-whisper ----
 
-const FasterJson = z.object({
+export const FasterJson = z.object({
   engine: z.literal("faster-whisper"),
   model: z.string(),
   device: z.string(),
@@ -122,7 +122,7 @@ export async function transcribeFaster(audioPath: string, duration: number, outD
 
 // ---- speakers ----
 
-const SpeakersJson = z.object({
+export const SpeakersJson = z.object({
   engine: z.string(),
   num_speakers: z.number().int(),
   speakers: z.array(z.object({ id: z.string(), seconds: z.number(), phrases: z.number().int() })),
@@ -162,7 +162,14 @@ export async function labelSpeakers(audioPath: string, transcript: Transcript, o
     const p = byIndex.get(i);
     return p ? { ...s, speaker: p.speaker } : s;
   });
-  const speakers: Speakers = {
+  const speakers = summarizeSpeakers(labelled, raw);
+  await fs.writeFile(path.join(outDir, "speakers.json"), JSON.stringify(SpeakersSchema.parse(speakers), null, 2));
+  return { transcript: { ...transcript, segments: labelled }, speakers, wall_seconds: raw.wall_seconds };
+}
+
+/** speakers.json content from labelled phrases and the sidecar's per-speaker totals. */
+export function summarizeSpeakers(labelled: Transcript["segments"], raw: z.infer<typeof SpeakersJson>): Speakers {
+  return {
     engine: raw.engine,
     speakers: raw.speakers.map((sp) => {
       const own = labelled.filter((s) => s.speaker === sp.id);
@@ -170,8 +177,6 @@ export async function labelSpeakers(audioPath: string, transcript: Transcript, o
       return { id: sp.id, seconds: sp.seconds, phrases: sp.phrases, first_at: own[0]?.start ?? 0, sample: sample ? sample.text.slice(0, 120) : "" };
     }),
   };
-  await fs.writeFile(path.join(outDir, "speakers.json"), JSON.stringify(SpeakersSchema.parse(speakers), null, 2));
-  return { transcript: { ...transcript, segments: labelled }, speakers, wall_seconds: raw.wall_seconds };
 }
 
 /** "S2" → S2; "12:34" / "754" → the speaker talking at that time; "most" → S1. */

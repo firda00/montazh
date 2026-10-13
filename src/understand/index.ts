@@ -9,6 +9,7 @@ import { detectShots, extractShotFrames, type Shot } from "./shots.ts";
 import { selectVisionProvider, type AnalysisChunk, type VisionChoice } from "./vision/index.ts";
 import { transcribe, type TimestampMethod } from "./whisper.ts";
 import { findAsrPython, labelSpeakers, transcribeFaster, type AsrChoice } from "./asr.ts";
+import { loadImportedAsr } from "./asr-import.ts";
 
 export const UnderstandReportSchema = z.object({
   transcriber: z
@@ -68,7 +69,8 @@ export async function selectAsr(
   duration?: number,
 ): Promise<{ engine: "faster-whisper" | "whisper.cpp"; python: string | null; reason: string }> {
   const want = choice === "auto" ? ((env.VEDIT_ASR?.trim() || "auto") as AsrChoice) : choice;
-  if (!["auto", "cpp", "faster"].includes(want)) throw new Error(`VEDIT_ASR: ожидается auto | cpp | faster, получено "${want}"`);
+  if (want === "import") throw new Error("asr import is handled by understand() itself");
+  if (!["auto", "cpp", "faster"].includes(want)) throw new Error(`VEDIT_ASR: ожидается auto | cpp | faster | import, получено "${want}"`);
   if (want === "cpp") return { engine: "whisper.cpp", python: null, reason: "requested" };
   const python = await findAsrPython(env);
   if (want === "faster") {
@@ -121,10 +123,27 @@ export async function understand(jobId: string, media: Media, opts: UnderstandOp
   // 1. speech → words with timestamps
   let transcript: Transcript = { language: "unknown", segments: [] };
   let transcriber: UnderstandReport["transcriber"] = null;
-  const asr = await selectAsr(opts.asr, process.env, {}, media.duration);
-  opts.onLog?.(`speech: ${asr.engine} (${asr.reason})`);
   let speakersReport: UnderstandReport["speakers"] = null;
-  if (media.audio_path) {
+  if (opts.asr === "import") {
+    // speech recognised elsewhere (Colab GPU) and imported with `vedit asr-import`
+    const imported = await loadImportedAsr(jobId);
+    transcript = imported.transcript;
+    transcriber = {
+      engine: imported.marker.engine,
+      reason: `imported from ${path.basename(imported.marker.source)} (${imported.marker.device}/${imported.marker.compute_type})`,
+      model: imported.marker.model,
+      method: "faster-whisper",
+      language: transcript.language,
+      languages: [transcript.language],
+      speech_chunks: 1,
+      wall_seconds: imported.marker.wall_seconds,
+    };
+    if (imported.speakers) speakersReport = { engine: imported.speakers.engine, count: imported.speakers.speakers.length, wall_seconds: imported.marker.speakers_wall_seconds ?? 0 };
+    opts.onLog?.(`speech: imported (${imported.marker.model} on ${imported.marker.device}, ${imported.marker.wall_seconds}s remote)`);
+    await addCost(jobId, { step: "understand", provider: "faster-whisper (remote GPU, imported)", model: imported.marker.model, units: { audio_seconds: media.duration, wall_seconds: imported.marker.wall_seconds }, usd: 0 });
+  } else if (media.audio_path) {
+    const asr = await selectAsr(opts.asr, process.env, {}, media.duration);
+    opts.onLog?.(`speech: ${asr.engine} (${asr.reason})`);
     try {
       const r =
         asr.engine === "faster-whisper"
