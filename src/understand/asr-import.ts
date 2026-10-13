@@ -44,7 +44,16 @@ async function unpack(source: string, into: string): Promise<string> {
   const st = await fs.stat(source);
   if (st.isDirectory()) return source;
   await fs.mkdir(into, { recursive: true });
-  await runProcess("tar", ["-xf", source, "-C", into]);
+  // bsdtar on Windows reads "C:\…" as a remote host; work from a copy inside `into` with a bare file name
+  const local = path.join(into, "bundle.zip");
+  await fs.copyFile(source, local);
+  try {
+    // Windows: the system bsdtar (reads zip), not a GNU tar that may sit earlier on PATH (Git Bash)
+    const tar = process.platform === "win32" ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
+    await runProcess(tar, ["-xf", "bundle.zip"], { cwd: into });
+  } finally {
+    await fs.rm(local, { force: true });
+  }
   // the bundle may carry one top-level folder
   const entries = await fs.readdir(into);
   if (entries.length === 1 && (await fs.stat(path.join(into, entries[0]))).isDirectory() && !(await exists(path.join(into, "faster.json")))) return path.join(into, entries[0]);
