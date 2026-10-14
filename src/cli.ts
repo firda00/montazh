@@ -525,22 +525,28 @@ program
   .option("--script <file>", "отрендерить сохранённый script.json как есть (без трендов и модели)")
   .option("--from <job>", "взять сценарий, дизайн и картинки из прошлой задачи make (перерендер)")
   .option("--no-director", "без арт-директора: простая композиция с иконками")
-  .option("--no-images", "без генерации картинок")
+  .option("--images <mode>", "картинки: photo (настоящие фото Openverse CC0/PD/CC BY, по умолчанию) | ai (генерация Antigravity) | none", "photo")
+  .option("--no-images", "без картинок (то же, что --images none)")
+  .option("--aspect <a>", "кадр: 9:16 (Reels/Shorts) | 16:9 (YouTube) | 1:1 | auto (по словам темы: «для ютуба» → 16:9)", "auto")
   .option("--voice <id>", "озвучка голосом из каталога (vedit voices), например denis; none — без голоса", "none")
   .option("--voice-captions", "субтитры озвучки поверх сцен (по умолчанию нет: текст уже на экране)")
   .option("--voice-speed <x>", "темп голоса: 0.8 — быстрее, 1.2 — медленнее", (v) => Number(v))
-  .action(async (topic: string, opts: { lang: string; seconds: number; audience?: string; trends: boolean; music?: string; sfx: boolean; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: boolean; voice: string; voiceCaptions?: boolean; voiceSpeed?: number }) => {
+  .action(async (topic: string, opts: { lang: string; seconds: number; audience?: string; trends: boolean; music?: string; sfx: boolean; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: string | boolean; aspect: string; voice: string; voiceCaptions?: boolean; voiceSpeed?: number }) => {
     try {
       if (!["draft", "looks", "delivery"].includes(opts.quality)) throw new Error("--quality: ожидается draft | looks | delivery");
       if (!Number.isFinite(opts.seconds) || opts.seconds < 15 || opts.seconds > 90) throw new Error("--seconds: ожидается 15–90");
       if (opts.voiceSpeed !== undefined && !(opts.voiceSpeed >= 0.5 && opts.voiceSpeed <= 2)) throw new Error("--voice-speed: ожидается 0.5–2");
+      if (typeof opts.images === "string" && !["photo", "ai", "none"].includes(opts.images)) throw new Error("--images: ожидается photo | ai | none");
+      const { isAspect } = await import("./lib/aspect.ts");
+      if (opts.aspect !== "auto" && !isAspect(opts.aspect)) throw new Error("--aspect: ожидается 9:16 | 16:9 | 1:1 | auto");
       const { requireVoice, NO_VOICE } = await import("./voice/catalog.ts");
       if (!NO_VOICE.test(opts.voice)) requireVoice(opts.voice);
-      const { make } = await import("./make/index.ts");
-      const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, sfx: opts.sfx, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images, voice: opts.voice, voiceCaptions: opts.voiceCaptions, voiceLengthScale: opts.voiceSpeed, onEvent: (l) => console.log(l) });
-      console.log(`\n✔ ${r.output} (${r.duration.toFixed(1)} с, ${r.beats} битов${r.voice ? `, голос ${r.voice}` : ""}, рендер ${r.render_seconds.toFixed(0)} с${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""})`);
+      const { make, creditsText } = await import("./make/index.ts");
+      const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, sfx: opts.sfx, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images as boolean | "photo" | "ai" | "none", aspect: isAspect(opts.aspect) ? opts.aspect : undefined, voice: opts.voice, voiceCaptions: opts.voiceCaptions, voiceLengthScale: opts.voiceSpeed, onEvent: (l) => console.log(l) });
+      console.log(`\n✔ ${r.output} (${r.aspect} ${r.width}×${r.height}, ${r.duration.toFixed(1)} с, ${r.beats} битов${r.voice ? `, голос ${r.voice}` : ""}, рендер ${r.render_seconds.toFixed(0)} с${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""})`);
       if (r.script.hashtags.length) console.log(`  #${r.script.hashtags.join(" #")}`);
-      if (r.music_attribution) console.log(`  ${r.music_attribution}`);
+      const credits = creditsText(r);
+      if (credits) console.log(`  ${credits.split("\n").join("\n  ")}`);
       for (const w of r.warnings) console.log(`  ⚠ ${w}`);
     } catch (err) {
       fail(err);

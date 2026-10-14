@@ -18,6 +18,7 @@ HONESTY
 PLAN RULES (hard)
 - Every clip edge is a ref, never seconds: "p4" (phrase 4; in "start" it means the phrase start, in "end" the phrase end), "p4.start"/"p4.end" to be explicit, "s2" (scene edge the same way), "g3" (cut inside that silence), "p4.w6" (boundary of word 6 of phrase 4, 0-based; only when phrase edges cannot reach the target length — it is flagged as a warning).
 - Output ids match ^[a-zA-Z0-9_-]+$ and are unique (reel_1, reel_2, wide_1). Produce exactly the number of outputs requested and fill "brief" with how you read the instruction.
+- aspect: a format named in the instruction wins over preset.default_aspect: YouTube / "для ютуба" / horizontal / "горизонтальный" / widescreen / 16:9 → 16:9; Shorts (YouTube Shorts too), Reels / "рилс", TikTok, Stories, vertical / "вертикальный" / 9:16 → 9:16; square / "квадрат" / 1:1 → 1:1. Without such words use preset.default_aspect.
 - Each output's total duration must be within ±10% of its target (the harness rejects beyond ±25%). Duration = sum of (end − start) / speed. When phrase boundaries cannot hit the target exactly, prefer landing slightly under the target rather than over it.
 - speed is 1.0 on clips with speech; 1.25–2.0 only on speech-free clips and only for a dynamic pace.
 - crop "auto_face" for 9:16 clips that show a speaking person; otherwise "center".

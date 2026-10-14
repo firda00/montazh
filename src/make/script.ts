@@ -5,6 +5,7 @@ import type { StructuredFn } from "../lib/llm.ts";
 import { fill, loadPrompt } from "../lib/prompts.ts";
 import { zodToApiSchema } from "../plan/schema-sanitize.ts";
 import { ICONS_DIR } from "./icons.ts";
+import { describeFindings, findCliches, wantsCta, type SlopFinding } from "./slop.ts";
 
 /** A beat is one screen: a sentence, an icon, how long it stays. */
 export const BeatSchema = z.object({
@@ -42,6 +43,8 @@ export interface ScriptOptions {
   /** TREND NOTES block (from trends.ts), already formatted */
   trendsText?: string;
   model?: string;
+  /** the user's instruction (CTA allowed only when it asks for one); default: the topic */
+  instruction?: string;
 }
 
 /** Beats for a target length: ~5 s per beat, 4..8. */
@@ -93,22 +96,55 @@ export interface ScriptResult {
   model: string;
   provider: string;
   estimate: boolean;
+  /** banned phrases the cliché check found in the first draft (rewritten once) */
+  cliches: SlopFinding[];
+  /** what is still there after the rewrite (reported as a warning) */
+  remaining: SlopFinding[];
 }
 
 export async function writeScript(topic: string, llm: StructuredFn, opts: ScriptOptions = {}): Promise<ScriptResult> {
   const language = opts.language ?? "ru";
   const seconds = opts.seconds ?? 35;
+  const allowCta = wantsCta(opts.instruction ?? topic);
+  const cta = allowCta ? "the instruction asks for a call to action: end with one short, specific call to action." : "no call to action: end on the sharpest fact, consequence or observation.";
+  const lang = LANGUAGE_NAMES[language] ?? language;
   const prompt = fill(loadPrompt("make.script.user"), {
     topic,
-    language: LANGUAGE_NAMES[language] ?? language,
+    language: lang,
     seconds,
     beats: beatsFor(seconds),
     audience: opts.audience ?? "people scrolling Reels/Shorts on their phone",
+    cta,
     trends: opts.trendsText ? `\n${opts.trendsText}\n` : "",
   });
-  const res = await llm({ system: loadPrompt("make.script.system"), prompt, schema: zodToApiSchema(ScriptOutSchema), model: opts.model, effort: "medium", maxTokens: 4000 });
-  const script = await normalizeScript(res.data, { language });
-  return { script, usd: res.usd, usage: { input_tokens: res.usage.input_tokens, output_tokens: res.usage.output_tokens }, model: res.model, provider: res.provider, estimate: res.estimate };
+  const system = loadPrompt("make.script.system");
+  const schema = zodToApiSchema(ScriptOutSchema);
+  const res = await llm({ system, prompt, schema, model: opts.model, effort: "medium", maxTokens: 4000 });
+  let script = await normalizeScript(res.data, { language });
+  let usd = res.usd;
+  const usage = { input_tokens: res.usage.input_tokens, output_tokens: res.usage.output_tokens };
+  const cliches = findCliches(script, { allowCta });
+  let remaining = cliches;
+  if (cliches.length) {
+    // enforced, not just suggested: one rewrite with the findings spelled out
+    const fix = fill(loadPrompt("make.script.rewrite"), { topic, language: lang, cta, problems: describeFindings(cliches), script: JSON.stringify(script, null, 1) });
+    try {
+      const again = await llm({ system, prompt: fix, schema, model: opts.model, effort: "medium", maxTokens: 4000 });
+      usd += again.usd;
+      usage.input_tokens += again.usage.input_tokens;
+      usage.output_tokens += again.usage.output_tokens;
+      const rewritten = await normalizeScript(again.data, { language });
+      const left = findCliches(rewritten, { allowCta });
+      // keep the rewrite unless it made things worse
+      if (left.length <= cliches.length) {
+        script = rewritten;
+        remaining = left;
+      }
+    } catch {
+      /* the first draft stands; the findings are reported */
+    }
+  }
+  return { script, usd, usage, model: res.model, provider: res.provider, estimate: res.estimate, cliches, remaining };
 }
 
 export function scriptDuration(s: Script): number {

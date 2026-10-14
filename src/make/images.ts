@@ -4,6 +4,7 @@ import path from "node:path";
 import { ffmpeg } from "../lib/ffmpeg.ts";
 import { fill, loadPrompt } from "../lib/prompts.ts";
 import { AgyError, defaultAgyRunner, findAgy, parseAgyStream, type AgyRunner } from "../understand/vision/agy.ts";
+import { frameFor, type Frame } from "../lib/aspect.ts";
 
 /**
  * Scene images without an API key: one Antigravity CLI call asks its image tool for every image
@@ -28,6 +29,8 @@ export interface ImageResult {
 
 export interface ImageOptions {
   style: string;
+  /** output frame (default 9:16, 1080×1920) */
+  frame?: Frame;
   model?: string;
   bin?: string;
   run?: AgyRunner;
@@ -46,6 +49,8 @@ export async function generateImages(requests: ImageRequest[], outDir: string, o
   const work = await fs.mkdtemp(path.join(os.tmpdir(), "vedit-img-"));
   let usage = { input_tokens: 0, output_tokens: 0 };
   const model = o.model ?? "gemini-3.8-flash-low";
+  const f = o.frame ?? frameFor("9:16");
+  const frameWords = f.w > f.h ? "horizontal 16:9" : f.w === f.h ? "square 1:1" : "vertical 9:16";
   try {
     if (o.generate) await o.generate(requests, work);
     else {
@@ -53,7 +58,7 @@ export async function generateImages(requests: ImageRequest[], outDir: string, o
       if (!bin && !o.run) throw new AgyError("images: Antigravity CLI (agy) не найден");
       const run = o.run ?? defaultAgyRunner(bin!, o.timeoutMs ?? 900_000);
       const list = requests.map((r) => `${fileName(r.beat)}: ${r.prompt.replace(/\s+/g, " ").trim()}`).join("\n");
-      const prompt = fill(loadPrompt("make.images.user"), { style: o.style, list });
+      const prompt = fill(loadPrompt("make.images.user"), { style: o.style, list, frame: frameWords });
       const stdin = JSON.stringify({ event: "user", message: { role: "user", content: [{ type: "text", text: prompt }] } }) + "\n";
       const r = await run(["--model", model, "--input-format", "stream-json", "--output-format", "stream-json", "--disable-slash-commands", "--print", ""], stdin, work);
       const result = parseAgyStream(r.stdout || r.stderr);
@@ -77,7 +82,7 @@ export async function generateImages(requests: ImageRequest[], outDir: string, o
       }
       const dest = path.join(outDir, `scene_${q.beat}.jpg`);
       try {
-        await ffmpeg(["-i", src, "-vf", "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920", "-q:v", "3", dest]);
+        await ffmpeg(["-i", src, "-vf", `scale=${f.w}:${f.h}:force_original_aspect_ratio=increase:flags=lanczos,crop=${f.w}:${f.h}`, "-q:v", "3", dest]);
         files.set(q.beat, dest);
       } catch {
         missing.push(q.beat);

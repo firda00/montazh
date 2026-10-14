@@ -1,3 +1,4 @@
+import { detectAspect } from "../../lib/aspect.ts";
 import type { CallUsage, PlanDraft } from "../../schemas/index.ts";
 import type { PlanContext } from "../context.ts";
 import type { MockTurnScript, PlannerBackend, StartRequest, Turn } from "./types.ts";
@@ -63,7 +64,8 @@ function parseInstruction(instruction: string, ctx: PlanContext) {
   const count = /(\d+)\s*(рилс|reel|ролик|видео|shorts|клип|short)/.exec(s);
   const dur = /(?:по\s*)?(\d+)\s*(сек|с\b|second|sec)/.exec(s);
   const min = /(\d+)\s*(мин|minute|min\b)/.exec(s);
-  const aspect: "9:16" | "1:1" | "16:9" = /квадрат|1:1|square/.test(s) ? "1:1" : /16:9|горизонт|wide|широк/.test(s) ? "16:9" : /9:16|вертикал|рилс|reel|shorts|тикток|tiktok/.test(s) ? "9:16" : ctx.preset.default_aspect;
+  // the format the instruction names ("для ютуба" → 16:9, "шортс"/"рилс" → 9:16, "квадрат" → 1:1), else the preset's
+  const aspect: "9:16" | "1:1" | "16:9" = detectAspect(s) ?? ctx.preset.default_aspect;
   const lang = /узбек|uzbek|o'zbek|oʻzbek/.test(s) ? "uz" : /русск|russian/.test(s) ? "ru" : /англ|english/.test(s) ? "en" : ctx.transcript.language;
   const captions = !/без субтитр|no captions|no subtitles/.test(s);
   return {

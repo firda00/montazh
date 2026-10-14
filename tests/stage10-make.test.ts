@@ -60,7 +60,13 @@ test("script: durations by reading speed, icons resolved to Lucide names, emphas
   assert.match(calls[0], /7 beats/);
   assert.match(calls[0], /TREND NOTES/);
   assert.equal(r.script.title, "Почему кофе дорожает");
-  assert.equal(r.usd, 0.02);
+  assert.match(calls[0], /ENDING: no call to action/, "no CTA unless the instruction asks for one");
+  // the draft trips the cliché check ("Подпишись", "Хочешь дешевле — бери…, а не…"): one rewrite request
+  assert.ok(r.cliches.some((c) => c.rule === "subscribe_cta"), JSON.stringify(r.cliches));
+  assert.equal(calls.length, 2);
+  assert.match(calls[1], /banned-phrase check/);
+  assert.match(calls[1], /Подпишись/);
+  assert.equal(r.usd, 0.04, "both calls are paid for");
 });
 
 test("compose: deterministic composition, one section per beat on the frame grid, icons inline, word reveal, lints clean", async () => {
@@ -144,7 +150,8 @@ test("make: end to end with a mock writer and a fake render; trends failure degr
   assert.ok((await fs.stat(r.output)).size > 0);
   assert.ok(events.some((e) => /^job /.test(e)) && events.some((e) => /^▸ сценарий/.test(e)));
   const cost = await readJson(path.join(jobDir(r.jobId), "cost.json"), CostSchema);
-  assert.equal(cost.total_usd, 0.01);
+  assert.equal(cost.total_usd, 0.02, "script + one cliché rewrite (the mock answers the same draft)");
+  assert.ok(r.warnings.some((w) => /остались клише/.test(w)), "what the rewrite did not fix is reported");
   assert.ok(await fs.stat(path.join(jobDir(r.jobId), "script.json")));
   assert.ok(await fs.stat(path.join(jobDir(r.jobId), "make.json")));
 });

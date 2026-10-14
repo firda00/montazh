@@ -8,6 +8,7 @@ import { PlanError } from "../plan/backend/types.ts";
 import { MediaSchema, TranscriptSchema, type Edl, type Transcript } from "../schemas/index.ts";
 import { makeBotApi, TelegramError, type BotApi, type CallMethod, type DownloadFn, type Limits, type TgMessage, type TgUpdate } from "./telegram-api.ts";
 import { getVoice, isLocal, NO_VOICE, piperVoiceFor, voicesListText, type VoiceDef } from "../voice/catalog.ts";
+import { detectAspect, isAspect, type Aspect } from "../lib/aspect.ts";
 
 // same hints as src/cli.ts (cli.ts runs commander on import, so the table is duplicated here)
 export const HINTS: Partial<Record<PlanError["code"], string>> = {
@@ -33,7 +34,7 @@ export const MSG = {
     "Команды:",
     "/status — состояние последней задачи",
     "/revise <что изменить> — правка последнего монтажа (перережу и перерендерю только затронутое)",
-    "/make <тема> — ролик по теме из ничего: тренды, сценарий, сгенерированные картинки, моушн-графика, музыка",
+    "/make <тема> — ролик по теме из ничего: тренды, сценарий, настоящие фото, моушн-графика, музыка. Вертикальный 9:16; для YouTube — /make 16:9 тема (или «… для ютуба»)",
     "Несколько видео подряд (или альбомом) → /viral — соберу один самый вирусный ролик из всех; /clear — новая подборка",
     "/style pop | split | calm — стиль монтажа (split: сверху сгенерированные картинки с карточками, снизу спикер)",
     "/voice — голоса для озвучки: /voice denis — выбрать (пришлю пробу), /voice off — без голоса; голос озвучит /make и /avatar",
@@ -53,7 +54,7 @@ export const MSG = {
   reviseUsage: "Напишите, что изменить: /revise в reel_1 убери приветствие",
   makeUsage: "Напишите тему: /make почему кофе дорожает в 2026",
   styleUsage: (cur: string) => `Сейчас: ${cur}. Варианты: /style pop — динамичные субтитры; /style split — сверху картинки и карточки, снизу спикер (как у новостных техно-блогеров); /style calm — спокойный.`,
-  makeStart: "Делаю ролик по теме: тренды → сценарий → графика → рендер. Это 3–6 минут.",
+  makeStart: "Делаю ролик по теме: тренды → сценарий → фото и графика → рендер. Это 3–6 минут.",
   reviseNoJob: "Нечего править: сначала смонтируйте видео (пришлите видео и задачу).",
   nothingToCancel: "Сейчас ничего не выполняется.",
   cancelling: "Отменяю — остановлюсь после текущего шага.",
@@ -152,12 +153,21 @@ export interface MakeArgs {
   topic: string;
   /** catalogue voice for the voiceover (/voice) */
   voice?: string;
+  /** output frame: "/make 16:9 тема", or detected from the words ("для ютуба" → 16:9, "шортс" → 9:16) */
+  aspect?: Aspect;
   progress: (text: string) => Promise<void>;
   onJob: (jobId: string) => void;
   signal: AbortSignal;
   log: (line: string) => void;
 }
 export type MakeFn = (args: MakeArgs) => Promise<PipelineResult>;
+
+/** "/make 16:9 тема" → { aspect: "16:9", topic: "тема" }; without a leading ratio the words decide (default 9:16). */
+export function parseMakeArgs(arg: string): { topic: string; aspect: Aspect } {
+  const m = /^\s*(9:16|16:9|1:1)\s+([\s\S]*)$/.exec(arg);
+  const topic = (m ? m[2] : arg).trim();
+  return { topic, aspect: m && isAspect(m[1]) ? m[1] : (detectAspect(topic) ?? "9:16") };
+}
 
 export interface AvatarExportArgs {
   /** "/avatar" argument: a topic or the text itself */
@@ -221,11 +231,12 @@ export const runAvatarImport: AvatarImportFn = async ({ jobId, result, instructi
 };
 
 /** /make: topic → video from nothing (trends → script → motion graphics → render). */
-export const runMakePipeline: MakeFn = async ({ topic, voice, progress, onJob, signal, log }) => {
-  const { make } = await import("../make/index.ts");
+export const runMakePipeline: MakeFn = async ({ topic, voice, aspect, progress, onJob, signal, log }) => {
+  const { make, creditsText } = await import("../make/index.ts");
   const r = await make(topic, {
     signal,
     voice,
+    aspect,
     onEvent: (l) => {
       if (/^job /.test(l)) onJob(l.slice(4).trim());
       else if (/^▸/.test(l)) void progress(l);
@@ -233,7 +244,8 @@ export const runMakePipeline: MakeFn = async ({ topic, voice, progress, onJob, s
     },
   });
   const notes = r.warnings.slice(0, 3);
-  return { jobId: r.jobId, title: topic, outputs: [{ id: "make", file: r.output, duration: r.duration, aspect: "9:16" }], reasoning: `${r.title}\n${r.script.beats.map((b) => `· ${b.text}`).join("\n")}${r.script.hashtags.length ? `\n#${r.script.hashtags.join(" #")}` : ""}${r.music_attribution ? `\n${r.music_attribution}` : ""}`, notes };
+  const credits = creditsText(r);
+  return { jobId: r.jobId, title: topic, outputs: [{ id: "make", file: r.output, duration: r.duration, aspect: r.aspect }], reasoning: `${r.title}\n${r.script.beats.map((b) => `· ${b.text}`).join("\n")}${r.script.hashtags.length ? `\n#${r.script.hashtags.join(" #")}` : ""}${credits ? `\n${credits}` : ""}`, notes };
 };
 
 class CancelledError extends Error {
@@ -707,12 +719,13 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     );
   }
 
-  async function startMake(chatId: number, topic: string) {
+  async function startMake(chatId: number, arg: string) {
+    const { topic, aspect } = parseMakeArgs(arg);
     if (!topic) return say(chatId, MSG.makeUsage);
     await updateChat(chatId, { prompt: topic });
-    await say(chatId, MSG.makeStart);
+    await say(chatId, `${MSG.makeStart}${aspect !== "9:16" ? ` Кадр ${aspect}.` : ""}`);
     const voice = chat(chatId).voice;
-    launch(chatId, "make", (r) => makeFn({ topic, voice, progress: progressFor(chatId, r), onJob: (jobId) => void updateChat(chatId, { jobId }), signal: r.ac.signal, log: (l) => log(`[${chatId}] ${l}`) }));
+    launch(chatId, "make", (r) => makeFn({ topic, voice, aspect, progress: progressFor(chatId, r), onJob: (jobId) => void updateChat(chatId, { jobId }), signal: r.ac.signal, log: (l) => log(`[${chatId}] ${l}`) }));
   }
 
   async function startRevise(chatId: number, edit: string) {

@@ -48,12 +48,18 @@ export interface PcmClip {
 }
 
 /** One sentence → audio. The real one runs Piper; tests pass a stub. */
-export type SentenceSynth = (text: string, voice: VoiceDef, o: { lengthScale: number; noiseScale?: number }) => Promise<PcmClip>;
+export type SentenceSynth = (text: string, voice: VoiceDef, o: { lengthScale: number; noiseScale?: number; noiseW?: number }) => Promise<PcmClip>;
 
 export interface SynthOptions {
   /** > 1 slower, < 1 faster (Piper length_scale); default 1.0 */
   lengthScale?: number;
+  /** generator noise (Piper default 0.667): a little more sounds less robotic */
   noiseScale?: number;
+  /** phoneme width noise (Piper default 0.8): more = less even rhythm */
+  noiseW?: number;
+  /** small deterministic per-sentence variation of tempo and rhythm (questions a touch slower), so a long
+   *  narration does not sound like one flat take */
+  vary?: boolean;
   /** pause between sentences of a line, ms (default 180) */
   sentencePauseMs?: number;
   /** pause between lines, ms (default 380) */
@@ -204,6 +210,7 @@ export function piperSynth(o: { piperDir?: string; modelsDir?: string; onEvent?:
     };
     const args = ["--model", rel(onnx), "--espeak_data", "espeak-ng-data", "--output_raw", "--quiet", "--length_scale", String(opt.lengthScale), "--sentence_silence", "0"];
     if (opt.noiseScale !== undefined) args.push("--noise_scale", String(opt.noiseScale));
+    if (opt.noiseW !== undefined) args.push("--noise_w", String(opt.noiseW));
     const pcm = await new Promise<Buffer>((resolve, reject) => {
       const p = spawn(exe, args, { cwd, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
       const out: Buffer[] = [];
@@ -287,6 +294,18 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T, i: number) =
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
 
+/** tempo offsets cycled over sentences (vary): ±3 %, never two equal in a row */
+const TEMPO_JITTER = [0, -0.03, 0.02, -0.015, 0.03, -0.02];
+
+/** Piper parameters for sentence k: the base tempo, varied a little per sentence when asked. */
+export function sentenceParams(text: string, k: number, lengthScale: number, o: Pick<SynthOptions, "noiseScale" | "noiseW" | "vary"> = {}): { lengthScale: number; noiseScale?: number; noiseW?: number } {
+  if (!o.vary) return { lengthScale, noiseScale: o.noiseScale, noiseW: o.noiseW };
+  const question = /\?\s*$/.test(text) ? 0.04 : 0;
+  const ls = r3(lengthScale * (1 + TEMPO_JITTER[k % TEMPO_JITTER.length] + question));
+  const nw = o.noiseW !== undefined ? r3(o.noiseW + ((k % 3) - 1) * 0.05) : undefined;
+  return { lengthScale: ls, noiseScale: o.noiseScale, noiseW: nw };
+}
+
 /**
  * Text (one string, or lines — a line per beat/paragraph) → one WAV + timings.
  * Empty lines are kept as zero-length entries so line indexes match the input.
@@ -305,7 +324,7 @@ export async function synthesize(text: string | string[], voiceId: string, outWa
     }
   });
   if (!jobs.length) throw new Error("нечего озвучивать: текст пустой");
-  const pieces = await mapLimit(jobs, o.concurrency ?? 3, async (j) => trimSilence(await synth(j.spoken, voice, { lengthScale, noiseScale: o.noiseScale })));
+  const pieces = await mapLimit(jobs, o.concurrency ?? 3, async (j, k) => trimSilence(await synth(j.spoken, voice, sentenceParams(j.text, k, lengthScale, o))));
   const rate = pieces[0].rate;
   if (pieces.some((p) => p.rate !== rate)) throw new Error("piper вернул разную частоту для кусков одного голоса");
   const ms = (x: number) => Math.round((rate * x) / 1000);

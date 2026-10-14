@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Script } from "../make/script.ts";
 import { getVoice, languageCode, piperVoiceFor, requireVoice, VOICES, type VoiceDef } from "./catalog.ts";
 import { concatPcm, synthesize, writeWav, type PcmClip, type SentenceSynth, type SynthResult } from "./piper.ts";
+import { normalizeForTts } from "./normalize.ts";
 
 /**
  * Voiceover for `make`: every beat's spoken line (beat.voiceover, else its on-screen text) is synthesised
@@ -13,14 +14,24 @@ import { concatPcm, synthesize, writeWav, type PcmClip, type SentenceSynth, type
 const FPS = 30;
 /** speech starts this long after the scene cut (the headline is already moving) */
 export const VOICE_LEAD = 0.25;
-/** and the scene holds this long after the last word */
-export const VOICE_TAIL = 0.45;
+/** and the scene holds this long after the last word (short: the next beat cuts in on the voice) */
+export const VOICE_TAIL = 0.35;
+/** narration defaults for make: a touch faster than Piper's 1.0, livelier noise, varied per sentence */
+export const NARRATION = { lengthScale: 0.92, noiseScale: 0.72, noiseW: 0.9, sentencePauseMs: 140 } as const;
 export const BEAT_MAX = 15;
 
 export interface CaptionCue {
   start: number;
   end: number;
   text: string;
+}
+
+/** One spoken word on the video timeline (times estimated inside its sentence, see speechWords). */
+export interface SpokenWord {
+  beat: number;
+  text: string;
+  start: number;
+  end: number;
 }
 
 export interface VoiceoverResult {
@@ -32,6 +43,8 @@ export interface VoiceoverResult {
   /** per beat: when the speech plays on the timeline */
   beats: { beat: number; start: number; end: number; text: string }[];
   captions: CaptionCue[];
+  /** word-level times (proportional to the spoken length of each word inside its sentence) */
+  words: SpokenWord[];
   warnings: string[];
 }
 
@@ -113,6 +126,36 @@ export function captionCues(sentences: { line: number; text: string; start: numb
   return cues;
 }
 
+/**
+ * Word times from sentence times: inside a sentence each written word gets a share proportional to how long it
+ * is when spoken ("2026" → "две тысячи двадцать шесть" is long), plus a small constant per word. Good enough
+ * to make on-screen words appear with the voice.
+ */
+export function speechWords(sentences: { line: number; text: string; start: number; end: number }[], lineStarts: number[], lineOffsets: number[], language = "ru"): SpokenWord[] {
+  const out: SpokenWord[] = [];
+  for (const s of sentences) {
+    const shift = lineOffsets[s.line] - lineStarts[s.line];
+    const t0 = s.start + shift;
+    const t1 = s.end + shift;
+    const words = s.text.split(/\s+/).filter(Boolean);
+    const weight = words.map((w) => {
+      let spoken = w;
+      try {
+        spoken = normalizeForTts(w, language);
+      } catch {}
+      return spoken.replace(/[^\p{L}\p{N}]/gu, "").length + 1.5;
+    });
+    const total = weight.reduce((a, b) => a + b, 0) || 1;
+    let t = t0;
+    words.forEach((w, k) => {
+      const d = ((t1 - t0) * weight[k]) / total;
+      out.push({ beat: s.line, text: w, start: r3(t), end: r3(t + d) });
+      t += d;
+    });
+  }
+  return out;
+}
+
 /** A catalogue voice usable locally for `make`: Piper as is; a Chatterbox preset falls back to its Piper source or the language default. */
 export function resolveMakeVoice(id: string, language: string): { voice: VoiceDef; warning?: string } {
   const v = requireVoice(id);
@@ -123,7 +166,10 @@ export function resolveMakeVoice(id: string, language: string): { voice: VoiceDe
 }
 
 export interface VoiceoverOptions {
+  /** Piper length_scale (default NARRATION.lengthScale = 0.92) */
   lengthScale?: number;
+  /** false: Piper's flat defaults (no noise tweaks, no per-sentence variation) */
+  lively?: boolean;
   synth?: SentenceSynth;
   onEvent?: (l: string) => void;
 }
@@ -135,7 +181,13 @@ export async function makeVoiceover(script: Script, voiceId: string, dir: string
   if (warning) warnings.push(warning);
   await fs.mkdir(dir, { recursive: true });
   const lines = narrationLines(script);
-  const synth: SynthResult = await synthesize(lines, voice.id, path.join(dir, "narration.wav"), { lengthScale: o.lengthScale, synth: o.synth, onEvent: o.onEvent });
+  const lively = o.lively !== false;
+  const synth: SynthResult = await synthesize(lines, voice.id, path.join(dir, "narration.wav"), {
+    lengthScale: o.lengthScale ?? NARRATION.lengthScale,
+    ...(lively ? { noiseScale: NARRATION.noiseScale, noiseW: NARRATION.noiseW, vary: true, sentencePauseMs: NARRATION.sentencePauseMs } : {}),
+    synth: o.synth,
+    onEvent: o.onEvent,
+  });
   const speech = synth.clips.map((c) => c.pcm.length / c.rate);
   const fitted = fitBeatsToSpeech(script, speech);
   const long = speech.map((s, i) => (VOICE_LEAD + s + VOICE_TAIL > BEAT_MAX ? i : -1)).filter((i) => i >= 0);
@@ -147,6 +199,7 @@ export async function makeVoiceover(script: Script, voiceId: string, dir: string
   await writeWav(track, laid.pcm, laid.rate);
   const beats = synth.clips.map((c, i) => ({ beat: i, start: r3(laid.at[i]), end: r3(laid.at[i] + c.pcm.length / c.rate), text: lines[i] }));
   const captions = captionCues(synth.sentences, synth.lines.map((l) => l.start), laid.at);
-  await fs.writeFile(path.join(dir, "voice.json"), JSON.stringify({ voice: voice.id, license: voice.license, engine: voice.engine, duration: r3(duration), beats, sentences: synth.sentences, captions, warnings }, null, 1));
-  return { voice, script: fitted, track, duration: r3(duration), beats, captions, warnings };
+  const words = speechWords(synth.sentences, synth.lines.map((l) => l.start), laid.at, voice.language);
+  await fs.writeFile(path.join(dir, "voice.json"), JSON.stringify({ voice: voice.id, license: voice.license, engine: voice.engine, duration: r3(duration), beats, sentences: synth.sentences, captions, words, warnings }, null, 1));
+  return { voice, script: fitted, track, duration: r3(duration), beats, captions, words, warnings };
 }
