@@ -12,7 +12,9 @@ import { MOODS } from "../audio/music.ts";
  * colour sanity, fallbacks) without flattening the choices.
  */
 
-export const LAYOUTS = ["hero_number", "headline", "media_full", "media_card", "media_split", "list", "chat", "timeline", "compare", "quote"] as const;
+export const LAYOUTS = ["hero_number", "headline", "media_full", "media_card", "media_split", "list", "chat", "timeline", "compare", "quote", "orbit_title", "depth_cards", "tunnel_number"] as const;
+/** 3D motion-graphics layouts (CSS 3D on the one GSAP timeline, see scenes.ts) */
+export const LAYOUTS_3D = ["orbit_title", "depth_cards", "tunnel_number"] as const satisfies readonly Layout[];
 export type Layout = (typeof LAYOUTS)[number];
 export const ACCENT_STYLES = ["marker", "color", "serif", "gradient", "outline"] as const;
 export const ENTRANCES = ["rise", "mask", "pop", "type", "slide"] as const;
@@ -154,7 +156,10 @@ export function normalizeDesign(raw: unknown, script: Script): { design: Design;
     let layout: Layout = s.layout;
     const items = (s.items ?? []).map((t) => cut(t, 64)).filter(Boolean);
     const image = s.image && s.image.prompt.trim() ? { prompt: cut(s.image.prompt, 400), motion: s.image.motion } : null;
-    if (layout === "hero_number" && !s.number?.value.trim()) layout = "headline";
+    if ((layout === "hero_number" || layout === "tunnel_number") && !s.number?.value.trim()) layout = "headline";
+    // the orbit title is a giant word or two: a long sentence reads better as a plain headline
+    if (layout === "orbit_title" && headline.length > 64) layout = "headline";
+    if (layout === "depth_cards" && items.length < 3) layout = items.length === 2 ? "list" : "headline";
     if (layout.startsWith("media_") && !image) layout = "headline";
     if (layout === "list" && items.length < 2) layout = "headline";
     if (layout === "chat" && items.length < 2) layout = "headline";
@@ -168,8 +173,8 @@ export function normalizeDesign(raw: unknown, script: Script): { design: Design;
       accents: accents.map((a) => ({ text: a.text.trim(), style: a.style })),
       kicker: cut(s.kicker ?? "", 34),
       sub: cut(s.sub ?? "", 70),
-      number: layout === "hero_number" && s.number ? { value: cut(s.number.value, 10), unit: cut(s.number.unit ?? "", 14) } : null,
-      items: layout === "timeline" ? items.slice(0, 5).map((t) => cut(t, 16)) : layout === "list" ? items.slice(0, 4).map((t) => cut(t, 34)) : layout === "compare" ? items.slice(0, 4).map((t) => cut(t, 20)) : items.slice(0, 4),
+      number: (layout === "hero_number" || layout === "tunnel_number") && s.number ? { value: cut(s.number.value, 10), unit: cut(s.number.unit ?? "", 14) } : null,
+      items: layout === "timeline" ? items.slice(0, 5).map((t) => cut(t, 16)) : layout === "list" ? items.slice(0, 4).map((t) => cut(t, 34)) : layout === "compare" ? items.slice(0, 4).map((t) => cut(t, 20)) : layout === "depth_cards" ? items.slice(0, 4).map((t) => cut(t, 30)) : items.slice(0, 4),
       image: layout.startsWith("media_") ? image : null,
       entrance: s.entrance,
     };

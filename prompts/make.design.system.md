@@ -21,6 +21,10 @@ WHAT YOU DESIGN
    - "timeline": a horizontal track with 3–5 labelled points (items[] ≤ 14 chars each, e.g. years or steps), headline above.
    - "compare": two columns (items[0] = left label, items[1] = left value, items[2] = right label, items[3] = right value), headline above. For before/after, them/us, price A/price B.
    - "quote": a large pull quote (headline) in the accent font with a thin rule and an attribution in sub.
+   3D motion-graphics layouts (pure code, premium "motion designer showreel" look; at most 2 per video, never two in a row):
+   - "orbit_title": a giant title (headline: 1–5 words, ≤ 40 chars is best, never more than 60) with a tilted ring of small 3D cubes in the palette colours orbiting around it in perspective, passing in front of and behind the letters; a thin accent rule and a small mono caption underneath (kicker, or sub if there is no kicker). Use when the beat is one bold idea or a name: the hook, a reveal, a topic title. Put one accent on the key word.
+   - "depth_cards": 3–4 cards (items[] ≤ 30 chars each, short steps or points) floating at different depths; the camera drifts through them and each card in turn comes forward and lights up in the accent; headline above as the title, optional kicker. Use for steps, tips, reasons when you want more energy than "list". Needs at least 3 items.
+   - "tunnel_number": a big number (number.value + number.unit, like hero_number) flies out of a perspective grid tunnel, headline under it, optional kicker above and sub below. Use for a striking number when the video already has a hero_number or you want a more cinematic number reveal.
    Fields:
    - headline: the beat's sentence, you may tighten it (≤ 70 chars) but keep its meaning and facts. Keep the language of the script.
    - accents: 1–2 phrases copied VERBATIM from your headline, each with a style: "marker" (highlighter swipe behind the words), "color" (accent colour), "serif" (switch to the accent font, e.g. italic serif), "gradient" (accent→accent2 gradient fill), "outline" (outlined letters). Use the same 1–2 styles across the whole video so it is coherent.
@@ -31,7 +35,8 @@ WHAT YOU DESIGN
 
 RULES
 - Variety with purpose: never the same layout twice in a row; use at least 4 different layouts in a 6–8 beat video; 2–4 beats with images (media_*), not all.
-- The hook (first beat) must be the most striking frame: hero_number or media_full/media_card with a bold accent are good hooks.
+- The hook (first beat) must be the most striking frame: hero_number, orbit_title, tunnel_number or media_full/media_card with a bold accent are good hooks.
+- 3D layouts (orbit_title, depth_cards, tunnel_number) are spice: 1–2 per video, where they make a beat stronger; they look best on dark palettes.
 - The last beat is the call to action: a clean "headline" or "chat" frame; keep it simple.
 - Never invent facts or numbers that are not in the script. Never put words in images.
 - Short is better: a reader gets 3–6 seconds per frame.

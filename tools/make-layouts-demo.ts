@@ -1,12 +1,14 @@
-// Renders every art-director layout with one image: npx tsx tools/make-layouts-demo.ts <out_dir> <image.jpg>, then hyperframes snapshot <out_dir>
+// Renders every art-director layout with one image: npx tsx tools/make-layouts-demo.ts <out_dir> <image.jpg> [--3d], then hyperframes snapshot <out_dir>
+// --3d keeps only the 3D motion-graphics layouts (orbit_title, depth_cards, tunnel_number) for a quick look.
 import path from "node:path";
 import { writeDirectorProject } from "../src/make/index.ts";
 import { DesignSchema } from "../src/make/design.ts";
-import { ScriptSchema } from "../src/make/script.ts";
+import { BeatSchema, ScriptSchema } from "../src/make/script.ts";
 
 const out = process.argv[2];
 const img = process.argv[3];
-const script = ScriptSchema.parse({
+// a demo is longer than a real script (≤ 10 beats): parse the beats one by one, not the whole script
+const raw = {
   title: "Почему кофе дорожает",
   language: "ru",
   beats: [
@@ -19,9 +21,13 @@ const script = ScriptSchema.parse({
     { text: "Как менялась цена", seconds: 4 },
     { text: "Капсулы против зерна", seconds: 4 },
     { text: "Хороший кофе не бывает дешёвым", seconds: 3.5 },
+    { text: "Кофе — это новая нефть", seconds: 4 },
+    { text: "Четыре шага к своей чашке дешевле", seconds: 4.5 },
+    { text: "Цена чашки выросла в три раза", seconds: 4 },
     { text: "Сохрани и посчитай свои траты", seconds: 3.5 },
   ],
-});
+};
+const script = { ...ScriptSchema.parse({ ...raw, beats: raw.beats.slice(0, 3) }), beats: raw.beats.map((b) => BeatSchema.parse(b)) };
 const design = DesignSchema.parse({
   identity: { palette: { bg: "#14100D", bg2: "#2A1D14", text: "#FFFFFF", accent: "#E8A36B", accent2: "#F6D2B0", muted: "#A79584" }, display_font: "inter", accent_font: "playfair-italic", kicker_font: "mono", texture: "grain", image_style: "cinematic", brand: "КОФЕ 2026" },
   scenes: [
@@ -34,8 +40,17 @@ const design = DesignSchema.parse({
     { beat: 6, layout: "timeline", headline: "Как менялась цена чашки", items: ["2022", "2023", "2024", "2025", "2026"], accents: [{ text: "цена", style: "marker" }], entrance: "mask" },
     { beat: 7, layout: "compare", headline: "Капсулы против зерна", items: ["Капсула", "45 ₽", "Зерно", "18 ₽"], accents: [{ text: "зерна", style: "serif" }], entrance: "rise" },
     { beat: 8, layout: "quote", headline: "Хороший кофе не бывает дешёвым", sub: "бариста, Ташкент", entrance: "rise" },
-    { beat: 9, layout: "headline", headline: "Сохрани и посчитай свои траты на кофе", kicker: "сделай сегодня", accents: [{ text: "посчитай", style: "marker" }], entrance: "mask" },
+    { beat: 9, layout: "orbit_title", headline: "Кофе — новая нефть", kicker: "рынок · 2026", accents: [{ text: "нефть", style: "serif" }], entrance: "mask" },
+    { beat: 10, layout: "depth_cards", headline: "Четыре шага к своей чашке дешевле", kicker: "по шагам", items: ["Купи зерно на развес", "Возьми ручную кофемолку", "Вари в аэропрессе", "Носи термокружку"], accents: [{ text: "дешевле", style: "marker" }], entrance: "rise" },
+    { beat: 11, layout: "tunnel_number", headline: "Цена чашки выросла за пять лет", number: { value: "×3", unit: "за 5 лет" }, kicker: "капучино в Москве", accents: [{ text: "выросла", style: "color" }], entrance: "pop" },
+    { beat: 12, layout: "headline", headline: "Сохрани и посчитай свои траты на кофе", kicker: "сделай сегодня", accents: [{ text: "посчитай", style: "marker" }], entrance: "mask" },
   ],
 });
-const r = await writeDirectorProject(script, design, { 1: img, 2: img, 3: img }, out);
+const only3d = process.argv.includes("--3d");
+const keep = (b: number) => !only3d || ["orbit_title", "depth_cards", "tunnel_number"].includes(design.scenes[b].layout);
+const beats = script.beats.map((_, b) => b).filter(keep);
+const s2 = { ...script, beats: beats.map((b) => script.beats[b]) };
+const d2 = { ...design, scenes: beats.map((b, k) => ({ ...design.scenes[b], beat: k })) };
+const imgs = Object.fromEntries(beats.map((b, k) => [k, b >= 1 && b <= 3 ? img : ""]).filter(([, v]) => v));
+const r = await writeDirectorProject(s2, d2, imgs, out);
 console.log(JSON.stringify({ duration: r.duration, overflow: r.overflow, timings: r.timings.map((t) => +(t.start + t.duration * 0.75).toFixed(2)) }));
