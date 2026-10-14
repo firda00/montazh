@@ -84,7 +84,7 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
   const cutFile = path.join(dir, "cut.json");
   const cutReport = (await exists(cutFile)) ? await readJson(cutFile, CutReportSchema) : null;
   const meta = await loadJob(jobId);
-  const { preset } = await loadPreset(meta.preset ?? "bold_pop");
+  const { preset } = await loadPreset(opts.preset ?? meta.preset ?? "bold_pop");
   let track: MusicTrack | null | undefined; // undefined = not looked up yet
 
   for (const output of targets) {
@@ -98,7 +98,7 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
     try {
       opts.onEvent?.(`▸ design ${output.id}`);
       const tb = Date.now();
-      const job = await exportDesignJob(jobId, output.id, { translate: opts.translate ?? true, llm: opts.llm, model: opts.model });
+      const job = await exportDesignJob(jobId, output.id, { translate: opts.translate ?? true, llm: opts.llm, model: opts.model, preset: opts.preset });
       warnings.push(...job.warnings);
       const projectDir = path.join(dir, "design", output.id);
       await fs.rm(projectDir, { recursive: true, force: true });

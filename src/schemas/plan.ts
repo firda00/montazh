@@ -245,6 +245,15 @@ export const DesignSpecSchema = z.object({
     face_zone: z.number().default(0.42),
   }).prefault({}),
   safe_area: z.object({ x: z.number().default(0.06), y: z.number().default(0.08) }).prefault({}),
+  /** "split": speaker in the bottom half, generated visuals + UI cards on top, hook title on the seam */
+  layout: z.enum(["full", "split"]).default("full"),
+  split: z.object({
+    /** seam position as a fraction of the height */
+    seam: z.number().default(0.5),
+    panel_bg: z.string().default("#0D0A1A"),
+    accent: z.string().default("#8B6CFF"),
+    image_style: z.string().default("cinematic, moody purple and blue neon light, shallow depth of field, high detail"),
+  }).prefault({}),
   /** call-to-action card over the last seconds (overlay only: the cut and its audio are untouched) */
   outro: z.object({
     enabled: z.boolean().default(false),

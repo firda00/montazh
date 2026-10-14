@@ -66,7 +66,7 @@ export class HyperFramesRenderer implements OverlayRenderer {
     if (this.opts.framesCacheDir) args.push("--frames-cache-dir", this.opts.framesCacheDir);
     o.onLine?.(`воркеров: ${plan.workers}${plan.lowMemory ? " (low-memory)" : ""}, свободно ${plan.freeMemMB} MB`);
 
-    const timeoutMs = ((frame.duration ?? 60) * (this.opts.timeoutFactor ?? 6) + 60) * 1000;
+    const timeoutMs = ((frame.duration ?? 60) * (this.opts.timeoutFactor ?? 12) + 120) * 1000;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), timeoutMs);
     const onAbort = () => ac.abort();

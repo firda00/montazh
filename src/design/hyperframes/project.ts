@@ -48,7 +48,19 @@ export async function writeHyperframesProject(job: DesignJob, layout: Layout, di
     /* optional */
   }
 
-  const html = composeHyperframes(job, layout, { videoRel, fontRel, gsapRel: "assets/gsap.min.js" });
+  let panelRel: Record<number, string> | undefined;
+  let extraFontFaces: string | undefined;
+  if (job.design.layout === "split") {
+    panelRel = {};
+    for (const [i, f] of Object.entries(job.panel_images ?? {})) {
+      const rel = `assets/panels/${path.basename(f)}`;
+      await linkOrCopy(f, path.join(dir, rel));
+      panelRel[Number(i)] = rel;
+    }
+    const { installFonts } = await import("../../make/fonts.ts");
+    extraFontFaces = await installFonts(dir, ["playfair-italic", "mono"]);
+  }
+  const html = composeHyperframes(job, layout, { videoRel, fontRel, gsapRel: "assets/gsap.min.js", panelRel, extraFontFaces });
   const entry = path.join(dir, "index.html");
   await fs.writeFile(entry, html);
   const name = `${job.job_id}-${job.timeline.output_id}`;

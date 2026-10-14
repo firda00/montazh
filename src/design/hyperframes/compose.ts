@@ -1,4 +1,5 @@
 import type { DesignJob } from "../export.ts";
+import { buildSplitLayer } from "./split.ts";
 import type { Layout, LayoutPage } from "../layout-types.ts";
 
 /** Paths inside the generated project (relative to index.html). */
@@ -6,6 +7,9 @@ export interface ComposeAssets {
   videoRel: string;
   fontRel: string;
   gsapRel: string;
+  /** split layout: panel images (index → project-relative path) and the extra @font-face rules */
+  panelRel?: Record<number, string>;
+  extraFontFaces?: string;
 }
 
 export const COMPOSE_VERSION = "hf-compose/1";
@@ -96,7 +100,13 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
   });
 
   const ttlHtml: string[] = [];
-  layout.titlesOut.forEach((t) => {
+  // split layout: the hook title replaces the EDL titles (they would collide with the top panels)
+  const split =
+    D.layout === "split" && job.panels
+      ? buildSplitLayer({ W, H, duration: DUR, design: D, panels: job.panels, images: assets.panelRel ?? {}, faceY: job.face_y, serifFamily: `'VPlayfairItalic', serif`, monoFamily: `'VMono', monospace`, displayFamily: `'${layout.font.family.replace(/['"<>]/g, "")}', sans-serif` })
+      : null;
+  if (split) tw.push(...split.tweens);
+  if (!split) layout.titlesOut.forEach((t) => {
     const id = `ttl-${t.index}`;
     const card = t.style === "card";
     const lines = t.lines.map((l, li) => `          <span class="ttl-line" id="${id}-line${li}">${esc(l)}</span>`).join("\n");
@@ -148,7 +158,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       * { margin: 0; padding: 0; box-sizing: border-box; }
       html, body { margin: 0; width: ${W}px; height: ${H}px; overflow: hidden; background: #000; }
       #root { position: relative; width: 100%; height: 100%; overflow: hidden; font-family: "${esc(layout.font.family)}", sans-serif; }
-      #a-roll { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      ${split ? split.videoCss : "#a-roll { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }"}${split ? split.css : ""}${assets.extraFontFaces ? `\n      ${assets.extraFontFaces}` : ""}
       /* root-level timed clips are full-frame; content is centred on the anchor via padding (no transforms) */
       .cap, .ttl { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
       .cap { padding: ${capPad.top}px ${safeX}px ${capPad.bottom}px; }
@@ -216,7 +226,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
     >
       <video id="a-roll" src="${assets.videoRel}" data-start="0" data-duration="${DUR}" data-track-index="0" muted playsinline></video>
 ${D.captions.shade.enabled && layout.pages.length ? `      <section id="shade" class="clip shade" data-start="0" data-duration="${DUR}" data-track-index="1"></section>\n` : ""}${capHtml.join("\n")}
-${ttlHtml.join("\n")}
+${ttlHtml.join("\n")}${split ? `\n${split.sections.join("\n")}` : ""}
 ${outroHtml.join("\n")}
     </div>
     <script>

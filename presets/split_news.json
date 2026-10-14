@@ -1,0 +1,88 @@
+{
+  "name": "split_news",
+  "description": "Новостной сплит как у tech-блогеров: сверху сгенерированная картинка с карточками (цитата, теги, код, цифра), снизу спикер, заголовок-хук на стыке",
+  "pace": "dynamic",
+  "clip_seconds": {
+    "min": 2,
+    "max": 6
+  },
+  "caption_style": "bold_pop",
+  "title_style": "hero",
+  "default_aspect": "9:16",
+  "music_default": true,
+  "notes": [
+    "хук в первые 3 секунды",
+    "заканчивать на законченной фразе",
+    "чередовать сцены"
+  ],
+  "design": {
+    "font": {
+      "family": "Inter",
+      "file": "assets/fonts/Inter-Variable.ttf",
+      "weight": 800
+    },
+    "colors": {
+      "text": "#FFFFFF",
+      "highlight": "#B9A5FF",
+      "stroke": "#000000",
+      "title": "#FFFFFF",
+      "title_bg": "rgba(0,0,0,0.55)"
+    },
+    "captions": {
+      "anchor_y": 0.79,
+      "max_words": 3,
+      "max_chars": 22,
+      "font_size": 62,
+      "line_height": 1.15,
+      "uppercase": true,
+      "stroke_width": 6,
+      "word_animation": "pop",
+      "pop_scale": 1.12,
+      "page_animation": "fade_up",
+      "backing": {
+        "enabled": true,
+        "color": "rgba(0,0,0,0.42)",
+        "padding": 10,
+        "radius": 18
+      },
+      "shade": {
+        "enabled": false,
+        "strength": 0.45,
+        "from": 0.55
+      }
+    },
+    "titles": {
+      "anchor_y": 0.12,
+      "font_size": 68,
+      "max_lines": 2,
+      "animation": "slide_up",
+      "padding": 20,
+      "radius": 22,
+      "avoid_face": true,
+      "face_zone": 0.42
+    },
+    "safe_area": {
+      "x": 0.06,
+      "y": 0.08
+    },
+    "outro": {
+      "enabled": false,
+      "duration": 1.8,
+      "text": "Подпишись — дальше ещё вкуснее",
+      "text_by_lang": {
+        "ru": "Подпишись — дальше ещё вкуснее",
+        "uz": "Obuna boʻling — davomi yanada mazali",
+        "en": "Follow for more"
+      },
+      "font_size": 80,
+      "backdrop": "rgba(0,0,0,0.45)"
+    },
+    "layout": "split",
+    "split": {
+      "seam": 0.5,
+      "panel_bg": "#0D0A1A",
+      "accent": "#8B6CFF",
+      "image_style": "cinematic, moody purple and blue neon light, shallow depth of field, high detail, no text"
+    }
+  }
+}

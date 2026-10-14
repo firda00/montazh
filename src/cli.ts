@@ -105,6 +105,7 @@ interface RenderCliOpts {
   translate: boolean;
   renderer: string;
   bgMusic?: string;
+  design?: string;
 }
 
 function withRenderOptions(cmd: Command) {
@@ -113,7 +114,8 @@ function withRenderOptions(cmd: Command) {
     .option("--workers <n>", "воркеры Chrome (по умолчанию — по свободной памяти)", (v) => Number(v))
     .option("--no-translate", "не переводить субтитры на язык из плана")
     .option("--renderer <name>", "hyperframes (другие — после этапа 4)", "hyperframes")
-    .option("--bg-music <m>", "музыка под речью: auto | upbeat|chill|… | файл | none (по умолчанию — из пресета)");
+    .option("--bg-music <m>", "музыка под речью: auto | upbeat|chill|… | файл | none (по умолчанию — из пресета)")
+    .option("--design <preset>", "пресет оформления вместо пресета задачи (например split_news)");
 }
 
 function makeRenderer(o: RenderCliOpts) {
@@ -125,7 +127,7 @@ function makeRenderer(o: RenderCliOpts) {
 async function runRender(jobId: string, o: RenderCliOpts & { only?: string[] }, edl?: Edl) {
   const renderer = makeRenderer(o);
   await renderer.prepare();
-  const r = await runStep(jobId, "render", () => renderOutputs(jobId, { renderer, quality: o.quality, only: o.only, translate: o.translate, edl, music: o.bgMusic, onEvent: (l) => console.log(l) }));
+  const r = await runStep(jobId, "render", () => renderOutputs(jobId, { renderer, quality: o.quality, only: o.only, translate: o.translate, edl, music: o.bgMusic, preset: o.design, onEvent: (l) => console.log(l) }));
   printRenderReport(r);
   return r;
 }

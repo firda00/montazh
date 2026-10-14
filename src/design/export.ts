@@ -10,6 +10,10 @@ import { loadPreset } from "../plan/presets.ts";
 import { buildDesignTimeline, paginate, type DesignTimeline, type OutPhrase } from "./timeline.ts";
 import { applyTranslations, translatePhrases } from "./translate.ts";
 import { selectStructuredLlm, type StructuredFn } from "../lib/llm.ts";
+import { directPanels, fallbackPanels, PanelsSchema, type Panels } from "./panels.ts";
+import { generateImages } from "../make/images.ts";
+import { addCost } from "../lib/cost.ts";
+import { writeJson } from "../lib/workspace.ts";
 import type { DesignSpec } from "../schemas/index.ts";
 
 export interface DesignJob {
@@ -24,11 +28,19 @@ export interface DesignJob {
   warnings: string[];
   /** vertical centre of the face/subject over the output's clips (0 = top), from the vision step; absent without focus data */
   face_y?: number;
+  /** split layout: top-half panels, the hook title and their images (absolute paths by panel index) */
+  panels?: Panels;
+  panel_images?: Record<number, string>;
 }
 
 export interface ExportOptions {
   /** translate captions into output.captions.language when the speech is in another language */
   translate?: boolean;
+  /** design preset to use instead of the job's (e.g. split_news) */
+  preset?: string;
+  /** split layout: reuse saved panels (default true) / generate panel images (default true) */
+  reusePanels?: boolean;
+  panelImages?: boolean;
   llm?: StructuredFn;
   model?: string;
 }
@@ -43,7 +55,7 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
   const edl = await readJson(path.join(dir, "edl.json"), EdlSchema);
   const output = edl.outputs.find((o) => o.id === outputId);
   if (!output) throw new Error(`output ${outputId} not in edl.json (${edl.outputs.map((o) => o.id).join(", ")})`);
-  const { preset } = await loadPreset(job.preset ?? "bold_pop");
+  const { preset } = await loadPreset(opts.preset ?? job.preset ?? "bold_pop");
   const design = PresetSchema.parse(preset).design;
   // the cut may have snapped/clamped clip edges: build the timeline from what was actually cut
   const cutFile = path.join(dir, "cut.json");
@@ -71,7 +83,46 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
   }
 
   const pages = timeline.phrases.flatMap((p) => paginate(p, design.captions.max_words, design.captions.max_chars).map((words) => ({ start: words[0].start, end: words[words.length - 1].end, words })));
-  return { job_id: jobId, rough_path: path.join(dir, `rough_${outputId}.mp4`), timeline, pages, design, preset: preset.name, captions_language: target, translated, warnings, ...(faceY !== undefined ? { face_y: faceY } : {}) };
+  // split layout: the director decides what the top half shows; images via Antigravity (cached per output)
+  let split: { panels?: Panels; panel_images?: Record<number, string> } = {};
+  if (design.layout === "split") {
+    const panelsFile = path.join(dir, "design", `${outputId}.panels.json`);
+    const imgDir = path.join(dir, "design", `${outputId}-panels`);
+    let panels: Panels;
+    if (opts.reusePanels !== false && (await exists(panelsFile))) panels = await readJson(panelsFile, PanelsSchema);
+    else {
+      try {
+        const llm = opts.llm ?? selectStructuredLlm();
+        const d = await directPanels(timeline.phrases, timeline.duration, { llm, language: timeline.phrases[0]?.lang ?? transcript.language, instruction: job.prompt ?? "", model: opts.model });
+        panels = d.panels;
+        await addCost(jobId, { step: "design", provider: d.provider === "anthropic" ? "anthropic" : d.provider, model: d.model, units: { ...d.usage, calls: 1, panels: d.panels.panels.length, estimate: d.estimate ? 1 : 0 }, usd: d.usd });
+      } catch (err) {
+        panels = fallbackPanels(timeline.duration, output.titles[0]?.text ?? "");
+        warnings.push(`режиссёр панелей не ответил, простая панель: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      }
+      await fs.mkdir(path.dirname(panelsFile), { recursive: true });
+      await writeJson(panelsFile, PanelsSchema, panels);
+    }
+    const images: Record<number, string> = {};
+    const todo: { beat: number; prompt: string }[] = [];
+    for (const [i, p] of panels.panels.entries()) {
+      const f = path.join(imgDir, `scene_${i}.jpg`);
+      if (await exists(f)) images[i] = f;
+      else todo.push({ beat: i, prompt: p.image_prompt });
+    }
+    if (todo.length && opts.panelImages !== false) {
+      try {
+        const r = await generateImages(todo, imgDir, { style: panels.image_style || design.split.image_style });
+        for (const [b, f] of r.files) images[b] = f;
+        if (r.missing.length) warnings.push(`картинки панелей не получены: ${r.missing.join(", ")}`);
+        await addCost(jobId, { step: "design", provider: "antigravity-cli", model: r.model, units: { ...r.usage, images: r.files.size, wall_seconds: r.wall_seconds, subscription: 1 }, usd: 0 });
+      } catch (err) {
+        warnings.push(`картинки панелей не сгенерированы: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      }
+    }
+    split = { panels, panel_images: images };
+  }
+  return { job_id: jobId, rough_path: path.join(dir, `rough_${outputId}.mp4`), timeline, pages, design, preset: preset.name, captions_language: target, translated, warnings, ...(faceY !== undefined ? { face_y: faceY } : {}), ...split };
 }
 
 /** Duration-weighted mean of the clips' focus y (each clip's focus = overlap-weighted scene focus); undefined without any focus. */

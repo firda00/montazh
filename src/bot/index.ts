@@ -34,6 +34,7 @@ export const MSG = {
     "/revise <что изменить> — правка последнего монтажа (перережу и перерендерю только затронутое)",
     "/make <тема> — ролик по теме из ничего: тренды, сценарий, сгенерированные картинки, моушн-графика, музыка",
     "Несколько видео подряд (или альбомом) → /viral — соберу один самый вирусный ролик из всех; /clear — новая подборка",
+    "/style pop | split | calm — стиль монтажа (split: сверху сгенерированные картинки с карточками, снизу спикер)",
     "/cancel — отменить текущую работу (после текущего шага)",
     "/start — эта справка",
   ].join("\n"),
@@ -47,6 +48,7 @@ export const MSG = {
   noJob: "Пока нет задач. Пришлите видео и напишите задачу.",
   reviseUsage: "Напишите, что изменить: /revise в reel_1 убери приветствие",
   makeUsage: "Напишите тему: /make почему кофе дорожает в 2026",
+  styleUsage: (cur: string) => `Сейчас: ${cur}. Варианты: /style pop — динамичные субтитры; /style split — сверху картинки и карточки, снизу спикер (как у новостных техно-блогеров); /style calm — спокойный.`,
   makeStart: "Делаю ролик по теме: тренды → сценарий → графика → рендер. Это 3–6 минут.",
   reviseNoJob: "Нечего править: сначала смонтируйте видео (пришлите видео и задачу).",
   nothingToCancel: "Сейчас ничего не выполняется.",
@@ -276,6 +278,8 @@ export const ChatStateSchema = z.object({
   sources: z.array(z.string()).default([]),
   /** a run used the batch: the next video starts a new one */
   batch_closed: z.boolean().default(false),
+  /** design preset chosen with /style (bold_pop, split_news, calm) */
+  style: z.string().optional(),
   jobId: z.string().optional(),
   prompt: z.string().optional(),
   updated_at: z.string().optional(),
@@ -286,6 +290,15 @@ export const BotStateSchema = z.object({
   chats: z.record(z.string(), ChatStateSchema).default({}),
 });
 export type ChatState = z.infer<typeof ChatStateSchema>;
+
+/** /style names → presets */
+export const STYLES: Record<string, string> = { pop: "bold_pop", bold: "bold_pop", bold_pop: "bold_pop", split: "split_news", news: "split_news", split_news: "split_news", calm: "calm" };
+
+/** a style named in the instruction itself ("в стиле сплит", "как у aleko") */
+export function styleFromText(text: string): string | undefined {
+  if (/(сплит|split|как у aleko|как aleko|новостн\w* сплит|карточк\w* сверху)/i.test(text)) return "split_news";
+  return undefined;
+}
 export type BotState = z.infer<typeof BotStateSchema>;
 
 interface Running {
@@ -390,6 +403,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     return saving;
   };
   const chat = (id: number): ChatState => (state.chats[String(id)] ??= { sources: [], batch_closed: false });
+  /** the preset for a run: /style, or a style named in the instruction, or the bot default */
+  const presetFor = (chatId: number, instruction: string) => styleFromText(instruction) ?? chat(chatId).style ?? preset;
   const updateChat = async (id: number, patch: Partial<ChatState>) => {
     Object.assign(chat(id), patch, { updated_at: new Date().toISOString() });
     await saveState();
@@ -482,12 +497,14 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const sources = batch.length > 1 ? batch : undefined;
     await updateChat(chatId, { prompt: instruction, batch_closed: true });
     await say(chatId, sources ? `${MSG.start}\nВидео в подборке: ${sources.length} — склею и выберу лучшее из всех.` : MSG.start);
+    const runPreset = presetFor(chatId, instruction);
+    if (runPreset !== preset) log(`[${chatId}] стиль: ${runPreset}`);
     launch(chatId, "run", (r) =>
       pipelineFn({
         source,
         sources,
         instruction,
-        preset,
+        preset: runPreset,
         progress: progressFor(chatId, r),
         onJob: (jobId) => void updateChat(chatId, { jobId }),
         signal: r.ac.signal,
@@ -621,6 +638,12 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         case "viral":
           if (running.has(chatId)) return say(chatId, MSG.busy);
           return startRun(chatId, arg ? `${MSG.viral} Дополнительно: ${arg}` : MSG.viral);
+        case "style": {
+          const want = STYLES[arg.trim().toLowerCase()];
+          if (!want) return say(chatId, MSG.styleUsage(chat(chatId).style ?? preset));
+          await updateChat(chatId, { style: want });
+          return say(chatId, `Стиль: ${want}. Следующий монтаж будет в нём.`);
+        }
         case "clear":
           await updateChat(chatId, { sources: [], batch_closed: false });
           return say(chatId, MSG.cleared);
