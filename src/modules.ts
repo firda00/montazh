@@ -39,7 +39,8 @@ export interface Backend {
 
 export interface ModuleDef {
   id: string;
-  stage: StepName | "delivery";
+  /** "source": produces the video the pipeline starts from (avatars) */
+  stage: StepName | "delivery" | "source";
   title: string;
   what: string;
   /** how the active backend is chosen (flag / env) */
@@ -234,6 +235,28 @@ export const MODULES: ModuleDef[] = [
     },
   },
   {
+    id: "avatar",
+    stage: "source",
+    title: "Говорящий аватар",
+    what: "текст/тема → речь (клон голоса) → говорящее фото на Colab T4 → монтаж split_news; $0",
+    selector: "vedit avatar export|import / Telegram /avatar; tools/avatar/colab_vedit_avatar.ipynb",
+    backends: [
+      { id: "chatterbox", title: "Речь: Chatterbox Multilingual (Resemble AI), 23 языка, клон голоса по 5–10 с", deps: "Colab: chatterbox-tts 0.1.7, torch 2.6 (отдельный venv)", license: "MIT; в речи неслышимый водяной знак Perth (Resemble AI)" },
+      { id: "joyvasa", title: "Мимика и голова: JoyVASA (диффузия по звуку) + рендер LivePortrait", deps: "Colab: JoyVASA (git), веса jdh-algo/JoyVASA, KwaiVGI/LivePortrait, TencentGameMate/chinese-hubert-base; transformers 4.39", license: "MIT (код и веса JoyVASA, LivePortrait, chinese-hubert-base)" },
+      { id: "insightface", title: "Детекция лица в LivePortrait: InsightFace buffalo_l (det_10g, 2d106det)", deps: "веса из KwaiVGI/LivePortrait", license: "ТОЛЬКО некоммерческое исследование — TODO до коммерческого запуска: заменить на MediaPipe Face Detection (Apache-2.0)" },
+      { id: "colab", title: "GPU: Google Colab T4 (бесплатно)", deps: "аккаунт Google, браузер", license: "условия Google Colab; $0" },
+      { id: "portrait", title: "Портрет вымышленного ведущего: Antigravity (как в make), или фото пользователя", deps: "agy + вход Google", license: "условия Antigravity; $0; реальных и известных людей не генерируем" },
+      { id: "claude-script", title: "Монолог по теме: structured-вызов Claude (prompts/avatar.script.*)", deps: "как планировщик", license: "как планировщик" },
+    ],
+    job: (j) => /avatar:/.test(j.source),
+    probe: async (env) => {
+      const script = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || env.CLAUDE_CODE_OAUTH_TOKEN || claudeLoginExists(env));
+      const agy = !!(await findAgy(env));
+      const notes = [agy ? "" : "без agy нужен --photo", script ? "" : "по теме — нет входа Claude, только --text", "InsightFace — некоммерческая лицензия"].filter(Boolean);
+      return { active: "colab: chatterbox+joyvasa", ready: true, note: notes.join("; ") };
+    },
+  },
+  {
     id: "bot",
     stage: "delivery",
     title: "Telegram-бот",
@@ -253,7 +276,7 @@ export const MODULES: ModuleDef[] = [
     what: "vedit run/plan/revise/render, batch по папке",
     selector: "всегда",
     backends: [{ id: "commander", title: "commander", deps: "commander", license: "MIT" }],
-    job: (j) => !/[\\/]_bot[\\/]/.test(j.source) && !/make:/.test(j.source),
+    job: (j) => !/[\\/]_bot[\\/]/.test(j.source) && !/(make|avatar):/.test(j.source),
     probe: async () => ({ active: "commander", ready: true, note: "" }),
   },
 ];

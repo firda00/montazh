@@ -47,6 +47,22 @@ export interface TgDocument {
   mime_type?: string;
   file_size?: number;
 }
+export interface TgPhotoSize {
+  file_id: string;
+  file_unique_id?: string;
+  width?: number;
+  height?: number;
+  file_size?: number;
+}
+export interface TgVoice {
+  file_id: string;
+  file_unique_id?: string;
+  duration?: number;
+  mime_type?: string;
+  file_size?: number;
+  /** audio messages carry a file name, voice notes do not */
+  file_name?: string;
+}
 export interface TgMessage {
   message_id: number;
   date?: number;
@@ -58,6 +74,10 @@ export interface TgMessage {
   media_group_id?: string;
   video?: TgVideo;
   document?: TgDocument;
+  /** sizes of one photo, smallest first */
+  photo?: TgPhotoSize[];
+  voice?: TgVoice;
+  audio?: TgVoice;
 }
 export interface TgUpdate {
   update_id: number;

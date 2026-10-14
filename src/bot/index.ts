@@ -35,6 +35,7 @@ export const MSG = {
     "/make <тема> — ролик по теме из ничего: тренды, сценарий, сгенерированные картинки, моушн-графика, музыка",
     "Несколько видео подряд (или альбомом) → /viral — соберу один самый вирусный ролик из всех; /clear — новая подборка",
     "/style pop | split | calm — стиль монтажа (split: сверху сгенерированные картинки с карточками, снизу спикер)",
+    "/avatar <текст или тема> — говорящий аватар (бесплатно, через Google Colab): пришлите заранее фото (лицо анфас) и голосовое 5–10 с — аватар будет с вашим лицом и голосом; без них — вымышленный ведущий. Готовый avatar_result.zip пришлите сюда — смонтирую рилс",
     "/cancel — отменить текущую работу (после текущего шага)",
     "/start — эта справка",
   ].join("\n"),
@@ -57,6 +58,27 @@ export const MSG = {
   start: "Принято, начинаю монтаж. Это займёт несколько минут.",
   reviseStart: "Принято, правлю монтаж.",
   unknownCommand: "Не знаю такой команды. /start — справка.",
+  avatarUsage: "Напишите текст или тему: /avatar почему кофе дорожает (тема — монолог напишу сам) или /avatar текст: Привет! Сегодня расскажу… Фото и голосовое для аватара можно прислать заранее; /avatar сброс — забыть их.",
+  avatarStart: (photo: boolean, voice: boolean) =>
+    `Готовлю задание для аватара: ${photo ? "ваше фото" : "вымышленный ведущий (сгенерирую портрет)"}, ${voice ? "ваш голос (клон)" : "стандартный голос"}. Это 1–3 минуты.`,
+  avatarPhotoSaved: "Фото сохранено для аватара. Теперь /avatar <текст или тема>.",
+  avatarVoiceSaved: "Голос сохранён: аватар будет говорить им (нужно 5–10 с чистой речи на языке текста). Теперь /avatar <текст или тема>.",
+  avatarReset: "Фото и голос для аватара забыты.",
+  avatarNoJob: "Не нашёл задачу для этого архива: сначала /avatar <текст>, затем пришлите avatar_result.zip из Colab.",
+  avatarImportStart: (jobId: string) => `Принял avatar_result.zip (задача ${jobId}). Монтирую рилс: аватар снизу, картинки сверху, субтитры, музыка.`,
+  avatarInstructions: (jobId: string, lines: string[], warnings: string[]) =>
+    [
+      `Задание для аватара готово (задача ${jobId}) — файл avatar_job.zip выше.`,
+      "",
+      "Как получить видео (бесплатно, Google Colab):",
+      "1. Откройте ноутбук colab_vedit_avatar.ipynb (из папки tools/avatar проекта) в colab.research.google.com → File → Upload notebook.",
+      "2. Runtime → Change runtime type → T4 GPU, затем Runtime → Run all.",
+      "3. В ячейке «Загрузка» выберите avatar_job.zip.",
+      "4. Первый запуск ~10 минут (установка и модели), потом 2–5 минут.",
+      "5. Скачается avatar_result.zip — пришлите его сюда документом, я смонтирую рилс.",
+      ...(lines.length ? ["", "Текст:", ...lines.slice(0, 8).map((l, i) => `${i + 1}. ${l}`), ...(lines.length > 8 ? [`… ещё ${lines.length - 8}`] : [])] : []),
+      ...warnings.map((w) => `⚠ ${w}`),
+    ].join("\n"),
 };
 
 function tooLarge(sizeBytes: number, limits: Limits) {
@@ -78,6 +100,10 @@ export interface PipelineOutput {
 export interface PipelineResult {
   jobId: string;
   outputs: PipelineOutput[];
+  /** files sent as documents before the videos (e.g. avatar_job.zip) */
+  documents?: { file: string; caption?: string }[];
+  /** replaces the closing "Готово: N ролик(ов)…" message */
+  message?: string;
   failed?: { id: string; error: string }[];
   reasoning?: string;
   notes?: string[];
@@ -111,6 +137,63 @@ export interface MakeArgs {
   log: (line: string) => void;
 }
 export type MakeFn = (args: MakeArgs) => Promise<PipelineResult>;
+
+export interface AvatarExportArgs {
+  /** "/avatar" argument: a topic or the text itself */
+  input: string;
+  photo?: string;
+  voice?: string;
+  /** job source label, so the job counts as a bot job */
+  sourceLabel: string;
+  progress: (text: string) => Promise<void>;
+  onJob: (jobId: string) => void;
+  signal: AbortSignal;
+  log: (line: string) => void;
+}
+export type AvatarExportFn = (args: AvatarExportArgs) => Promise<PipelineResult>;
+export interface AvatarImportArgs {
+  jobId: string;
+  /** avatar_result.zip on disk */
+  result: string;
+  instruction?: string;
+  preset: string;
+  progress: (text: string) => Promise<void>;
+  signal: AbortSignal;
+  log: (line: string) => void;
+}
+export type AvatarImportFn = (args: AvatarImportArgs) => Promise<PipelineResult>;
+
+/** /avatar: text or topic (+ photo, + voice) → avatar_job.zip and instructions for the Colab notebook. */
+export const runAvatarExport: AvatarExportFn = async ({ input, photo, voice, sourceLabel, progress, onJob, log }) => {
+  const { exportAvatarJob } = await import("../avatar/export.ts");
+  const r = await exportAvatarJob({
+    input,
+    photo,
+    voice,
+    sourceLabel,
+    onEvent: (l) => {
+      if (/^job /.test(l)) onJob(l.slice(4).trim());
+      else if (/^▸/.test(l)) void progress(l);
+      else log(`  ${l.trim()}`);
+    },
+  });
+  return {
+    jobId: r.jobId,
+    outputs: [],
+    documents: [{ file: r.bundle, caption: `avatar_job.zip · задача ${r.jobId} · ≈${r.state.estimated_seconds.toFixed(0)} с речи` }],
+    message: MSG.avatarInstructions(r.jobId, r.state.lines, r.warnings),
+  };
+};
+
+/** avatar_result.zip → import into its job → montage (split_news by default) → reels. */
+export const runAvatarImport: AvatarImportFn = async ({ jobId, result, instruction, preset, progress, signal, log }) => {
+  const { importAvatarResult, runAvatarMontage } = await import("../avatar/import.ts");
+  const imp = await importAvatarResult(jobId, result);
+  for (const w of imp.warnings) log(`  ⚠ ${w}`);
+  checkCancel(signal);
+  const m = await runAvatarMontage(jobId, { prompt: instruction, design: preset, progress, checkpoint: () => checkCancel(signal), onEvent: (l) => log(`  ${l.trim()}`) });
+  return { jobId, outputs: m.outputs, failed: m.failed, reasoning: m.reasoning, notes: [...imp.warnings, ...m.notes].slice(0, 4) };
+};
 
 /** /make: topic → video from nothing (trends → script → motion graphics → render). */
 export const runMakePipeline: MakeFn = async ({ topic, progress, onJob, signal, log }) => {
@@ -282,6 +365,10 @@ export const ChatStateSchema = z.object({
   style: z.string().optional(),
   jobId: z.string().optional(),
   prompt: z.string().optional(),
+  /** /avatar: the last photo and voice sample sent to the chat, and the job of the last avatar_job.zip */
+  avatar_photo: z.string().optional(),
+  avatar_voice: z.string().optional(),
+  avatar_job: z.string().optional(),
   updated_at: z.string().optional(),
 });
 export const BotStateSchema = z.object({
@@ -302,7 +389,7 @@ export function styleFromText(text: string): string | undefined {
 export type BotState = z.infer<typeof BotStateSchema>;
 
 interface Running {
-  kind: "run" | "revise" | "make";
+  kind: "run" | "revise" | "make" | "avatar";
   stage: string;
   startedAt: number;
   ac: AbortController;
@@ -327,6 +414,8 @@ export interface BotOptions {
   pipeline?: PipelineFn;
   revise?: ReviseFn;
   make?: MakeFn;
+  avatarExport?: AvatarExportFn;
+  avatarImport?: AvatarImportFn;
   /** long-polling timeout, seconds (default 30) */
   pollTimeout?: number;
   /** how long to wait for the rest of an album before acting (ms, default 4000) */
@@ -376,12 +465,19 @@ function isVideoMessage(m: TgMessage) {
 
 const safeName = (s: string) => s.replace(/[^A-Za-z0-9_-]/g, "_");
 
+/** the Colab notebook's output: avatar_result.zip (browsers may add " (1)" or "-2" to repeated downloads) */
+export function isAvatarResult(fileName?: string): boolean {
+  return /^avatar_result[^/\\]*\.zip$/i.test(fileName ?? "");
+}
+
 export async function createBot(o: BotOptions): Promise<Bot> {
   const log = o.onLog ?? ((l: string) => console.log(l));
   const api = o.api ?? makeBotApi(o.token, { callMethod: o.callMethod, download: o.download, apiBase: o.apiBase, limits: o.limits });
   const pipelineFn = o.pipeline ?? runFullPipeline;
   const reviseFn = o.revise ?? runRevisePipeline;
   const makeFn = o.make ?? runMakePipeline;
+  const avatarExportFn = o.avatarExport ?? runAvatarExport;
+  const avatarImportFn = o.avatarImport ?? runAvatarImport;
   const preset = o.preset ?? "bold_pop";
   const botDir = path.join(path.resolve(o.workspace ?? WORKSPACE_ROOT), "_bot");
   const stateFile = path.join(botDir, "state.json");
@@ -425,6 +521,14 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   const action = (chatId: number, a: Parameters<BotApi["sendChatAction"]>[1]) => api.sendChatAction(chatId, a).catch(() => {});
 
   async function deliver(chatId: number, result: PipelineResult) {
+    for (const doc of result.documents ?? []) {
+      await action(chatId, "upload_document");
+      try {
+        await api.sendDocument(chatId, doc.file, doc.caption);
+      } catch (err) {
+        await say(chatId, `Не удалось отправить ${path.basename(doc.file)} (${err instanceof TelegramError ? err.description : String(err)}). Он лежит на сервере: ${doc.file}`);
+      }
+    }
     for (const out of result.outputs) {
       const caption = videoCaption(out, result.reasoning);
       let size = 0;
@@ -453,6 +557,10 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const lines: string[] = [];
     for (const f of result.failed ?? []) lines.push(`✖ ${f.id}: ${f.error.split("\n")[0]}`);
     for (const n of result.notes ?? []) lines.push(`⚠ ${n}`);
+    if (result.message) {
+      await say(chatId, [result.message, ...lines].join("\n"));
+      return;
+    }
     const head = result.outputs.length ? `Готово: ${result.outputs.length} ролик(ов), задача ${result.jobId}.` : `Новых роликов нет (задача ${result.jobId}).`;
     await say(chatId, [head, ...lines, result.outputs.length ? "Правка: /revise <что изменить>" : ""].filter(Boolean).join("\n"));
   }
@@ -528,11 +636,83 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     launch(chatId, "revise", (r) => reviseFn({ jobId, edit, progress: progressFor(chatId, r), signal: r.ac.signal, log: (l) => log(`[${chatId}] ${l}`) }));
   }
 
+  async function startAvatar(chatId: number, input: string) {
+    if (!input) return say(chatId, MSG.avatarUsage);
+    if (/^(сброс|reset|clear)$/i.test(input)) {
+      await updateChat(chatId, { avatar_photo: undefined, avatar_voice: undefined });
+      return say(chatId, MSG.avatarReset);
+    }
+    const c = chat(chatId);
+    const photo = c.avatar_photo && (await exists(c.avatar_photo)) ? c.avatar_photo : undefined;
+    const voice = c.avatar_voice && (await exists(c.avatar_voice)) ? c.avatar_voice : undefined;
+    await updateChat(chatId, { prompt: input });
+    await say(chatId, MSG.avatarStart(!!photo, !!voice));
+    launch(chatId, "avatar", (r) =>
+      avatarExportFn({
+        input,
+        photo,
+        voice,
+        sourceLabel: path.join(botDir, String(chatId), "avatar"),
+        progress: progressFor(chatId, r),
+        onJob: (jobId) => void updateChat(chatId, { jobId, avatar_job: jobId }),
+        signal: r.ac.signal,
+        log: (l) => log(`[${chatId}] ${l}`),
+      }),
+    );
+  }
+
+  /** avatar_result*.zip: find its job (meta.json inside, else the chat's last avatar job) and run the montage. */
+  async function onAvatarResult(m: TgMessage, d: { file_id: string; file_size?: number; file_name?: string }) {
+    const chatId = m.chat.id;
+    if (running.has(chatId)) return say(chatId, MSG.busy);
+    if (d.file_size !== undefined && d.file_size > api.limits.downloadBytes) return say(chatId, tooLarge(d.file_size, api.limits));
+    const file = await api.getFile(d.file_id);
+    if (file.file_size !== undefined && file.file_size > api.limits.downloadBytes) return say(chatId, tooLarge(file.file_size, api.limits));
+    const dest = path.join(botDir, String(chatId), `${safeName(d.file_id)}.zip`);
+    if (!(await exists(dest))) await api.download(file, dest);
+    let jobId: string | undefined;
+    try {
+      const { readZip } = await import("../lib/zip.ts");
+      const meta = (await readZip(dest)).get("meta.json");
+      const fromZip = meta ? (JSON.parse(meta.toString("utf8")) as { job?: string }).job : undefined;
+      if (fromZip && /^[\w-]+$/.test(fromZip) && (await exists(path.join(jobDir(fromZip), "job.json")))) jobId = fromZip;
+    } catch (err) {
+      return say(chatId, `✖ архив не читается: ${err instanceof Error ? err.message.split("\n")[0] : err}`);
+    }
+    const c = chat(chatId);
+    if (!jobId && c.avatar_job && (await exists(path.join(jobDir(c.avatar_job), "job.json")))) jobId = c.avatar_job;
+    if (!jobId) return say(chatId, MSG.avatarNoJob);
+    const instruction = m.caption?.trim() || undefined;
+    const runPreset = (instruction ? styleFromText(instruction) : undefined) ?? c.style ?? "split_news";
+    await updateChat(chatId, { jobId, avatar_job: jobId, ...(instruction ? { prompt: instruction } : {}) });
+    await say(chatId, MSG.avatarImportStart(jobId));
+    const id = jobId;
+    launch(chatId, "avatar", (r) => avatarImportFn({ jobId: id, result: dest, instruction, preset: runPreset, progress: progressFor(chatId, r), signal: r.ac.signal, log: (l) => log(`[${chatId}] ${l}`) }));
+  }
+
+  /** a photo (or an image file) / a voice note (or an audio file) for the next /avatar */
+  async function onAvatarMedia(m: TgMessage, kind: "photo" | "voice", f: { file_id: string; file_size?: number }, ext: string) {
+    const chatId = m.chat.id;
+    if (f.file_size !== undefined && f.file_size > api.limits.downloadBytes) return say(chatId, tooLarge(f.file_size, api.limits));
+    const file = await api.getFile(f.file_id);
+    const dest = path.join(botDir, String(chatId), `avatar_${kind}_${safeName(f.file_id).slice(-24)}${ext}`);
+    if (!(await exists(dest))) await api.download(file, dest);
+    await updateChat(chatId, kind === "photo" ? { avatar_photo: dest } : { avatar_voice: dest });
+    log(`[${chatId}] ${kind} для аватара: ${dest}`);
+    const caption = m.caption?.trim();
+    const cmd = caption ? /^\/avatar(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(caption) : null;
+    if (cmd) {
+      if (running.has(chatId)) return say(chatId, MSG.busy);
+      return startAvatar(chatId, (cmd[1] ?? "").trim());
+    }
+    return say(chatId, kind === "photo" ? MSG.avatarPhotoSaved : MSG.avatarVoiceSaved);
+  }
+
   async function status(chatId: number) {
     const c = chat(chatId);
     const r = running.get(chatId);
     const lines: string[] = [];
-    if (r) lines.push(`Сейчас: ${r.kind === "run" ? "монтаж" : r.kind === "make" ? "ролик по теме" : "правка"}, шаг «${r.stage}», ${((Date.now() - r.startedAt) / 1000).toFixed(0)} с${r.ac.signal.aborted ? " (отменяется)" : ""}`);
+    if (r) lines.push(`Сейчас: ${r.kind === "run" ? "монтаж" : r.kind === "make" ? "ролик по теме" : r.kind === "avatar" ? "аватар" : "правка"}, шаг «${r.stage}», ${((Date.now() - r.startedAt) / 1000).toFixed(0)} с${r.ac.signal.aborted ? " (отменяется)" : ""}`);
     if (c.source) lines.push(`Видео: ${path.basename(c.source)}`);
     if (c.prompt) lines.push(`Задача: ${excerpt(c.prompt, 200)}`);
     if (c.jobId) {
@@ -609,6 +789,11 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const chatId = m.chat.id;
     const video = isVideoMessage(m);
     if (video) return onVideo(m, video);
+    if (m.document && isAvatarResult(m.document.file_name)) return onAvatarResult(m, m.document);
+    if (m.photo?.length) return onAvatarMedia(m, "photo", m.photo[m.photo.length - 1], ".jpg");
+    if (m.document?.mime_type?.startsWith("image/")) return onAvatarMedia(m, "photo", m.document, path.extname(m.document.file_name ?? "") || ".jpg");
+    if (m.voice) return onAvatarMedia(m, "voice", m.voice, ".ogg");
+    if (m.audio) return onAvatarMedia(m, "voice", m.audio, path.extname(m.audio.file_name ?? "") || ".mp3");
     if (m.document) return say(chatId, MSG.notVideo);
     const text = m.text?.trim();
     if (!text) return;
@@ -635,6 +820,9 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         case "make":
           if (running.has(chatId)) return say(chatId, MSG.busy);
           return startMake(chatId, arg);
+        case "avatar":
+          if (running.has(chatId) && !/^(сброс|reset|clear)$/i.test(arg)) return say(chatId, MSG.busy);
+          return startAvatar(chatId, arg);
         case "viral":
           if (running.has(chatId)) return say(chatId, MSG.busy);
           return startRun(chatId, arg ? `${MSG.viral} Дополнительно: ${arg}` : MSG.viral);

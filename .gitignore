@@ -10,3 +10,5 @@ tests/fixtures/*.json
 tools/asr/.venv/
 tools/asr/models/
 .gstack/
+tools/avatar/.venv/
+tools/avatar/.cache/

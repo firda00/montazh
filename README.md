@@ -310,6 +310,61 @@ node bin/vedit.mjs plan <job> -p "…" --speaker most --cut && node bin/vedit.mj
 фраза после разбиения по предложениям берёт метку сегмента, в который попадает её середина. Ограничения Colab:
 бесплатная сессия до ~5 часов, ~12 ГБ RAM, файлы загружаются через браузер (поэтому Opus, а не WAV).
 
+## Аватары (этап 14)
+
+Говорящий аватар бесплатно: текст или тема → речь с клоном голоса → «оживлённое» фото на бесплатном GPU Google Colab
+(T4) → обычный монтаж (`split_news`: аватар снизу, сгенерированные картинки и карточки сверху, субтитры, музыка).
+
+```bash
+node bin/vedit.mjs avatar export --topic "почему кофе дорожает" [--seconds 40]          # монолог напишет Claude
+node bin/vedit.mjs avatar export --text "Привет! Сегодня…" [--photo me.jpg] [--voice me.ogg] [--lang ru]
+node bin/vedit.mjs avatar export --speech my_voice.ogg --photo me.jpg                   # своя запись, без синтеза
+node bin/vedit.mjs avatar export --text "…" --voice-only                                 # только голос
+# → workspace/<job>/avatar_job.zip; Colab: tools/avatar/colab_vedit_avatar.ipynb, T4, Run all, загрузить архив
+node bin/vedit.mjs avatar import <job> avatar_result.zip [--design split_news] [-p "1 рилс 30 секунд"]
+```
+
+В Telegram: пришлите фото (лицо анфас) и голосовое 5–10 с (по желанию) → `/avatar <текст или тема>` → бот пришлёт
+`avatar_job.zip` и инструкцию → после Colab пришлите боту `avatar_result.zip` документом (подпись = задача монтажа)
+→ готовый рилс. `/avatar сброс` — забыть фото и голос. Без фото портрет вымышленного ведущего генерирует Antigravity
+(`prompts/avatar.portrait.md`: только вымышленные люди, не реальные и не известные).
+
+Как устроено:
+
+- **Бандл** (`src/avatar/export.ts`): `script.json` (язык, строки, настройки голоса и анимации, id задачи), `portrait.png`
+  (≤ 1280 px), `voice_ref.wav` (24 кГц моно, ≤ 12 с, тишина в начале срезана) или `speech_in.wav` (своя запись) и сам
+  `vedit_avatar.py` — в Colab загружается один файл. Zip пишется и читается на чистом Node (`src/lib/zip.ts`).
+  Тема → монолог: structured-вызов Claude по `prompts/avatar.script.*` (разговорные короткие строки, числа словами,
+  ≈2.5 слова/с).
+- **Colab** (`tools/avatar/colab_vedit_avatar.ipynb` → `tools/avatar/vedit_avatar.py`): речь — **Chatterbox
+  Multilingual** (по предложению, паузы 220 мс между предложениями и 450 мс между строками, повтор с другим сидом, если
+  длина фразы неправдоподобна); анимация — **JoyVASA** (диффузия мимики и движений головы по звуку, энкодер
+  chinese-hubert-base) + рендер **LivePortrait** с вклейкой лица обратно в портрет, 25 fps. Речь длиннее 20 с
+  анимируется кусками, которые режутся по паузам между фразами (на стыке голова возвращается в исходную позу — это
+  незаметно в паузе и всё равно режется монтажом), куски склеиваются покадрово точно по длине речи. Итог —
+  `avatar_result.zip` (`avatar.mp4` H.264 + AAC, `speech.wav`, `meta.json` с таймингами строк, версиями и временем);
+  архив ужимается до 19 МБ, чтобы пройти через бота.
+- **Окружения в Colab**: два изолированных venv через `uv` на Python 3.11 — Chatterbox требует `transformers 5.2`,
+  JoyVASA — `4.39` (его HuBERT-энкодер наследует внутренние классы transformers). В обоих `torch 2.6.0` (cu124),
+  `uv` скачивает его один раз; ядро Colab и его torch не трогаются, перезапуск runtime не нужен, ячейки перезапускаемы
+  (готовые этапы пропускаются по хэшу входа). JoyVASA закреплён на коммите, веса качаются `snapshot_download` только
+  нужные (без animal-режима и XPose).
+- **Импорт** (`src/avatar/import.ts`): проверка `meta.json`, ffprobe (есть видео и звук, длина = длине речи ±3 %,
+  `speech.wav` той же длины, кадр ≥ 256 px) → `avatar.mp4` становится исходником той же задачи → ingest → understand →
+  plan → cut → render. Речь всё равно распознаётся whisper: один путь кода и настоящие пословные тайминги для
+  подсветки субтитров (синтезированная речь чистая, whisper на ней точен); сценарий только сверяет транскрипт
+  (`сверка со сценарием: N/M слов`, предупреждение ниже 60 %).
+- **Проверка без GPU**: `python tools/avatar/vedit_avatar.py selftest` — синтетическая речь и видео через ffmpeg
+  (нарезка по паузам, склейка, сведение, zip, пропуск готовых этапов); `tests/stage14-avatar.test.ts`.
+  Локальный CPU-прогон (`tools/avatar/.venv/{tts,joy}`, веса в `tools/avatar/.cache/`): на Windows JoyVASA должен лежать
+  по пути без кириллицы (OpenCV), на CPU работает только для проверки (минуты на секунды видео).
+
+Лицензии: Chatterbox — MIT, в синтезированной речи неслышимый водяной знак Perth (Resemble AI); JoyVASA, LivePortrait,
+chinese-hubert-base — MIT. ⚠️ **InsightFace buffalo_l** (детекция лица внутри LivePortrait) — **только некоммерческое
+исследование**: для тестов можно, **TODO до коммерческого запуска — заменить на MediaPipe Face Detection** (Apache-2.0).
+Стоимость: $0 (Colab бесплатно; Claude — только для монолога по теме, ≈$0.03). Языки синтеза — 23 языка Chatterbox
+(ru, en, tr, de, …; узбекского нет — для него `--speech` со своей записью).
+
 ## Модули и промпты
 
 Проект собран из сменных модулей; `vedit modules` показывает, какой бэкенд активен, готов ли он на этой машине и
@@ -324,7 +379,7 @@ node bin/vedit.mjs modules --json --days 90
 
 Реестр — `src/modules.ts`: для каждого модуля этап, способ выбора бэкенда (флаг/переменная), бэкенды с зависимостями
 и лицензиями, `probe()` готовности и правило, какие записи `cost.json` ему принадлежат. Модули: ingest, asr, speakers,
-scenes, vision, planner, shortlist, cut, translate, render, bot, cli.
+scenes, vision, planner, shortlist, cut, translate, render, make, avatar, bot, cli.
 
 Та же команда печатает **пресеты** (`presets/*.json` плюс встроенные; битый файл показывается с ошибкой, а не
 пропадает) и **лимиты**: бюджет планировщика ($1.50 / 240 с / 12 запросов / 2 ремонта / 16 инструментов / 6 кадров),
@@ -368,3 +423,4 @@ scenes, vision, planner, shortlist, cut, translate, render, bot, cli.
 | 11. Звук: эффекты, музыка по настроению, приглушение под речью | ✅ |
 | 12. Несколько видео → один вирусный ролик (`/viral`, альбомы) | ✅ |
 | 13. Сплит-монтаж: спикер снизу, картинки и карточки сверху (`split_news`, `/style split`) | ✅ |
+| 14. Говорящие аватары: Chatterbox + JoyVASA на Colab T4 → монтаж (`vedit avatar`, `/avatar`) | ✅ (обвязка и импорт проверены локально; GPU-прогон — в Colab) |

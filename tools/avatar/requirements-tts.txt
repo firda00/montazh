@@ -1,0 +1,4 @@
+# Chatterbox Multilingual TTS (MIT). Pins torch 2.6.0 / transformers 5.2.0 itself — kept in its own venv.
+chatterbox-tts==0.1.7
+# resemble-perth (the watermarker) imports pkg_resources; uv venvs have no setuptools and setuptools>=81 drops it
+setuptools<81

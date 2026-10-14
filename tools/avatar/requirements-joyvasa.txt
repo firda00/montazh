@@ -1,0 +1,26 @@
+# JoyVASA (human mode) inference only — the subset of JoyVASA's requirements.txt the human
+# inference path imports, at the versions the authors tested (transformers 4.39.2, numpy 1.26.4).
+# torch 2.6.0 instead of 2.2.2: the same wheel as chatterbox-tts, so uv downloads it once
+# (needs TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 — vedit_avatar.py sets it).
+# No xformers / bitsandbytes / gradio / audio-separator / XPose: not used by human inference.
+torch==2.6.0
+torchvision==0.21.0
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+librosa==0.10.2.post1
+soundfile
+transformers==4.39.2
+huggingface_hub>=0.23,<1.0
+onnxruntime==1.19.2
+onnx==1.16.1
+scipy==1.13.1
+scikit-image==0.24.0
+imageio==2.34.2
+imageio-ffmpeg==0.5.1
+pykalman==0.9.7
+rich==13.7.1
+pyyaml==6.0.1
+tyro==0.8.5
+matplotlib==3.9.0
+pillow==10.3.0
+tqdm==4.66.4

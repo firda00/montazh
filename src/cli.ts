@@ -541,6 +541,84 @@ program
     }
   });
 
+const avatar = program.command("avatar").description("говорящий аватар: текст/тема → avatar_job.zip → Colab (Chatterbox + JoyVASA) → avatar_result.zip → монтаж");
+
+avatar
+  .command("export")
+  .description("собрать avatar_job.zip для ноутбука tools/avatar/colab_vedit_avatar.ipynb")
+  .option("--text <text>", "что говорит аватар (абзацы — с новой строки)")
+  .option("--text-file <file>", "текст из файла")
+  .option("--topic <topic>", "тема: монолог напишет Claude")
+  .option("--photo <file>", "портрет (фронтально, лицо крупно); без него — сгенерированный вымышленный ведущий")
+  .option("--voice <file>", "образец голоса для клонирования, 5–10 с чистой речи на языке текста")
+  .option("--speech <file>", "своя запись речи: без синтеза, аватар говорит ею")
+  .option("--lang <code>", "язык речи (Chatterbox: ru, en, tr, de, …)", "ru")
+  .option("--seconds <n>", "длина монолога по теме, с", (v) => Number(v), 40)
+  .option("--voice-only", "только голос, без видео аватара")
+  .option("--no-images", "не генерировать портрет (нужен --photo)")
+  .option("--model <id>", "модель сценариста")
+  .action(async (opts: { text?: string; textFile?: string; topic?: string; photo?: string; voice?: string; speech?: string; lang: string; seconds: number; voiceOnly?: boolean; images: boolean; model?: string }) => {
+    try {
+      if (!Number.isFinite(opts.seconds) || opts.seconds < 10 || opts.seconds > 180) throw new Error("--seconds: ожидается 10–180");
+      if ([opts.text, opts.textFile, opts.topic].filter(Boolean).length > 1) throw new Error("укажите что-то одно: --text, --text-file или --topic");
+      const text = opts.textFile ? await fs.readFile(path.resolve(opts.textFile), "utf8") : opts.text;
+      const { exportAvatarJob, colabSteps } = await import("./avatar/export.ts");
+      const r = await exportAvatarJob({ text, topic: opts.topic, photo: opts.photo, voice: opts.voice, speech: opts.speech, language: opts.lang, seconds: opts.seconds, mode: opts.voiceOnly ? "voice_only" : "avatar", images: opts.images, model: opts.model, onEvent: (l) => console.log(l) });
+      console.log(`\n✔ ${r.bundle} (${(r.bytes / 1024 / 1024).toFixed(1)} МБ)`);
+      console.log(`  ${r.state.lines.length} строк, ≈${r.state.estimated_seconds.toFixed(0)} с речи; портрет: ${r.state.portrait}; голос: ${r.state.voice}`);
+      for (const [i, l] of r.state.lines.slice(0, 12).entries()) console.log(`  ${String(i + 1).padStart(2)}. ${l}`);
+      for (const w of r.warnings) console.log(`  ⚠ ${w}`);
+      console.log("\nДальше (Google Colab, бесплатный GPU T4):");
+      for (const s of colabSteps(r.jobId)) console.log(`  ${s}`);
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+withRenderOptions(
+  withPlannerOptions(
+    avatar
+      .command("import")
+      .description("принять avatar_result.zip из Colab и смонтировать рилс (по умолчанию split_news: аватар снизу, картинки сверху)")
+      .argument("<job_id>")
+      .argument("<result>", "avatar_result.zip или папка с avatar.mp4 и meta.json")
+      .option("-p, --prompt <text>", "инструкция по монтажу", undefined)
+      .option("--vision <provider>", "stub | auto | gemini | agy", "auto")
+      .option("--asr <engine>", "auto | cpp | faster", "auto")
+      .option("--no-render", "остановиться после черновой нарезки")
+      .option("--no-panel-images", "split_news без генерации картинок панелей"),
+  ),
+).action(async (jobId: string, result: string, opts: { prompt?: string; vision: VisionChoice; asr: AsrChoice; render: boolean; panelImages: boolean } & PlannerCliOpts & RenderCliOpts) => {
+  try {
+    const planner = plannerOpts(opts);
+    const { importAvatarResult, runAvatarMontage } = await import("./avatar/import.ts");
+    const t0 = Date.now();
+    const r = await importAvatarResult(jobId, result);
+    console.log(`✔ avatar.mp4 ${r.width}×${r.height}, ${r.duration.toFixed(1)} с (${r.meta.tts.engine ?? "?"} / ${r.meta.animate?.engine ?? "?"} на ${r.meta.animate?.device ?? "?"})`);
+    for (const w of r.warnings) console.log(`  ⚠ ${w}`);
+    if (opts.renderer !== "hyperframes") throw new Error(`рендерер "${opts.renderer}" не подключён; доступен: hyperframes`);
+    const m = await runAvatarMontage(jobId, {
+      prompt: opts.prompt,
+      design: opts.design ?? "split_news",
+      backend: planner.backend,
+      vision: opts.vision,
+      asr: opts.asr,
+      music: opts.bgMusic,
+      render: opts.render,
+      panelImages: opts.panelImages,
+      quality: opts.quality,
+      workers: opts.workers,
+      onEvent: (l) => console.log(l),
+    });
+    for (const o of m.outputs) console.log(`  ✔ ${o.id}: ${o.duration?.toFixed(1)} с → ${o.file}`);
+    for (const f of m.failed) console.log(`  ✖ ${f.id}: ${f.error.split("\n")[0]}`);
+    for (const n of m.notes) console.log(`  ⚠ ${n}`);
+    console.log(`\nготово за ${((Date.now() - t0) / 1000).toFixed(1)}s — workspace/${jobId}/`);
+  } catch (err) {
+    fail(err);
+  }
+});
+
 program
   .command("modules")
   .description("реестр модулей: бэкенд, готовность, использование и стоимость по задачам")
