@@ -16,7 +16,7 @@ export const BeatSchema = z.object({
 export const ScriptSchema = z.object({
   title: z.string().min(1).max(60),
   language: z.string().default("ru"),
-  beats: z.array(BeatSchema).min(3).max(9),
+  beats: z.array(BeatSchema).min(3).max(10),
   hashtags: z.array(z.string()).default([]),
 });
 export type Script = z.infer<typeof ScriptSchema>;

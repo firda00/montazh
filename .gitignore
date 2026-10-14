@@ -9,3 +9,4 @@ tests/fixtures/*.json
 .repro/
 tools/asr/.venv/
 tools/asr/models/
+.gstack/
