@@ -12,3 +12,4 @@ tools/asr/models/
 .gstack/
 tools/avatar/.venv/
 tools/avatar/.cache/
+__pycache__/
