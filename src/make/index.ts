@@ -20,6 +20,9 @@ import { generateImages, type ImageOptions } from "./images.ts";
 import { composeScenes, FPS, H, W, type ComposedScenes } from "./scenes.ts";
 import { installFonts } from "./fonts.ts";
 import { fitText } from "./fit.ts";
+import { mixSoundtrack } from "../audio/mix.ts";
+import { isMood, pickMusic, type Mood, type MusicTrack } from "../audio/music.ts";
+import type { SfxCue } from "../audio/sfx.ts";
 
 /**
  * MAKE: a topic → a vertical video built from nothing (text, generated images, motion; music optional).
@@ -40,6 +43,8 @@ export const MakeReportSchema = z.object({
   preview: z.string(),
   trends: z.enum(["agy", "skipped", "failed"]),
   music: z.string().nullable(),
+  music_attribution: z.string().default(""),
+  sfx: z.number().int().default(0),
   usd: z.number(),
   wall_seconds: z.number(),
   render_seconds: z.number(),
@@ -53,8 +58,10 @@ export interface MakeOptions {
   audience?: string;
   /** web research before writing (needs the Antigravity CLI); default: when agy is installed */
   trends?: boolean;
-  /** music file (mp3/ogg/wav) looped under the video, −14 LUFS; none = silent video */
+  /** background music: a file, a mood (upbeat/chill/…), "auto" (the director's mood, default) or "none" */
   music?: string;
+  /** sound effects on the motion (default on) */
+  sfx?: boolean;
   quality?: RenderQuality;
   style?: Partial<MakeStyle>;
   model?: string;
@@ -209,7 +216,8 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
   // 3. art director → images → composition (fit in Chrome) → lint
   const projectDir = path.join(dir, "make", "project");
   let usd = s.usd;
-  let composed: { duration: number };
+  let composed: { duration: number; cues?: SfxCue[] };
+  let mood: Mood = "upbeat";
   if (opts.director === false) {
     say("▸ композиция (простая)…");
     composed = await runStep(job.id, "design", async () => {
@@ -238,6 +246,7 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     }
     await writeJson(path.join(dir, "design.json"), DesignSchema, design);
     const I = design.identity;
+    mood = I.music;
     say(`  айдентика: ${I.palette.bg}/${I.palette.accent}, ${I.display_font} + ${I.accent_font}, ${I.texture}; «${I.image_style}»`);
     for (const sc of design.scenes) say(`    ${sc.beat}: ${sc.layout}${sc.image ? " +img" : ""} — ${sc.headline}`);
 
@@ -291,15 +300,24 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
   });
   const renderSeconds = (Date.now() - tr) / 1000;
 
-  // 5. music (optional) → output
+  // 5. soundtrack: music (file / mood / director's mood) + sound effects on the motion
+  say("▸ звук…");
   const output = path.join(dir, "output_make.mp4");
-  if (opts.music) {
-    if (!(await exists(opts.music))) throw new Error(`музыка не найдена: ${opts.music}`);
-    await muxMusic(rendered, path.resolve(opts.music), output, composed.duration);
-  } else {
-    await fs.copyFile(rendered, output);
-    warnings.push("без звука: добавьте --music <файл> (бесплатные треки: pixabay.com/music, лицензия Pixabay)");
+  const want = (opts.music ?? "auto").trim();
+  let track: MusicTrack | null = null;
+  if (want !== "none") {
+    if (want !== "auto" && !isMood(want)) {
+      if (!(await exists(want))) throw new Error(`музыка не найдена: ${want} (файл, настроение ${["upbeat", "chill", "dramatic", "inspiring", "tech", "funky", "emotional"].join("/")}, auto или none)`);
+      track = { file: path.resolve(want), title: path.parse(want).name, creator: "", license: "own", source: "file", url: "", attribution: "" };
+    } else {
+      track = await pickMusic(want === "auto" ? mood : (want as Mood), topicClean, { minSeconds: composed.duration });
+      if (!track) warnings.push("музыка не найдена (нет assets/music и нет доступа к Openverse) — ролик без музыки");
+    }
   }
+  const cues = opts.sfx === false ? [] : (composed.cues ?? []);
+  const mixed = await mixSoundtrack({ video: rendered, out: output, duration: composed.duration, music: track?.file ?? null, speech: false, sfx: cues });
+  if (track) say(`  музыка: «${track.title}»${track.creator ? ` — ${track.creator}` : ""} (${track.license}, ${track.source}); эффектов ${mixed.cues}`);
+  else say(`  эффектов ${mixed.cues}`);
   // contact sheet: the middle of every scene, for a quick look (and for the bot)
   const timingsFile = path.join(projectDir, "layout.json");
   try {
@@ -330,7 +348,9 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     output,
     preview,
     trends: trendsStatus,
-    music: opts.music ? path.resolve(opts.music) : null,
+    music: track ? track.file : null,
+    music_attribution: track?.attribution ?? "",
+    sfx: mixed.cues,
     usd,
     wall_seconds: (Date.now() - t0) / 1000,
     render_seconds: renderSeconds,

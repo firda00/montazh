@@ -1,6 +1,7 @@
 import { FONTS, fontStack, type FontId } from "./fonts.ts";
 import { contrast, type Design, type Scene } from "./design.ts";
 import type { Script } from "./script.ts";
+import type { SfxCue } from "../audio/sfx.ts";
 
 /**
  * Design + script (+ images) → one HyperFrames composition. Every scene is a section on track 1
@@ -35,6 +36,8 @@ export interface ComposedScenes {
   duration: number;
   timings: SceneTiming[];
   fonts: FontId[];
+  /** sound-effect cues matching the motion (src/audio/mix.ts plays them) */
+  cues: SfxCue[];
 }
 
 const r1 = (n: number) => Math.round(n * 10) / 10;
@@ -100,6 +103,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
   const light = contrast("#111111", P.bg) > contrast("#FFFFFF", P.bg);
   const tw: string[] = [];
   const sections: string[] = [];
+  const cues: SfxCue[] = [];
   const size = (id: string, def: number) => r1(sizes[id] ?? def);
   const fitAttrs = (id: string, maxw: number, maxh: number, min: number) => `data-fit="${id}" data-maxw="${maxw}" data-maxh="${maxh}" data-min="${min}"`;
 
@@ -154,6 +158,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
     // accents land after the words: marker swipe / colour / gradient shimmer
     scene.accents.forEach((a, ai) => {
       const t = at + 0.35 + n * stagger;
+      if (a.style === "marker") cues.push({ t, kind: "swipe" });
       if (a.style === "marker") tw.push(`tl.fromTo("#${id}-a${ai}", { backgroundSize: "0% 78%" }, { backgroundSize: "100% 78%", duration: 0.45, ease: "power2.inOut" }, ${fmt(t)});`);
     });
   };
@@ -185,6 +190,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
         if (scene.sub) body.push(`<span class="sub" id="${id}-sub">${esc(scene.sub)}</span>`);
         body.push(`</div>`);
         tw.push(`tl.fromTo("#${id}-num", { opacity: 0, scale: 0.55 }, { opacity: 1, scale: 1, duration: 0.7, ease: "expo.out" }, ${fmt(t.start + 0.05)});`);
+        cues.push({ t: t.start + 0.05, kind: "impact" });
         tw.push(`tl.fromTo("#${id}-glow", { opacity: 0 }, { opacity: 1, duration: 0.9, ease: "power1.out" }, ${fmt(t.start)});`);
         enter(scene, `${id}-hl`, t.start + 0.45);
         body.unshift(`<span class="numglow" id="${id}-glow"></span>`);
@@ -232,7 +238,9 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
         body.push(`<div class="items" id="${id}-items">`);
         scene.items.forEach((it, k) => {
           body.push(`<div class="item" id="${id}-it${k}"><span class="badge">${String(k + 1).padStart(2, "0")}</span><span class="itext" style="font-size:${size(`${id}-it${k}`, 66)}px" ${fitAttrs(`${id}-it${k}`, textW - 150, 170, 34)}>${esc(it)}</span></div>`);
-          tw.push(`tl.fromTo("#${id}-it${k}", { opacity: 0, x: -50 }, { opacity: 1, x: 0, duration: 0.45, ease: "power3.out" }, ${fmt(at + 0.6 + k * Math.min(0.55, (t.duration - 1.6) / Math.max(1, scene.items.length)))});`);
+          const itAt = at + 0.6 + k * Math.min(0.55, (t.duration - 1.6) / Math.max(1, scene.items.length));
+          tw.push(`tl.fromTo("#${id}-it${k}", { opacity: 0, x: -50 }, { opacity: 1, x: 0, duration: 0.45, ease: "power3.out" }, ${fmt(itAt)});`);
+          cues.push({ t: itAt, kind: "tick" });
         });
         body.push(`</div></div>`);
         enter(scene, `${id}-hl`, at);
@@ -246,7 +254,9 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
         scene.items.forEach((m, k) => {
           const side = k % 2 ? "r" : "l";
           body.push(`<div class="bub ${side}" id="${id}-b${k}"><span class="btext" style="font-size:${size(`${id}-b${k}`, 54)}px" ${fitAttrs(`${id}-b${k}`, 760, 280, 32)}>${esc(m)}</span></div>`);
-          tw.push(`tl.fromTo("#${id}-b${k}", { opacity: 0, y: 30, scale: 0.9 }, { opacity: 1, y: 0, scale: 1, duration: 0.4, ease: "back.out(1.6)" }, ${fmt(at + 0.5 + k * Math.min(0.75, (t.duration - 1.6) / Math.max(1, scene.items.length)))});`);
+          const bAt = at + 0.5 + k * Math.min(0.75, (t.duration - 1.6) / Math.max(1, scene.items.length));
+          tw.push(`tl.fromTo("#${id}-b${k}", { opacity: 0, y: 30, scale: 0.9 }, { opacity: 1, y: 0, scale: 1, duration: 0.4, ease: "back.out(1.6)" }, ${fmt(bAt)});`);
+          cues.push({ t: bAt, kind: "pop" });
         });
         body.push(`</div></div>`);
         enter(scene, `${id}-hl`, at);
@@ -267,7 +277,9 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
           const above = k % 2 === 0;
           body.push(`<span class="dot" id="${id}-d${k}" style="left:${r1(x - 16)}px;top:${y - 14}px"></span>`);
           body.push(`<span class="tlab ${above ? "up" : "down"}" id="${id}-l${k}" style="left:${r1(x - 110)}px;top:${above ? y - 120 : y + 52}px">${esc(label)}</span>`);
-          tw.push(`tl.fromTo("#${id}-d${k}, #${id}-l${k}", { opacity: 0, scale: 0.4 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)" }, ${fmt(at + 0.7 + k * Math.min(0.45, (t.duration - 1.8) / Math.max(1, pts.length)))});`);
+          const dAt = at + 0.7 + k * Math.min(0.45, (t.duration - 1.8) / Math.max(1, pts.length));
+          tw.push(`tl.fromTo("#${id}-d${k}, #${id}-l${k}", { opacity: 0, scale: 0.4 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)" }, ${fmt(dAt)});`);
+          cues.push({ t: dAt, kind: "tick" });
         });
         body.push(`</div></div>`);
         tw.push(`tl.fromTo("#${id}-track", { scaleX: 0 }, { scaleX: 1, duration: ${fmt(Math.min(1.6, t.duration * 0.5))}, ease: "power2.inOut" }, ${fmt(at + 0.5)});`);
@@ -286,6 +298,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
         body.push(`</div></div>`);
         tw.push(`tl.fromTo("#${id}-ca", { opacity: 0, y: 60 }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" }, ${fmt(at + 0.5)});`);
         tw.push(`tl.fromTo("#${id}-cb", { opacity: 0, y: 60 }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" }, ${fmt(at + 0.85)});`);
+        cues.push({ t: at + 0.5, kind: "pop" }, { t: at + 0.85, kind: "pop", gain: 2 });
         enter(scene, `${id}-hl`, at);
         break;
       }
@@ -322,6 +335,9 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       tw.push(`tl.fromTo("#${id}-img", { ${from} }, { ${to}, duration: ${fmt(t.duration)}, ease: "none" }, ${fmt(t.start)});`);
     }
     body.push(counter(i));
+    if (i > 0) cues.push({ t: Math.max(0, t.start - 0.12), kind: layout.startsWith("media_") ? "whoosh" : "whoosh", gain: layout.startsWith("media_") ? 2 : 0 });
+    if (i === design.scenes.length - 1) cues.push({ t: t.start + 0.5, kind: "ding" });
+    if (hook && layout !== "hero_number") cues.push({ t: 0.05, kind: "impact", gain: -3 });
     // exit: the scene's content fades out in its last 0.2 s (the background stays)
     if (t.duration > 1.2 && i < design.scenes.length - 1) tw.push(`tl.fromTo("#${id}-in", { opacity: 1 }, { opacity: 0, duration: 0.2, ease: "power1.in", immediateRender: false }, ${fmt(t.start + t.duration - 0.2)});`);
     sections.push(
@@ -449,5 +465,5 @@ ${sections.join("\n")}
   </body>
 </html>
 `;
-  return { html, duration: DUR, timings, fonts };
+  return { html, duration: DUR, timings, fonts, cues };
 }

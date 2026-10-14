@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 process.env.VEDIT_WORKSPACE = await fs.mkdtemp(path.join(os.tmpdir(), "vedit-ws-"));
+process.env.VEDIT_MUSIC_OFFLINE = "1"; // no network in tests: music comes only from a (missing) library
 
 const { beatSeconds, beatsFor, normalizeScript, writeScript, scriptDuration, ScriptSchema } = await import("../src/make/script.ts");
 const { composeMake, fitSentence, timeBeats } = await import("../src/make/compose.ts");
@@ -137,7 +138,8 @@ test("make: end to end with a mock writer and a fake render; trends failure degr
   });
   assert.equal(r.trends, "failed");
   assert.ok(r.warnings.some((w) => /тренды не собраны/.test(w)));
-  assert.ok(r.warnings.some((w) => /без звука/.test(w)));
+  assert.ok(r.warnings.some((w) => /музыка не найдена/.test(w)), JSON.stringify(r.warnings));
+  assert.ok(r.sfx > 0, "sound effects mixed in");
   assert.equal(r.beats, 5);
   assert.ok((await fs.stat(r.output)).size > 0);
   assert.ok(events.some((e) => /^job /.test(e)) && events.some((e) => /^▸ сценарий/.test(e)));

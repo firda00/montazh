@@ -104,6 +104,7 @@ interface RenderCliOpts {
   workers?: number;
   translate: boolean;
   renderer: string;
+  bgMusic?: string;
 }
 
 function withRenderOptions(cmd: Command) {
@@ -111,7 +112,8 @@ function withRenderOptions(cmd: Command) {
     .option("--quality <q>", "draft | looks | delivery", "looks")
     .option("--workers <n>", "воркеры Chrome (по умолчанию — по свободной памяти)", (v) => Number(v))
     .option("--no-translate", "не переводить субтитры на язык из плана")
-    .option("--renderer <name>", "hyperframes (другие — после этапа 4)", "hyperframes");
+    .option("--renderer <name>", "hyperframes (другие — после этапа 4)", "hyperframes")
+    .option("--bg-music <m>", "музыка под речью: auto | upbeat|chill|… | файл | none (по умолчанию — из пресета)");
 }
 
 function makeRenderer(o: RenderCliOpts) {
@@ -123,7 +125,7 @@ function makeRenderer(o: RenderCliOpts) {
 async function runRender(jobId: string, o: RenderCliOpts & { only?: string[] }, edl?: Edl) {
   const renderer = makeRenderer(o);
   await renderer.prepare();
-  const r = await runStep(jobId, "render", () => renderOutputs(jobId, { renderer, quality: o.quality, only: o.only, translate: o.translate, edl, onEvent: (l) => console.log(l) }));
+  const r = await runStep(jobId, "render", () => renderOutputs(jobId, { renderer, quality: o.quality, only: o.only, translate: o.translate, edl, music: o.bgMusic, onEvent: (l) => console.log(l) }));
   printRenderReport(r);
   return r;
 }
@@ -514,21 +516,23 @@ program
   .option("--seconds <n>", "целевая длина, с", (v) => Number(v), 35)
   .option("--audience <text>", "для кого ролик")
   .option("--no-trends", "без исследования трендов")
-  .option("--music <file>", "музыкальная подложка (mp3/ogg/wav), зацикливается, −14 LUFS")
+  .option("--music <m>", "музыка: auto (по настроению от арт-директора) | upbeat|chill|dramatic|inspiring|tech|funky|emotional | файл | none", "auto")
+  .option("--no-sfx", "без звуковых эффектов")
   .option("--quality <q>", "draft | looks | delivery", "looks")
   .option("--model <id>", "модель сценариста")
   .option("--script <file>", "отрендерить сохранённый script.json как есть (без трендов и модели)")
   .option("--from <job>", "взять сценарий, дизайн и картинки из прошлой задачи make (перерендер)")
   .option("--no-director", "без арт-директора: простая композиция с иконками")
   .option("--no-images", "без генерации картинок")
-  .action(async (topic: string, opts: { lang: string; seconds: number; audience?: string; trends: boolean; music?: string; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: boolean }) => {
+  .action(async (topic: string, opts: { lang: string; seconds: number; audience?: string; trends: boolean; music?: string; sfx: boolean; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: boolean }) => {
     try {
       if (!["draft", "looks", "delivery"].includes(opts.quality)) throw new Error("--quality: ожидается draft | looks | delivery");
       if (!Number.isFinite(opts.seconds) || opts.seconds < 15 || opts.seconds > 90) throw new Error("--seconds: ожидается 15–90");
       const { make } = await import("./make/index.ts");
-      const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images, onEvent: (l) => console.log(l) });
+      const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, sfx: opts.sfx, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images, onEvent: (l) => console.log(l) });
       console.log(`\n✔ ${r.output} (${r.duration.toFixed(1)} с, ${r.beats} битов, рендер ${r.render_seconds.toFixed(0)} с${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""})`);
       if (r.script.hashtags.length) console.log(`  #${r.script.hashtags.join(" #")}`);
+      if (r.music_attribution) console.log(`  ${r.music_attribution}`);
       for (const w of r.warnings) console.log(`  ⚠ ${w}`);
     } catch (err) {
       fail(err);

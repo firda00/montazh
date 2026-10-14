@@ -9,7 +9,7 @@
   "caption_style": "bold_pop",
   "title_style": "card",
   "default_aspect": "9:16",
-  "music_default": false,
+  "music_default": true,
   "notes": [
     "хук в первые 3 секунды",
     "заканчивать на законченной фразе",

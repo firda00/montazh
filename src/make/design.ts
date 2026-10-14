@@ -3,6 +3,7 @@ import type { StructuredFn } from "../lib/llm.ts";
 import { fill, loadPrompt } from "../lib/prompts.ts";
 import { zodToApiSchema } from "../plan/schema-sanitize.ts";
 import { LANGUAGE_NAMES, type Script } from "./script.ts";
+import { MOODS } from "../audio/music.ts";
 
 /**
  * The art director: script → a visual identity for the whole video + one composed scene per beat.
@@ -30,6 +31,8 @@ export const IdentitySchema = z.object({
   texture: z.enum(TEXTURES),
   image_style: z.string(),
   brand: z.string().max(24),
+  /** background music mood (src/audio/music.ts) */
+  music: z.enum(MOODS).default("upbeat"),
 });
 export type Identity = z.infer<typeof IdentitySchema>;
 
@@ -60,6 +63,7 @@ const DesignOut = z.object({
     texture: z.enum(TEXTURES),
     image_style: z.string(),
     brand: z.string(),
+    music: z.enum(MOODS),
   }),
   scenes: z.array(
     z.object({
@@ -96,6 +100,7 @@ const DEFAULT_IDENTITY: Identity = {
   texture: "grain",
   image_style: "cinematic photograph, low-key light, shallow depth of field",
   brand: "VEDIT",
+  music: "upbeat",
 };
 
 const cut = (s: string, n: number) => {
@@ -133,6 +138,7 @@ export function normalizeDesign(raw: unknown, script: Script): { design: Design;
     texture: out.identity.texture,
     image_style: cut(out.identity.image_style, 300) || DEFAULT_IDENTITY.image_style,
     brand: cut(out.identity.brand, 14).toUpperCase() || DEFAULT_IDENTITY.brand,
+    music: out.identity.music,
   };
 
   const byBeat = new Map(out.scenes.map((s) => [Math.round(s.beat), s]));

@@ -9,6 +9,7 @@ WHAT YOU DESIGN
    - texture: "none", "grain", "grid" (thin technical grid), "glow" (soft accent-coloured light) — one.
    - image_style: ONE sentence in English that every generated image follows so the video feels shot by one person (e.g. "cinematic photograph, low-key warm light, shallow depth of field, 35mm" or "glossy 3D toy render, soft studio light, purple neon rim light, centered subject"). Never ask for text in images.
    - brand: a short label (≤ 14 chars) shown small in a corner, e.g. the topic in two words or a channel-like name. Uppercase is fine.
+   - music: the mood of the background track: "upbeat" (energetic pop), "chill" (lo-fi, lounge), "dramatic" (cinematic tension), "inspiring" (uplifting), "tech" (electronic, synthwave), "funky" (groove), "emotional" (piano). Match the topic and the pace.
 2. scenes — exactly one per beat, in order. For each choose a layout and fill only the fields it uses:
    - "hero_number": a huge number with unit (number.value like "€5", "30%", "233 ₽", "×3"; number.unit like "млн", "за год") above a short statement (headline). Use when the beat has a striking number.
    - "headline": typographic frame, big statement, optional kicker above and sub below; strongest when accents carry it.

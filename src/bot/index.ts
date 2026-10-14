@@ -116,7 +116,7 @@ export const runMakePipeline: MakeFn = async ({ topic, progress, onJob, signal, 
     },
   });
   const notes = r.warnings.slice(0, 3);
-  return { jobId: r.jobId, outputs: [{ id: "make", file: r.output, duration: r.duration, aspect: "9:16" }], reasoning: `${r.title}\n${r.script.beats.map((b) => `· ${b.text}`).join("\n")}${r.script.hashtags.length ? `\n#${r.script.hashtags.join(" #")}` : ""}`, notes };
+  return { jobId: r.jobId, outputs: [{ id: "make", file: r.output, duration: r.duration, aspect: "9:16" }], reasoning: `${r.title}\n${r.script.beats.map((b) => `· ${b.text}`).join("\n")}${r.script.hashtags.length ? `\n#${r.script.hashtags.join(" #")}` : ""}${r.music_attribution ? `\n${r.music_attribution}` : ""}`, notes };
 };
 
 class CancelledError extends Error {

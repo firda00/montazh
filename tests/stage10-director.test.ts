@@ -26,7 +26,7 @@ const script = ScriptSchema.parse({
 });
 
 const RAW = {
-  identity: { palette: { bg: "#14100D", bg2: "#2A1D14", text: "#1A1A1A", accent: "#E8A36B", accent2: "#F6D2B0", muted: "#A79584" }, display_font: "inter", accent_font: "playfair-italic", kicker_font: "mono", texture: "grain", image_style: "cinematic", brand: "кофе 2026 и дальше" },
+  identity: { palette: { bg: "#14100D", bg2: "#2A1D14", text: "#1A1A1A", accent: "#E8A36B", accent2: "#F6D2B0", muted: "#A79584" }, display_font: "inter", accent_font: "playfair-italic", kicker_font: "mono", texture: "grain", image_style: "cinematic", brand: "кофе 2026 и дальше", music: "chill" },
   scenes: [
     { beat: 0, layout: "hero_number", headline: "Арабика за год подорожала", accents: [{ text: "подорожала", style: "serif" }, { text: "не в тексте", style: "marker" }], kicker: "ICE", sub: null, number: { value: "+70%", unit: "за год" }, items: null, image: null, entrance: "mask" },
     { beat: 1, layout: "media_full", headline: "Кофе на бирже дешевеет, а в кофейне дорожает", accents: [{ text: "В КОФЕЙНЕ дорожает", style: "marker" }], kicker: null, sub: null, number: null, items: null, image: { prompt: "espresso cup", motion: "zoom_in" }, entrance: "rise" },

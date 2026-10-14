@@ -7,6 +7,10 @@ import { exportDesignJob, type ExportOptions } from "../design/export.ts";
 import { CutReportSchema } from "../cut/index.ts";
 import type { OverlayRenderer, RenderQuality } from "../design/renderer.ts";
 import { finalizeOutput, outputPath } from "./finalize.ts";
+import { loadJob } from "../lib/workspace.ts";
+import { loadPreset } from "../plan/presets.ts";
+import { mixSoundtrack } from "../audio/mix.ts";
+import { isMood, pickMusic, type Mood, type MusicTrack } from "../audio/music.ts";
 
 export const RenderReportSchema = z.object({
   renderer: z.string(),
@@ -26,6 +30,8 @@ export const RenderReportSchema = z.object({
       build_seconds: z.number().optional(),
       render_seconds: z.number().optional(),
       finalize_seconds: z.number().optional(),
+      music: z.string().optional(),
+      music_attribution: z.string().optional(),
       warnings: z.array(z.string()).default([]),
       error: z.string().optional(),
     }),
@@ -41,6 +47,22 @@ export interface RenderOptions extends ExportOptions {
   onEvent?: (line: string) => void;
   /** keep the generated project directories (default: kept under workspace/<job>/design/<id>/) */
   edl?: Edl;
+  /**
+   * background music under the speech (ducked): "auto" (mood from the preset's pace), a mood, a file
+   * or "none". Default: on when the EDL output asks for music or the preset's music_default is set.
+   */
+  music?: string;
+}
+
+/** Music track for a montage output, or null (decided once per job and reused by every output). */
+async function montageMusic(jobId: string, want: string, pace: string): Promise<MusicTrack | null> {
+  if (want === "none") return null;
+  if (want !== "auto" && !isMood(want)) {
+    if (!(await exists(want))) throw new Error(`музыка не найдена: ${want}`);
+    return { file: path.resolve(want), title: path.parse(want).name, creator: "", license: "own", source: "file", url: "", attribution: "" };
+  }
+  const mood: Mood = want === "auto" ? (pace === "calm" ? "chill" : "upbeat") : (want as Mood);
+  return pickMusic(mood, jobId, { minSeconds: 30 });
 }
 
 /**
@@ -61,6 +83,9 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
 
   const cutFile = path.join(dir, "cut.json");
   const cutReport = (await exists(cutFile)) ? await readJson(cutFile, CutReportSchema) : null;
+  const meta = await loadJob(jobId);
+  const { preset } = await loadPreset(meta.preset ?? "bold_pop");
+  let track: MusicTrack | null | undefined; // undefined = not looked up yet
 
   for (const output of targets) {
     const warnings: string[] = [];
@@ -88,6 +113,27 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
 
       const tf = Date.now();
       const fin = await finalizeOutput(rendered.file, rough, outputPath(dir, output.id), { previewAt: (job.timeline.titles[0]?.at ?? 0.5) + 0.6 });
+      // background music, ducked under the speech
+      const wantMusic = opts.music ?? (output.music.enabled || preset.music_default ? "auto" : "none");
+      let musicNote: { music?: string; music_attribution?: string } = {};
+      if (wantMusic !== "none") {
+        if (track === undefined) {
+          try {
+            track = await montageMusic(jobId, wantMusic, preset.pace);
+          } catch (err) {
+            track = null;
+            warnings.push(err instanceof Error ? err.message : String(err));
+          }
+          if (!track) warnings.push("музыка не найдена (нет assets/music и нет доступа к Openverse)");
+        }
+        if (track) {
+          opts.onEvent?.(`    музыка: «${track.title}»${track.creator ? ` — ${track.creator}` : ""} (${track.license})`);
+          const tmp = fin.output.replace(/\.mp4$/i, ".music.mp4");
+          await mixSoundtrack({ video: fin.output, out: tmp, duration: fin.duration, music: track.file, speech: true });
+          await fs.rename(tmp, fin.output);
+          musicNote = { music: track.file, music_attribution: track.attribution };
+        }
+      }
       report.outputs.push({
         id: output.id,
         status: "ok",
@@ -102,6 +148,7 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
         build_seconds: buildSeconds,
         render_seconds: rendered.seconds,
         finalize_seconds: (Date.now() - tf) / 1000,
+        ...musicNote,
         warnings,
       });
     } catch (err) {
