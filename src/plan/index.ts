@@ -27,6 +27,7 @@ import { draftJsonSchema } from "./schema-sanitize.ts";
 import { makePlannerTools, newToolState, type ToolDeps } from "./tools.ts";
 import { isLong, shortlist, type Window } from "./shortlist.ts";
 import { resolveSpeaker } from "../understand/asr.ts";
+import { SourcesSchema } from "../ingest/combine.ts";
 import { selectStructuredLlm, type StructuredFn } from "../lib/llm.ts";
 
 export interface PlanOptions {
@@ -93,6 +94,8 @@ export async function loadPlanInputs(jobId: string, presetName: string, sel: Sel
   const highlights = await optional("highlights.json", HighlightsSchema, []);
   const { preset, note } = await loadPreset(presetName);
   if (note) warnings.push(note);
+  const sourcesFile = path.join(dir, "sources.json");
+  const sources = (await exists(sourcesFile)) ? (await readJson(sourcesFile, SourcesSchema)).sources : undefined;
   const speakersFile = path.join(dir, "speakers.json");
   const speakers = (await exists(speakersFile)) ? await readJson(speakersFile, SpeakersSchema) : undefined;
 
@@ -107,7 +110,7 @@ export async function loadPlanInputs(jobId: string, presetName: string, sel: Sel
   // long video: shortlist stage picks the windows the planner will see
   let windows = sel.reuse?.windows;
   if (!windows) {
-    const probe = buildPlanContext({ media, transcript, scenes, highlights, preset, speakers, speaker });
+    const probe = buildPlanContext({ media, transcript, scenes, highlights, preset, speakers, sources, speaker });
     const filtered = speaker ? { ...transcript, segments: transcript.segments.filter((s) => s.speaker === speaker) } : transcript;
     const long = sel.long ?? isLong(filtered, probe.tokenEstimate);
     if (long) {
@@ -125,7 +128,7 @@ export async function loadPlanInputs(jobId: string, presetName: string, sel: Sel
       }
     }
   }
-  const ctx = buildPlanContext({ media, transcript, scenes, highlights, preset, speakers, speaker, windows });
+  const ctx = buildPlanContext({ media, transcript, scenes, highlights, preset, speakers, sources, speaker, windows });
   if (ctx.windows.length) sel.onEvent?.(`  окна: ${ctx.windows.map((w) => `${w.id} ${Math.round(w.start)}-${Math.round(w.end)}s`).join(", ")}`);
   return { ctx, warnings, presetName: preset.name };
 }

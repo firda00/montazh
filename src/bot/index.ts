@@ -32,11 +32,15 @@ export const MSG = {
     "Команды:",
     "/status — состояние последней задачи",
     "/revise <что изменить> — правка последнего монтажа (перережу и перерендерю только затронутое)",
-    "/make <тема> — ролик по теме из ничего: тренды, сценарий, иконки и моушн-графика (без голоса)",
+    "/make <тема> — ролик по теме из ничего: тренды, сценарий, сгенерированные картинки, моушн-графика, музыка",
+    "Несколько видео подряд (или альбомом) → /viral — соберу один самый вирусный ролик из всех; /clear — новая подборка",
     "/cancel — отменить текущую работу (после текущего шага)",
     "/start — эта справка",
   ].join("\n"),
   needVideo: "Сначала пришлите видео (как видео или файлом), потом напишите задачу.",
+  batchSaved: (n: number) => `Видео ${n} в подборке. Пришлите ещё или напишите задачу — например /viral (соберу один самый вирусный ролик из всех). /clear — начать подборку заново.`,
+  cleared: "Подборка очищена. Пришлите новые видео.",
+  viral: "Собери один самый вирусный ролик 30–45 секунд из всех видео: самый сильный хук в первые 2 секунды, только лучшие моменты (эмоция, сильная мысль, неожиданный поворот, смешное), динамичный темп, каждый клип — законченная фраза, финал с законченной мыслью. Субтитры на языке речи.",
   busy: "ещё работаю над предыдущим — дождитесь результата или отправьте /cancel",
   videoSaved: "Видео получено. Теперь напишите задачу: что смонтировать (например, «2 рилса по 20 секунд с субтитрами»).",
   notVideo: "Это не похоже на видео. Пришлите ролик как видео или файлом с типом video/*.",
@@ -78,6 +82,8 @@ export interface PipelineResult {
 }
 export interface PipelineArgs {
   source: string;
+  /** several videos: joined into one source before the pipeline */
+  sources?: string[];
   instruction: string;
   preset: string;
   progress: (text: string) => Promise<void>;
@@ -178,18 +184,30 @@ async function renderIds(jobId: string, ids: string[], edl: Edl, progress: (t: s
 }
 
 /** createJob → ingest → understand → plan → cut → render (HyperFrames), with progress messages. */
-export const runFullPipeline: PipelineFn = async ({ source, instruction, preset, progress, onJob, signal, log }) => {
+export const runFullPipeline: PipelineFn = async ({ source, sources, instruction, preset, progress, onJob, signal, log }) => {
   const { ingest } = await import("../ingest/index.ts");
   const { understand } = await import("../understand/index.ts");
   const { plan } = await import("../plan/index.ts");
   const { cut } = await import("../cut/index.ts");
 
-  const job = await createJob(source, { prompt: instruction, preset });
+  const many = (sources ?? []).length > 1;
+  const job = await createJob(many ? `combined:${sources!.length} videos` : source, { prompt: instruction, preset });
   onJob(job.id);
   log(`job ${job.id}`);
 
+  let input = source;
+  if (many) {
+    const { combineSources, SourcesSchema } = await import("../ingest/combine.ts");
+    await progress(`▸ склеиваю ${sources!.length} видео в один материал…`);
+    input = path.join(jobDir(job.id), "combined.mp4");
+    const map = await combineSources(sources!, input);
+    await writeJson(path.join(jobDir(job.id), "sources.json"), SourcesSchema, map);
+    log(`  combined: ${map.sources.map((s) => `${s.id} ${s.start}-${s.end}s`).join(", ")}${map.sources.some((s) => s.cropped) ? " (часть обрезана под общий формат)" : ""}`);
+  }
+  checkCancel(signal);
+
   await progress("▸ подготовка видео…");
-  const media = await runStep(job.id, "ingest", () => ingest(job.id, source));
+  const media = await runStep(job.id, "ingest", () => ingest(job.id, input));
   checkCancel(signal);
 
   await progress(`▸ анализ речи… (${media.duration.toFixed(0)} с видео)`);
@@ -254,6 +272,10 @@ export const runRevisePipeline: ReviseFn = async ({ jobId, edit, progress, signa
 
 export const ChatStateSchema = z.object({
   source: z.string().optional(),
+  /** videos collected for the next run (several → one combined source) */
+  sources: z.array(z.string()).default([]),
+  /** a run used the batch: the next video starts a new one */
+  batch_closed: z.boolean().default(false),
   jobId: z.string().optional(),
   prompt: z.string().optional(),
   updated_at: z.string().optional(),
@@ -294,6 +316,8 @@ export interface BotOptions {
   make?: MakeFn;
   /** long-polling timeout, seconds (default 30) */
   pollTimeout?: number;
+  /** how long to wait for the rest of an album before acting (ms, default 4000) */
+  albumDelayMs?: number;
   /** pause after a failed getUpdates, ms (default 3000) */
   retryDelayMs?: number;
 }
@@ -365,13 +389,15 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     saving = saving.then(() => writeJson(stateFile, BotStateSchema, state)).catch((err) => log(`⚠ state.json не записан: ${err instanceof Error ? err.message : err}`));
     return saving;
   };
-  const chat = (id: number): ChatState => (state.chats[String(id)] ??= {});
+  const chat = (id: number): ChatState => (state.chats[String(id)] ??= { sources: [], batch_closed: false });
   const updateChat = async (id: number, patch: Partial<ChatState>) => {
     Object.assign(chat(id), patch, { updated_at: new Date().toISOString() });
     await saveState();
   };
 
   const running = new Map<number, Running>();
+  const albums = new Map<string, { caption?: string; timer?: ReturnType<typeof setTimeout> }>();
+  const albumDelayMs = o.albumDelayMs ?? 4000;
   const tasks = new Set<Promise<void>>();
 
   const say = async (chatId: number, text: string) => {
@@ -451,11 +477,15 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       return;
     }
     const source = c.source;
-    await updateChat(chatId, { prompt: instruction });
-    await say(chatId, MSG.start);
+    const batch = [];
+    for (const f of c.sources ?? []) if (await exists(f)) batch.push(f);
+    const sources = batch.length > 1 ? batch : undefined;
+    await updateChat(chatId, { prompt: instruction, batch_closed: true });
+    await say(chatId, sources ? `${MSG.start}\nВидео в подборке: ${sources.length} — склею и выберу лучшее из всех.` : MSG.start);
     launch(chatId, "run", (r) =>
       pipelineFn({
         source,
+        sources,
         instruction,
         preset,
         progress: progressFor(chatId, r),
@@ -519,14 +549,43 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     }
     const dest = path.join(botDir, String(chatId), `${safeName(v.fileId)}.mp4`);
     if (!(await exists(dest))) await api.download(file, dest);
-    await updateChat(chatId, { source: dest });
-    log(`[${chatId}] видео сохранено: ${dest}`);
+    const c = chat(chatId);
+    const batch = c.batch_closed ? [dest] : [...(c.sources ?? []).filter((f) => f !== dest), dest];
+    await updateChat(chatId, { source: dest, sources: batch, batch_closed: false });
+    log(`[${chatId}] видео сохранено: ${dest} (в подборке ${batch.length})`);
     const caption = m.caption?.trim();
+    const group = m.media_group_id;
+    if (group) {
+      // an album arrives as separate messages: act once, after the last one
+      const g = albums.get(group) ?? { caption: undefined as string | undefined, timer: undefined as ReturnType<typeof setTimeout> | undefined };
+      if (caption) g.caption = caption;
+      if (g.timer) clearTimeout(g.timer);
+      g.timer = setTimeout(() => {
+        albums.delete(group);
+        const task = (async () => {
+          if (g.caption && !g.caption.startsWith("/")) {
+            if (running.has(chatId)) await say(chatId, MSG.busy);
+            else await startRun(chatId, g.caption);
+          } else if (g.caption && /^\/viral\b/i.test(g.caption)) {
+            if (running.has(chatId)) await say(chatId, MSG.busy);
+            else await startRun(chatId, MSG.viral);
+          } else await say(chatId, MSG.batchSaved(chat(chatId).sources.length));
+        })();
+        tasks.add(task);
+        void task.finally(() => tasks.delete(task));
+      }, albumDelayMs);
+      albums.set(group, g);
+      return;
+    }
     if (caption && !caption.startsWith("/")) {
       // video sent with a caption = video + instruction in one message
       if (running.has(chatId)) await say(chatId, MSG.busy);
       else await startRun(chatId, caption);
-    } else await say(chatId, running.has(chatId) ? `Видео сохранено. ${MSG.busy}` : MSG.videoSaved);
+    } else if (caption && /^\/viral\b/i.test(caption)) {
+      if (running.has(chatId)) await say(chatId, MSG.busy);
+      else await startRun(chatId, MSG.viral);
+    } else if (running.has(chatId)) await say(chatId, `Видео сохранено. ${MSG.busy}`);
+    else await say(chatId, batch.length > 1 ? MSG.batchSaved(batch.length) : MSG.videoSaved);
   }
 
   async function handleMessage(m: TgMessage) {
@@ -559,6 +618,12 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         case "make":
           if (running.has(chatId)) return say(chatId, MSG.busy);
           return startMake(chatId, arg);
+        case "viral":
+          if (running.has(chatId)) return say(chatId, MSG.busy);
+          return startRun(chatId, arg ? `${MSG.viral} Дополнительно: ${arg}` : MSG.viral);
+        case "clear":
+          await updateChat(chatId, { sources: [], batch_closed: false });
+          return say(chatId, MSG.cleared);
         default:
           return say(chatId, MSG.unknownCommand);
       }

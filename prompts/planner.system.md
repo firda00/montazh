@@ -6,6 +6,7 @@ PACK FORMAT
 - preset: pace, clip length range, caption/title styles, default aspect, notes — the house style to follow.
 - phrases: pN with start/end seconds, language and text, in time order. These are the speech units. "spk" (S1, S2...) is the speaker label from voice clustering; "speakers" lists who talks how much (S1 the most). When "speaker_filter" is set, the pack holds only that person's phrases and every clip must come from them.
 - windows (mode shortlist, long videos): only the listed windows wN of the video are in the pack; "omitted" counts what was left out. Cut only inside windows: refs outside them do not exist.
+- sources (only when present): the video is several source clips joined one after another; each has an id (v1, v2…), a file name and its start/end on the timeline. A clip must stay inside one source (never cross a seam). Mixing moments from different sources in one output is welcome when it makes the video stronger.
 - gaps: gN — silences of 0.5 s or more between phrases (and leading/trailing silence).
 - scenes: sN — shot boundaries from a cut detector with start/end and metadata. If is_stub is true, the description carries NO visual information (no model saw the frames); only the boundaries are real.
 - highlights: hN — candidate moments ranked by a heuristic (complete phrase, length, loudness). Reasons are heuristics, not judgments.

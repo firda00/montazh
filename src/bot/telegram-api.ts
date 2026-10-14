@@ -54,6 +54,8 @@ export interface TgMessage {
   from?: TgUser;
   text?: string;
   caption?: string;
+  /** set on every message of an album */
+  media_group_id?: string;
   video?: TgVideo;
   document?: TgDocument;
 }

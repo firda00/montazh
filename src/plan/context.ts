@@ -60,6 +60,8 @@ export interface PlanContext {
   /** who is talking in the pack: all phrases belong to this speaker */
   speaker?: string;
   omitted: { phrases: number; scenes: number };
+  /** several source videos joined into one: where each starts and ends on the timeline */
+  sources: { id: string; name: string; start: number; end: number }[];
   mode: PackMode;
   packText: string;
   packHash: string;
@@ -103,6 +105,7 @@ export interface ContextInput {
   highlights: Highlights;
   preset: Preset;
   speakers?: Speakers;
+  sources?: { id: string; name: string; start: number; end: number }[];
   /** keep only this speaker's phrases (and the highlights that touch them) */
   speaker?: string;
   /** long-video mode: keep only what lies inside these windows */
@@ -141,7 +144,7 @@ export function buildPlanContext(input: ContextInput): PlanContext {
     .map((h, i) => ({ id: `h${i}`, rank: i + 1, score: h.score, start: h.start, end: h.end, phrases: phrasesOverlapping(base, h.start, h.end).map((p) => p.id), reason: h.reason }));
 
   const omitted = { phrases: allSegments.length - keptSegments.length, scenes: input.scenes.length - keptScenes.length };
-  const partial = { media: input.media, transcript: input.transcript, preset: input.preset, duration, phrases, scenes, gaps, highlights, speakers: input.speakers?.speakers ?? [], windows, speaker: input.speaker, omitted };
+  const partial = { media: input.media, transcript: input.transcript, preset: input.preset, duration, phrases, scenes, gaps, highlights, speakers: input.speakers?.speakers ?? [], windows, speaker: input.speaker, omitted, sources: input.sources ?? [] };
   let mode: PackMode = windows.length ? "shortlist" : "full";
   let packText = renderPack({ ...partial, mode });
   if (mode === "full" && estimateTokens(packText) > COMPACT_ABOVE_TOKENS) {
@@ -177,6 +180,7 @@ export function renderPack(ctx: Omit<PlanContext, "packText" | "packHash" | "tok
       default_aspect: ctx.preset.default_aspect,
       notes: ctx.preset.notes,
     },
+    ...(ctx.sources.length > 1 ? { sources: ctx.sources.map((s) => ({ id: s.id, name: s.name, start: round2(s.start), end: round2(s.end) })) } : {}),
     ...(ctx.speakers.length ? { speakers: ctx.speakers.map((s) => ({ id: s.id, seconds: round2(s.seconds), phrases: s.phrases, sample: cut(s.sample, 80) })), ...(ctx.speaker ? { speaker_filter: ctx.speaker } : {}) } : {}),
     ...(ctx.windows.length ? { windows: ctx.windows.map((w) => ({ id: w.id, start: round2(w.start), end: round2(w.end), why: w.why, phrases: phrasesOverlapping(ctx, w.start, w.end).map((p) => p.id) })) } : {}),
     ...(ctx.omitted.phrases || ctx.omitted.scenes ? { omitted: ctx.omitted } : {}),
