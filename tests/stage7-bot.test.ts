@@ -60,7 +60,8 @@ function fakeTelegram(fileSize = 1000, firstUpdateId = 1) {
   const video = (chatId: number, userId: number, fileId: string, size = fileSize) =>
     push({ message: { message_id: nextUpdate, chat: { id: chatId, type: "private" }, from: { id: userId }, video: { file_id: fileId, file_size: size, mime_type: "video/mp4" } } });
   const messages = (chatId?: number) => calls.filter((c) => c.method === "sendMessage" && (chatId === undefined || c.params.chat_id === chatId)).map((c) => String(c.params.text));
-  const videos = () => calls.filter((c) => c.method === "sendVideo");
+  // finished reels: documents by default (/send file), videos with /send video
+  const videos = () => calls.filter((c) => c.method === "sendVideo" || (c.method === "sendDocument" && /\.mp4$/i.test((c.params.document as File | undefined)?.name ?? "")));
   return { calls, callMethod: callMethodFake, download, downloads, text, video, messages, videos };
 }
 
@@ -117,7 +118,7 @@ test("a text without a video asks for a video", async () => {
   await running.stop();
 });
 
-test("video then text: runs the pipeline, posts progress, sends outputs in order with captions", async () => {
+test("video then text: runs the pipeline, posts progress, sends outputs in order as files (no recompression) with captions", async () => {
   const tg = fakeTelegram();
   const files = await makeOutputs(["reel_1", "reel_2", "sq_1"]);
   const seen: PipelineArgs[] = [];
@@ -156,16 +157,16 @@ test("video then text: runs the pipeline, posts progress, sends outputs in order
   assert.ok(msgs.indexOf("▸ план…") < msgs.findIndex((m) => m.startsWith("Готово")));
 
   const sent = tg.videos();
+  assert.ok(sent.every((c) => c.method === "sendDocument"), "default /send file: documents, not videos");
   assert.deepEqual(
-    sent.map((c) => (c.params.video as File).name),
-    ["output_reel_1.mp4", "output_reel_2.mp4", "output_sq_1.mp4"],
+    sent.map((c) => (c.params.document as File).name),
+    ["20261011-aaaaaa_reel_1.mp4", "20261011-aaaaaa_reel_2.mp4", "20261011-aaaaaa_sq_1.mp4"],
   );
-  assert.ok(sent.every((c) => c.params.video instanceof Blob && c.params.chat_id === 3 && c.params.supports_streaming === true));
-  assert.equal(await (sent[0].params.video as File).text(), "video reel_1");
+  assert.ok(sent.every((c) => c.params.document instanceof Blob && c.params.chat_id === 3 && c.params.disable_content_type_detection === true));
+  assert.equal(await (sent[0].params.document as File).text(), "video reel_1");
   assert.match(String(sent[0].params.caption), /^reel_1 · 29\.8 с · 9:16\n«Взял самые живые фразы/);
   assert.match(String(sent[2].params.caption), /^sq_1 · 15\.0 с · 1:1/);
-  assert.equal(sent[1].params.duration, 30);
-  assert.ok(tg.calls.some((c) => c.method === "sendChatAction" && c.params.action === "upload_video"));
+  assert.ok(tg.calls.some((c) => c.method === "sendChatAction" && c.params.action === "upload_document"));
   await running.stop();
 });
 

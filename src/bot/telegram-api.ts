@@ -90,7 +90,7 @@ export interface TgFile {
   file_size?: number;
   file_path?: string;
 }
-export type ChatAction = "typing" | "upload_video" | "upload_document" | "record_video";
+export type ChatAction = "typing" | "upload_video" | "upload_document" | "record_video" | "upload_voice";
 
 // ── errors & transport ─────────────────────────────────────────────────────────
 
@@ -219,8 +219,16 @@ export interface BotApi {
   sendMessage(chatId: number, text: string): Promise<TgMessage>;
   /** multipart upload of a local MP4 (read into a Blob) */
   sendVideo(chatId: number, filePath: string, meta?: VideoMeta): Promise<TgMessage>;
-  sendDocument(chatId: number, filePath: string, caption?: string): Promise<TgMessage>;
+  /** a file as is; `fileName` renames it in the chat, `disableContentTypeDetection` keeps an MP4 a file (no recompression into a video) */
+  sendDocument(chatId: number, filePath: string, caption?: string, opts?: DocumentOptions): Promise<TgMessage>;
+  /** a voice message: OGG with Opus audio */
+  sendVoice(chatId: number, filePath: string, caption?: string): Promise<TgMessage>;
   sendChatAction(chatId: number, action: ChatAction): Promise<void>;
+}
+
+export interface DocumentOptions {
+  fileName?: string;
+  disableContentTypeDetection?: boolean;
 }
 
 export interface BotApiOptions {
@@ -235,9 +243,9 @@ const TEXT_LIMIT = 4096;
 const CAPTION_LIMIT = 1024;
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
-async function readAsFile(filePath: string, type: string) {
+async function readAsFile(filePath: string, type: string, name = path.basename(filePath)) {
   const buf = await fs.readFile(filePath);
-  return new File([buf], path.basename(filePath), { type });
+  return new File([buf], name, { type });
 }
 
 export function makeBotApi(token: string, o: BotApiOptions = {}): BotApi {
@@ -267,8 +275,20 @@ export function makeBotApi(token: string, o: BotApiOptions = {}): BotApi {
         },
         base,
       ),
-    sendDocument: async (chatId, filePath, caption) =>
-      call<TgMessage>(token, "sendDocument", { chat_id: chatId, document: await readAsFile(filePath, "application/octet-stream"), caption: caption ? clip(caption, CAPTION_LIMIT) : undefined }, base),
+    sendDocument: async (chatId, filePath, caption, opts = {}) =>
+      call<TgMessage>(
+        token,
+        "sendDocument",
+        {
+          chat_id: chatId,
+          document: await readAsFile(filePath, "application/octet-stream", opts.fileName),
+          caption: caption ? clip(caption, CAPTION_LIMIT) : undefined,
+          disable_content_type_detection: opts.disableContentTypeDetection ? true : undefined,
+        },
+        base,
+      ),
+    sendVoice: async (chatId, filePath, caption) =>
+      call<TgMessage>(token, "sendVoice", { chat_id: chatId, voice: await readAsFile(filePath, "audio/ogg"), caption: caption ? clip(caption, CAPTION_LIMIT) : undefined }, base),
     sendChatAction: async (chatId, action) => {
       await call<boolean>(token, "sendChatAction", { chat_id: chatId, action }, base);
     },

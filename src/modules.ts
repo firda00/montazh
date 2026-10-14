@@ -21,6 +21,8 @@ import { RESERVE_MB, WORKER_MB } from "./render/workers.ts";
 import { DEFAULT_MODEL } from "./plan/backend/index.ts";
 import { DEFAULT_GEMINI_MODEL } from "./understand/vision/gemini.ts";
 import { DEFAULT_AGY_MODEL } from "./understand/vision/agy.ts";
+import { VOICES } from "./voice/catalog.ts";
+import { piperStatus } from "./voice/piper.ts";
 
 /**
  * The module registry: every replaceable part of the pipeline, what it depends on (and under
@@ -219,8 +221,8 @@ export const MODULES: ModuleDef[] = [
     id: "make",
     stage: "design",
     title: "Ролик из ничего",
-    what: "тема → тренды → сценарий → иконки и моушн-графика → MP4 (без голоса)",
-    selector: "vedit make <тема> / Telegram /make; --no-trends, --music, --script",
+    what: "тема → тренды → сценарий → иконки и моушн-графика → MP4 (озвучка по желанию: --voice)",
+    selector: "vedit make <тема> / Telegram /make; --no-trends, --music, --script, --voice",
     backends: [
       { id: "agy-trends", title: "Тренды: Antigravity CLI (поиск в вебе)", deps: "agy + вход Google", license: "условия Antigravity; $0" },
       { id: "claude-script", title: "Сценарий: structured-вызов Claude", deps: "как планировщик", license: "как планировщик" },
@@ -232,6 +234,23 @@ export const MODULES: ModuleDef[] = [
       const script = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || env.CLAUDE_CODE_OAUTH_TOKEN || claudeLoginExists(env));
       const agy = !!(await findAgy(env));
       return { active: agy ? "agy-trends+claude-script" : "claude-script", ready: script, note: script ? (agy ? "" : "без agy тренды пропускаются") : "нет входа Claude для сценария" };
+    },
+  },
+  {
+    id: "voice",
+    stage: "design",
+    title: "Голоса (озвучка)",
+    what: "каталог голосов: Piper локально на CPU (make --voice, avatar --voice denis) и пресеты Chatterbox для аватара; $0",
+    selector: "vedit voices; vedit make --voice <id>; vedit avatar export --voice <id>; Telegram /voice",
+    backends: [
+      { id: "piper", title: "Piper 2023.11.14-2 (rhasspy), бинарник + onnx-модели, скачиваются при первом использовании в tools/voice/", deps: "piper(.exe), espeak-ng-data, onnxruntime (в архиве релиза); ~22 МБ + ~60 МБ на голос", license: "MIT (Piper); espeak-ng GPL-3.0 — только как внешний процесс" },
+      ...VOICES.map((v) => ({ id: `voice:${v.id}`, title: `${v.name} [${v.engine}, ${v.language}]`, deps: v.piper ? `huggingface rhasspy/piper-voices ${v.piper.key}` : v.refFrom ? `образец от Piper ${v.refFrom} + Chatterbox в Colab` : "Chatterbox в Colab", license: v.license })),
+    ],
+    step: "design",
+    cost: (e) => /piper/i.test(e.provider),
+    probe: async () => {
+      const st = await piperStatus();
+      return { active: "piper", ready: true, note: `${st.binary ? "piper установлен" : "piper скачается при первом синтезе"}; голоса: ${st.models.join(", ") || "ещё не скачаны"}` };
     },
   },
   {

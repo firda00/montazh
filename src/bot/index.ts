@@ -7,6 +7,7 @@ import { createJob, exists, jobDir, loadJob, readJson, runStep, writeJson, WORKS
 import { PlanError } from "../plan/backend/types.ts";
 import { MediaSchema, TranscriptSchema, type Edl, type Transcript } from "../schemas/index.ts";
 import { makeBotApi, TelegramError, type BotApi, type CallMethod, type DownloadFn, type Limits, type TgMessage, type TgUpdate } from "./telegram-api.ts";
+import { getVoice, isLocal, NO_VOICE, piperVoiceFor, voicesListText, type VoiceDef } from "../voice/catalog.ts";
 
 // same hints as src/cli.ts (cli.ts runs commander on import, so the table is duplicated here)
 export const HINTS: Partial<Record<PlanError["code"], string>> = {
@@ -35,6 +36,8 @@ export const MSG = {
     "/make <тема> — ролик по теме из ничего: тренды, сценарий, сгенерированные картинки, моушн-графика, музыка",
     "Несколько видео подряд (или альбомом) → /viral — соберу один самый вирусный ролик из всех; /clear — новая подборка",
     "/style pop | split | calm — стиль монтажа (split: сверху сгенерированные картинки с карточками, снизу спикер)",
+    "/voice — голоса для озвучки: /voice denis — выбрать (пришлю пробу), /voice off — без голоса; голос озвучит /make и /avatar",
+    "/send file | video | both — как присылать ролики: файлом в исходном качестве (по умолчанию), видео с плеером (Telegram пережмёт) или и так и так",
     "/avatar <текст или тема> — говорящий аватар (бесплатно, через Google Colab): пришлите заранее фото (лицо анфас) и голосовое 5–10 с — аватар будет с вашим лицом и голосом; без них — вымышленный ведущий. Готовый avatar_result.zip пришлите сюда — смонтирую рилс",
     "/cancel — отменить текущую работу (после текущего шага)",
     "/start — эта справка",
@@ -59,8 +62,22 @@ export const MSG = {
   reviseStart: "Принято, правлю монтаж.",
   unknownCommand: "Не знаю такой команды. /start — справка.",
   avatarUsage: "Напишите текст или тему: /avatar почему кофе дорожает (тема — монолог напишу сам) или /avatar текст: Привет! Сегодня расскажу… Фото и голосовое для аватара можно прислать заранее; /avatar сброс — забыть их.",
-  avatarStart: (photo: boolean, voice: boolean) =>
-    `Готовлю задание для аватара: ${photo ? "ваше фото" : "вымышленный ведущий (сгенерирую портрет)"}, ${voice ? "ваш голос (клон)" : "стандартный голос"}. Это 1–3 минуты.`,
+  avatarStart: (photo: boolean, voice: boolean, voiceId?: string) =>
+    `Готовлю задание для аватара: ${photo ? "ваше фото" : "вымышленный ведущий (сгенерирую портрет)"}, ${voice ? "ваш голос (клон)" : voiceId ? `голос ${voiceId}` : "стандартный голос"}. Это 1–3 минуты.`,
+  voiceList: (current?: string) =>
+    [
+      `Голоса для озвучки (${current ? `сейчас: ${current}` : "сейчас без голоса"}):`,
+      voicesListText(current),
+      "",
+      "/voice <id> — выбрать (пришлю пробу), /voice off — без голоса.",
+      "Piper-голоса (denis, dmitri, ljspeech, john, cori) звучат и в /make, и в /avatar; chatterbox_* — только в /avatar (синтез в Colab).",
+      "Ваше голосовое сообщение для /avatar важнее выбранного голоса.",
+    ].join("\n"),
+  voiceSet: (v: VoiceDef) => `Голос: ${v.id} — ${v.name}. Лицензия: ${v.license}.\n${isLocal(v) ? "Им будут озвучены /make и /avatar." : "Им будет говорить /avatar (Colab); для /make возьму локальный " + (piperVoiceFor(v)?.id ?? "голос по языку") + "."}`,
+  voiceOff: "Озвучка выключена: /make снова без голоса, /avatar — стандартный голос Chatterbox (или ваше голосовое).",
+  voiceUnknown: (id: string) => `Не знаю голос «${id}». /voice — список.`,
+  sendUsage: (cur: string) => `Сейчас: ${cur}. /send file — файлом в исходном качестве (по умолчанию); /send video — видео с плеером (Telegram сжимает); /send both — и то и другое.`,
+  sendSet: (mode: SendMode) => (mode === "file" ? "Ролики буду присылать файлом — без пережатия, можно сразу выкладывать." : mode === "video" ? "Ролики буду присылать как видео (с плеером; Telegram их сжимает)." : "Ролики буду присылать и видео (посмотреть), и файлом (для публикации)."),
   avatarPhotoSaved: "Фото сохранено для аватара. Теперь /avatar <текст или тема>.",
   avatarVoiceSaved: "Голос сохранён: аватар будет говорить им (нужно 5–10 с чистой речи на языке текста). Теперь /avatar <текст или тема>.",
   avatarReset: "Фото и голос для аватара забыты.",
@@ -104,6 +121,8 @@ export interface PipelineResult {
   documents?: { file: string; caption?: string }[];
   /** replaces the closing "Готово: N ролик(ов)…" message */
   message?: string;
+  /** a short name for the files sent (make topic / title); default: the job id */
+  title?: string;
   failed?: { id: string; error: string }[];
   reasoning?: string;
   notes?: string[];
@@ -131,6 +150,8 @@ export type PipelineFn = (args: PipelineArgs) => Promise<PipelineResult>;
 export type ReviseFn = (args: ReviseArgs) => Promise<PipelineResult>;
 export interface MakeArgs {
   topic: string;
+  /** catalogue voice for the voiceover (/voice) */
+  voice?: string;
   progress: (text: string) => Promise<void>;
   onJob: (jobId: string) => void;
   signal: AbortSignal;
@@ -142,7 +163,10 @@ export interface AvatarExportArgs {
   /** "/avatar" argument: a topic or the text itself */
   input: string;
   photo?: string;
+  /** the user's voice note (cloned); wins over voiceId */
   voice?: string;
+  /** catalogue voice chosen with /voice */
+  voiceId?: string;
   /** job source label, so the job counts as a bot job */
   sourceLabel: string;
   progress: (text: string) => Promise<void>;
@@ -164,12 +188,13 @@ export interface AvatarImportArgs {
 export type AvatarImportFn = (args: AvatarImportArgs) => Promise<PipelineResult>;
 
 /** /avatar: text or topic (+ photo, + voice) → avatar_job.zip and instructions for the Colab notebook. */
-export const runAvatarExport: AvatarExportFn = async ({ input, photo, voice, sourceLabel, progress, onJob, log }) => {
+export const runAvatarExport: AvatarExportFn = async ({ input, photo, voice, voiceId, sourceLabel, progress, onJob, log }) => {
   const { exportAvatarJob } = await import("../avatar/export.ts");
   const r = await exportAvatarJob({
     input,
     photo,
     voice,
+    voiceId: voice ? undefined : voiceId,
     sourceLabel,
     onEvent: (l) => {
       if (/^job /.test(l)) onJob(l.slice(4).trim());
@@ -196,10 +221,11 @@ export const runAvatarImport: AvatarImportFn = async ({ jobId, result, instructi
 };
 
 /** /make: topic → video from nothing (trends → script → motion graphics → render). */
-export const runMakePipeline: MakeFn = async ({ topic, progress, onJob, signal, log }) => {
+export const runMakePipeline: MakeFn = async ({ topic, voice, progress, onJob, signal, log }) => {
   const { make } = await import("../make/index.ts");
   const r = await make(topic, {
     signal,
+    voice,
     onEvent: (l) => {
       if (/^job /.test(l)) onJob(l.slice(4).trim());
       else if (/^▸/.test(l)) void progress(l);
@@ -207,7 +233,7 @@ export const runMakePipeline: MakeFn = async ({ topic, progress, onJob, signal, 
     },
   });
   const notes = r.warnings.slice(0, 3);
-  return { jobId: r.jobId, outputs: [{ id: "make", file: r.output, duration: r.duration, aspect: "9:16" }], reasoning: `${r.title}\n${r.script.beats.map((b) => `· ${b.text}`).join("\n")}${r.script.hashtags.length ? `\n#${r.script.hashtags.join(" #")}` : ""}${r.music_attribution ? `\n${r.music_attribution}` : ""}`, notes };
+  return { jobId: r.jobId, title: topic, outputs: [{ id: "make", file: r.output, duration: r.duration, aspect: "9:16" }], reasoning: `${r.title}\n${r.script.beats.map((b) => `· ${b.text}`).join("\n")}${r.script.hashtags.length ? `\n#${r.script.hashtags.join(" #")}` : ""}${r.music_attribution ? `\n${r.music_attribution}` : ""}`, notes };
 };
 
 class CancelledError extends Error {
@@ -369,8 +395,14 @@ export const ChatStateSchema = z.object({
   avatar_photo: z.string().optional(),
   avatar_voice: z.string().optional(),
   avatar_job: z.string().optional(),
+  /** /voice: catalogue voice for /make voiceovers and /avatar */
+  voice: z.string().optional(),
+  /** /send: how finished reels are delivered (default file — no Telegram recompression) */
+  send: z.enum(["file", "video", "both"]).optional(),
   updated_at: z.string().optional(),
 });
+export type SendMode = "file" | "video" | "both";
+export const SEND_MODES: Record<string, SendMode> = { file: "file", document: "file", doc: "file", файл: "file", файлом: "file", video: "video", видео: "video", both: "both", оба: "both", все: "both" };
 export const BotStateSchema = z.object({
   version: z.literal(1).default(1),
   offset: z.number().int().optional(),
@@ -416,6 +448,10 @@ export interface BotOptions {
   make?: MakeFn;
   avatarExport?: AvatarExportFn;
   avatarImport?: AvatarImportFn;
+  /** /voice <id>: a short OGG/Opus sample of a Piper voice (tests inject a fake) */
+  voiceSample?: (voiceId: string, dest: string) => Promise<string>;
+  /** a copy of an output that fits the upload limit (default: ffmpeg re-encode to the size budget) */
+  shrinkVideo?: (file: string, limitBytes: number) => Promise<string>;
   /** long-polling timeout, seconds (default 30) */
   pollTimeout?: number;
   /** how long to wait for the rest of an album before acting (ms, default 4000) */
@@ -465,6 +501,31 @@ function isVideoMessage(m: TgMessage) {
 
 const safeName = (s: string) => s.replace(/[^A-Za-z0-9_-]/g, "_");
 
+/** "<title-or-job>_<output>.mp4": a readable file name for a reel sent as a document */
+export function outputFileName(result: Pick<PipelineResult, "jobId" | "title">, outputId: string): string {
+  const slug = (result.title ?? "").normalize("NFC").replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, 48).replace(/_+$/, "");
+  return `${slug || result.jobId}_${outputId.replace(/[^\p{L}\p{N}_-]+/gu, "_")}.mp4`;
+}
+
+/** Re-encodes a video to fit `limitBytes` (bitrate from the duration), next to the original as *_tg.mp4. */
+export async function shrinkForTelegram(file: string, limitBytes: number): Promise<string> {
+  const { ffmpeg, ffprobe } = await import("../lib/ffmpeg.ts");
+  const duration = Number((await ffprobe(file)).format.duration ?? 0);
+  if (!(duration > 0)) throw new Error("не удалось прочитать длительность");
+  const totalKbps = Math.floor((limitBytes * 8 * 0.9) / duration / 1000);
+  const v = totalKbps - 128;
+  if (v < 400) throw new Error(`ролик ${duration.toFixed(0)} с слишком длинный для ${Math.round(limitBytes / 1024 / 1024)} МБ`);
+  const out = file.replace(/\.mp4$/i, "") + "_tg.mp4";
+  await ffmpeg(["-i", file, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "medium", "-b:v", `${v}k`, "-maxrate", `${Math.round(v * 1.3)}k`, "-bufsize", `${v * 2}k`, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out]);
+  if ((await fs.stat(out)).size > limitBytes) throw new Error("сжатая копия всё ещё больше лимита");
+  return out;
+}
+
+async function defaultVoiceSample(voiceId: string, dest: string): Promise<string> {
+  const { voiceSample } = await import("../voice/piper.ts");
+  return voiceSample(voiceId, dest);
+}
+
 /** the Colab notebook's output: avatar_result.zip (browsers may add " (1)" or "-2" to repeated downloads) */
 export function isAvatarResult(fileName?: string): boolean {
   return /^avatar_result[^/\\]*\.zip$/i.test(fileName ?? "");
@@ -478,6 +539,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   const makeFn = o.make ?? runMakePipeline;
   const avatarExportFn = o.avatarExport ?? runAvatarExport;
   const avatarImportFn = o.avatarImport ?? runAvatarImport;
+  const voiceSampleFn = o.voiceSample ?? defaultVoiceSample;
+  const shrinkFn = o.shrinkVideo ?? shrinkForTelegram;
   const preset = o.preset ?? "bold_pop";
   const botDir = path.join(path.resolve(o.workspace ?? WORKSPACE_ROOT), "_bot");
   const stateFile = path.join(botDir, "state.json");
@@ -529,6 +592,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         await say(chatId, `Не удалось отправить ${path.basename(doc.file)} (${err instanceof TelegramError ? err.description : String(err)}). Он лежит на сервере: ${doc.file}`);
       }
     }
+    const mode: SendMode = chat(chatId).send ?? "file";
+    const notes: string[] = [];
     for (const out of result.outputs) {
       const caption = videoCaption(out, result.reasoning);
       let size = 0;
@@ -538,25 +603,46 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         await say(chatId, `✖ ${out.id}: файл не найден (${out.file})`);
         continue;
       }
+      let file = out.file;
       if (size > api.limits.uploadBytes) {
-        await say(chatId, `${caption}\nФайл ${(size / 1024 / 1024).toFixed(0)} МБ больше лимита отправки ботом (${(api.limits.uploadBytes / 1024 / 1024).toFixed(0)} МБ) — он лежит на сервере: ${out.file}`);
-        continue;
-      }
-      await action(chatId, "upload_video");
-      try {
-        await api.sendVideo(chatId, out.file, { caption, duration: out.duration });
-      } catch (err) {
-        log(`⚠ sendVideo ${out.id}: ${err instanceof Error ? err.message : err} — пробую документом`);
+        const mb = (n: number) => `${(n / 1024 / 1024).toFixed(0)} МБ`;
         try {
-          await api.sendDocument(chatId, out.file, caption);
+          await action(chatId, "upload_document");
+          file = await shrinkFn(out.file, api.limits.uploadBytes);
+          notes.push(`${out.id}: оригинал ${mb(size)} больше лимита отправки ботом (${mb(api.limits.uploadBytes)}) — отправил сжатую копию; оригинал на сервере: ${out.file}`);
+        } catch (err) {
+          log(`⚠ сжатие ${out.id}: ${err instanceof Error ? err.message.split("\n")[0] : err}`);
+          await say(chatId, `${caption}\nФайл ${mb(size)} больше лимита отправки ботом (${mb(api.limits.uploadBytes)}) — он лежит на сервере: ${out.file}`);
+          continue;
+        }
+      }
+      const name = outputFileName(result, out.id);
+      const asDocument = async () => {
+        await action(chatId, "upload_document");
+        await api.sendDocument(chatId, file, caption, { fileName: name, disableContentTypeDetection: true });
+      };
+      const asVideo = async () => {
+        await action(chatId, "upload_video");
+        await api.sendVideo(chatId, file, { caption, duration: out.duration });
+      };
+      const [first, second] = mode === "video" ? [asVideo, asDocument] : [asDocument, asVideo];
+      if (mode === "both") {
+        await asVideo().catch((err) => log(`⚠ sendVideo ${out.id}: ${err instanceof Error ? err.message : err}`));
+      }
+      try {
+        await first();
+      } catch (err) {
+        log(`⚠ ${mode === "video" ? "sendVideo" : "sendDocument"} ${out.id}: ${err instanceof Error ? err.message : err} — пробую ${mode === "video" ? "документом" : "видео"}`);
+        try {
+          await second();
         } catch (err2) {
-          await say(chatId, `${caption}\nНе удалось отправить файл (${err2 instanceof TelegramError ? err2.description : String(err2)}). Он лежит на сервере: ${out.file}`);
+          await say(chatId, `${caption}\nНе удалось отправить файл (${err2 instanceof TelegramError ? err2.description : String(err2)}). Он лежит на сервере: ${file}`);
         }
       }
     }
     const lines: string[] = [];
     for (const f of result.failed ?? []) lines.push(`✖ ${f.id}: ${f.error.split("\n")[0]}`);
-    for (const n of result.notes ?? []) lines.push(`⚠ ${n}`);
+    for (const n of [...notes, ...(result.notes ?? [])]) lines.push(`⚠ ${n}`);
     if (result.message) {
       await say(chatId, [result.message, ...lines].join("\n"));
       return;
@@ -625,7 +711,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     if (!topic) return say(chatId, MSG.makeUsage);
     await updateChat(chatId, { prompt: topic });
     await say(chatId, MSG.makeStart);
-    launch(chatId, "make", (r) => makeFn({ topic, progress: progressFor(chatId, r), onJob: (jobId) => void updateChat(chatId, { jobId }), signal: r.ac.signal, log: (l) => log(`[${chatId}] ${l}`) }));
+    const voice = chat(chatId).voice;
+    launch(chatId, "make", (r) => makeFn({ topic, voice, progress: progressFor(chatId, r), onJob: (jobId) => void updateChat(chatId, { jobId }), signal: r.ac.signal, log: (l) => log(`[${chatId}] ${l}`) }));
   }
 
   async function startRevise(chatId: number, edit: string) {
@@ -645,13 +732,16 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const c = chat(chatId);
     const photo = c.avatar_photo && (await exists(c.avatar_photo)) ? c.avatar_photo : undefined;
     const voice = c.avatar_voice && (await exists(c.avatar_voice)) ? c.avatar_voice : undefined;
+    // the user's own voice note wins over the catalogue voice
+    const voiceId = voice ? undefined : c.voice;
     await updateChat(chatId, { prompt: input });
-    await say(chatId, MSG.avatarStart(!!photo, !!voice));
+    await say(chatId, MSG.avatarStart(!!photo, !!voice, voiceId));
     launch(chatId, "avatar", (r) =>
       avatarExportFn({
         input,
         photo,
         voice,
+        voiceId,
         sourceLabel: path.join(botDir, String(chatId), "avatar"),
         progress: progressFor(chatId, r),
         onJob: (jobId) => void updateChat(chatId, { jobId, avatar_job: jobId }),
@@ -706,6 +796,36 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       return startAvatar(chatId, (cmd[1] ?? "").trim());
     }
     return say(chatId, kind === "photo" ? MSG.avatarPhotoSaved : MSG.avatarVoiceSaved);
+  }
+
+  /** /voice [id|off]: list, choose (with a sample for local voices) or turn off the voiceover */
+  async function voiceCommand(chatId: number, arg: string) {
+    const c = chat(chatId);
+    if (!arg) return say(chatId, MSG.voiceList(c.voice));
+    if (NO_VOICE.test(arg)) {
+      await updateChat(chatId, { voice: undefined });
+      return say(chatId, MSG.voiceOff);
+    }
+    const v = getVoice(arg);
+    if (!v) return say(chatId, MSG.voiceUnknown(arg));
+    await updateChat(chatId, { voice: v.id });
+    await say(chatId, MSG.voiceSet(v));
+    const src = piperVoiceFor(v);
+    if (!src) return;
+    // the sample is synthesised in the background (first use downloads the voice, ~60 MB)
+    const task = (async () => {
+      try {
+        await action(chatId, "upload_voice");
+        const dest = path.join(botDir, "_voices", `${src.id}.ogg`);
+        const file = (await exists(dest)) ? dest : await voiceSampleFn(src.id, dest);
+        await api.sendVoice(chatId, file, `проба: ${src.id}${src.id !== v.id ? ` (тембр для ${v.id})` : ""}`);
+      } catch (err) {
+        log(`[${chatId}] проба голоса ${v.id}: ${err instanceof Error ? err.message : err}`);
+        await say(chatId, `Пробу голоса прислать не получилось (${err instanceof Error ? err.message.split("\n")[0] : err}), но голос выбран.`);
+      }
+    })();
+    tasks.add(task);
+    void task.finally(() => tasks.delete(task));
   }
 
   async function status(chatId: number) {
@@ -835,6 +955,15 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         case "clear":
           await updateChat(chatId, { sources: [], batch_closed: false });
           return say(chatId, MSG.cleared);
+        case "voice":
+        case "voices":
+          return voiceCommand(chatId, arg);
+        case "send": {
+          const want = SEND_MODES[arg.trim().toLowerCase()];
+          if (!want) return say(chatId, MSG.sendUsage(chat(chatId).send ?? "file"));
+          await updateChat(chatId, { send: want });
+          return say(chatId, MSG.sendSet(want));
+        }
         default:
           return say(chatId, MSG.unknownCommand);
       }

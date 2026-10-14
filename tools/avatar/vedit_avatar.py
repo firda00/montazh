@@ -261,8 +261,16 @@ def cmd_tts(a: argparse.Namespace) -> None:
         duration = len(samples) / rate
         pauses = detect_pauses(out / "speech.wav")
         cuts = [round((a0 + b0) / 2, 3) for a0, b0 in pauses if 0.5 < (a0 + b0) / 2 < duration - 0.5]
-        lines_out = [{"i": i, "text": t, "start": None, "end": None} for i, t in enumerate(s["lines"])]
-        engine, model, voice = "provided", "user recording", "own-recording"
+        sm = s.get("speech_meta") or {}
+        if sm.get("lines"):
+            # speech synthesised by vedit (Piper): exact line timings come with it
+            lines_out = [{"i": int(x["i"]), "text": x["text"], "start": x.get("start"), "end": x.get("end")} for x in sm["lines"]]
+        else:
+            lines_out = [{"i": i, "text": t, "start": None, "end": None} for i, t in enumerate(s["lines"])]
+        if sm:
+            engine, model, voice = sm.get("engine") or "provided", sm.get("model") or "", sm.get("voice") or "library"
+        else:
+            engine, model, voice = "provided", "user recording", "own-recording"
     else:
         if lang not in CHATTERBOX_LANGS and not a.fake:
             raise SystemExit(f"Chatterbox не знает язык «{lang}». Поддерживаются: {', '.join(sorted(CHATTERBOX_LANGS))}. Для других языков запишите голос сами (vedit avatar export --speech my.ogg).")
@@ -744,6 +752,17 @@ def cmd_selftest(a: argparse.Namespace) -> None:
             assert set(z.namelist()) == {"speech.wav", "meta.json"}, z.namelist()
         t2 = read_json(out2 / "timings.json")
         assert t2["engine"] == "provided" and t2["cuts"], t2
+        # speech synthesised by vedit (Piper): engine, voice and line timings are taken from speech_meta
+        jd3 = tmp / "job_piper"
+        jd3.mkdir()
+        shutil.copy(jd2 / "speech_in.wav", jd3 / "speech_in.wav")
+        sm_lines = [{"i": 0, "text": "Своя запись.", "start": 0.0, "end": 1.2}, {"i": 1, "text": "Вторая фраза.", "start": 1.7, "end": 2.6}]
+        write_json(jd3 / "script.json", {"version": 1, "job": "selftest3", "language": "ru", "lines": ["Своя запись.", "Вторая фраза."], "speech": "speech_in.wav",
+                                          "speech_meta": {"engine": "piper", "voice": "denis", "model": "ru_RU-denis-medium", "lines": sm_lines}, "portrait": "portrait.png", "mode": "voice_only"})
+        out3 = tmp / "out3"
+        subprocess.run([sys.executable, str(Path(__file__).resolve()), "tts", "--job", str(jd3), "--out-dir", str(out3), "--fake", "--device", "cpu"], check=True)
+        t3 = read_json(out3 / "timings.json")
+        assert t3["engine"] == "piper" and t3["voice"] == "denis" and t3["lines"][1]["start"] == 1.7, t3
         print(f"selftest ok: chunks {meta['animate']['chunks']}, video {vdur:.2f}s / speech {sdur:.2f}s, own-recording cuts {t2['cuts']}")
     finally:
         if not a.keep:

@@ -2,23 +2,28 @@ import { ffmpeg, ffprobe } from "../lib/ffmpeg.ts";
 import { sfxFile, thinCues, type SfxCue, type SfxKind } from "./sfx.ts";
 
 /**
- * Soundtrack mixer: the video's own audio (speech, if any) + a looped music bed + sound effects at
- * cue times, normalised to −14 LUFS. With speech the music is side-chain ducked under it; without
- * speech the music carries the video and the effects sit on top. The video stream is copied.
+ * Soundtrack mixer: the video's own audio (speech, if any) + a voiceover track (make --voice) + a looped
+ * music bed + sound effects at cue times, normalised to −14 LUFS. With speech or a voiceover the music is
+ * side-chain ducked under it (and with a voiceover the effects are ducked too); without speech the music
+ * carries the video and the effects sit on top. The video stream is copied.
  */
 
 /** relative levels per effect (dB), tuned so a whoosh is felt, not heard over the music */
 const SFX_GAIN: Record<SfxKind, number> = { whoosh: 3, pop: -7, tick: -9, impact: -3, riser: -1, ding: -5, swipe: -3 };
+/** effects sit this much lower under a voiceover (before the ducking) */
+export const SFX_UNDER_VOICE_DB = -5;
 
 export interface MixOptions {
   video: string;
   out: string;
   duration: number;
   music?: string | null;
-  /** music level before the final normalisation (LUFS); defaults: −16 alone, −24 under speech */
+  /** music level before the final normalisation (LUFS); defaults: −16 alone, −24 under speech, −27 under a voiceover */
   musicLufs?: number;
   /** the video's audio track is speech to keep on top (montage); false for silent motion graphics */
   speech?: boolean;
+  /** a voiceover WAV already placed on the video's timeline (starts at 0) */
+  voice?: string | null;
   sfx?: SfxCue[];
   targetLufs?: number;
 }
@@ -27,57 +32,100 @@ export interface MixResult {
   out: string;
   cues: number;
   music: boolean;
+  voice: boolean;
 }
 
-export async function mixSoundtrack(o: MixOptions): Promise<MixResult> {
+export interface MixGraph {
+  args: string[];
+  cues: SfxCue[];
+  /** nothing to mix: the video is copied through */
+  copy: boolean;
+}
+
+/** The ffmpeg command for a mix (pure: the caller probes the video and resolves effect files). */
+export function buildMixGraph(o: MixOptions, ctx: { hasAudio: boolean; sfxFile: (k: SfxKind) => string }): MixGraph {
   const D = o.duration;
-  const probe = await ffprobe(o.video);
-  const hasAudio = probe.streams.some((s) => s.codec_type === "audio");
-  const speech = !!o.speech && hasAudio;
+  const speech = !!o.speech && ctx.hasAudio;
+  const voice = !!o.voice;
   const cues = thinCues(o.sfx ?? [], { duration: D });
   const inputs: string[] = ["-i", o.video];
   const chains: string[] = [];
   const mixIn: string[] = [];
   let idx = 1;
+  // side-chain keys: whatever should push the bed down (the video's speech and/or the voiceover)
+  const keys: string[] = [];
+
+  let voiceLabel = "";
+  if (voice) {
+    inputs.push("-i", o.voice!);
+    const n = 1 + (o.music ? 1 : 0) + (cues.length ? 1 : 0);
+    // the voice is levelled on its own first (−16 LUFS), so it stays the loudest thing after the final normalisation
+    chains.push(`[${idx}:a]aresample=48000,aformat=channel_layouts=stereo,apad,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS,loudnorm=I=-16:TP=-2:LRA=9${n > 1 ? `,asplit=${n}[vo]${Array.from({ length: n - 1 }, (_, k) => `[vk${k}]`).join("")}` : "[vo]"}`);
+    for (let k = 0; k < n - 1; k++) keys.push(`[vk${k}]`);
+    voiceLabel = "[vo]";
+    idx++;
+  }
 
   if (o.music) {
     inputs.push("-stream_loop", "-1", "-i", o.music);
-    const lufs = o.musicLufs ?? (speech ? -24 : -16);
+    const lufs = o.musicLufs ?? (voice ? -27 : speech ? -24 : -16);
     const fadeOut = Math.min(2.5, D / 4);
     chains.push(`[${idx}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS,loudnorm=I=${lufs}:TP=-2:LRA=11,afade=t=in:st=0:d=0.8,afade=t=out:st=${(D - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}[mus]`);
     idx++;
     if (speech) {
-      chains.push(`[0:a]aresample=48000,aformat=channel_layouts=stereo,asplit=2[sp][sc]`);
+      chains.push(`[0:a]aresample=48000,aformat=channel_layouts=stereo${voice ? "[sp]" : ",asplit=2[sp][sc]"}`);
+      mixIn.push("[sp]");
+    } else if (ctx.hasAudio) {
+      chains.push(`[0:a]aresample=48000,aformat=channel_layouts=stereo[orig]`);
+      mixIn.push("[orig]");
+    }
+    if (voice) {
+      // music dips ~10 dB while the narrator talks and comes back in the pauses between beats
+      chains.push(`[mus]${keys.shift()}sidechaincompress=threshold=0.015:ratio=8:attack=20:release=350:makeup=1[duck]`);
+      mixIn.push("[duck]");
+    } else if (speech) {
       // music dips ~9 dB while someone talks, comes back in the pauses
       chains.push(`[mus][sc]sidechaincompress=threshold=0.02:ratio=6:attack=30:release=450:makeup=1[duck]`);
-      mixIn.push("[sp]", "[duck]");
-    } else {
-      mixIn.push("[mus]");
-      if (hasAudio) {
-        chains.push(`[0:a]aresample=48000,aformat=channel_layouts=stereo[orig]`);
-        mixIn.push("[orig]");
-      }
-    }
-  } else if (hasAudio) {
+      mixIn.push("[duck]");
+    } else mixIn.push("[mus]");
+  } else if (ctx.hasAudio) {
     chains.push(`[0:a]aresample=48000,aformat=channel_layouts=stereo[orig]`);
     mixIn.push("[orig]");
   }
+  if (voiceLabel) mixIn.unshift(voiceLabel);
 
+  const fx: string[] = [];
   for (const [k, c] of cues.entries()) {
-    inputs.push("-i", await sfxFile(c.kind));
+    inputs.push("-i", ctx.sfxFile(c.kind));
     const ms = Math.max(0, Math.round(c.t * 1000));
-    chains.push(`[${idx}:a]adelay=${ms}|${ms},volume=${(SFX_GAIN[c.kind] + (c.gain ?? 0)).toFixed(1)}dB[fx${k}]`);
-    mixIn.push(`[fx${k}]`);
+    const gain = SFX_GAIN[c.kind] + (c.gain ?? 0) + (voice ? SFX_UNDER_VOICE_DB : 0);
+    chains.push(`[${idx}:a]adelay=${ms}|${ms},volume=${gain.toFixed(1)}dB[fx${k}]`);
+    fx.push(`[fx${k}]`);
     idx++;
   }
+  if (fx.length && voice) {
+    // effects go on one bus that is ducked by the voice too: quieter while the narrator talks
+    chains.push(`${fx.join("")}amix=inputs=${fx.length}:normalize=0:duration=longest[fxbus]`);
+    chains.push(`[fxbus]${keys.shift()}sidechaincompress=threshold=0.015:ratio=4:attack=15:release=250:makeup=1[fxduck]`);
+    mixIn.push("[fxduck]");
+  } else mixIn.push(...fx);
 
-  if (!mixIn.length) {
-    // nothing to add: copy through
-    await ffmpeg(["-i", o.video, "-c", "copy", "-movflags", "+faststart", o.out]);
-    return { out: o.out, cues: 0, music: false };
-  }
+  if (!mixIn.length) return { args: ["-i", o.video, "-c", "copy", "-movflags", "+faststart", o.out], cues: [], copy: true };
   const target = o.targetLufs ?? -14;
   chains.push(`${mixIn.join("")}amix=inputs=${mixIn.length}:normalize=0:duration=longest,atrim=0:${D.toFixed(3)},loudnorm=I=${target}:TP=-1.5:LRA=11[aout]`);
-  await ffmpeg([...inputs, "-filter_complex", chains.join(";"), "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t", D.toFixed(3), "-movflags", "+faststart", o.out]);
-  return { out: o.out, cues: cues.length, music: !!o.music };
+  return {
+    args: [...inputs, "-filter_complex", chains.join(";"), "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t", D.toFixed(3), "-movflags", "+faststart", o.out],
+    cues,
+    copy: false,
+  };
+}
+
+export async function mixSoundtrack(o: MixOptions): Promise<MixResult> {
+  const probe = await ffprobe(o.video);
+  const hasAudio = probe.streams.some((s) => s.codec_type === "audio");
+  const files = new Map<SfxKind, string>();
+  for (const c of thinCues(o.sfx ?? [], { duration: o.duration })) if (!files.has(c.kind)) files.set(c.kind, await sfxFile(c.kind));
+  const g = buildMixGraph(o, { hasAudio, sfxFile: (k) => files.get(k)! });
+  await ffmpeg(g.args);
+  return { out: o.out, cues: g.cues.length, music: !g.copy && !!o.music, voice: !g.copy && !!o.voice };
 }

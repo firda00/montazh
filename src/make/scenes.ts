@@ -29,6 +29,8 @@ export interface ComposeScenesOptions {
   gsapRel: string;
   /** measured font sizes by fit id (px); missing ids use the defaults */
   sizes?: Record<string, number>;
+  /** voiceover captions (make --voice --voice-captions): short cues on their own track above the scenes */
+  captions?: { start: number; end: number; text: string }[];
 }
 
 export interface ComposedScenes {
@@ -519,6 +521,17 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
     );
   });
 
+  // voiceover captions: one track-2 layer, each cue switched on/off on the timeline
+  const caps = (o.captions ?? []).filter((c) => c.end > c.start && c.start < DUR && c.text.trim());
+  if (caps.length) {
+    const spans = caps.map((c, k) => `<span class="cap" id="cap${k}"><span class="capt">${esc(c.text)}</span></span>`);
+    sections.push(`      <section id="capl" class="clip caps" data-start="0" data-duration="${fmt(DUR)}" data-track-index="2">\n        ${spans.join("\n        ")}\n      </section>`);
+    caps.forEach((c, k) => {
+      tw.push(`tl.fromTo("#cap${k}", { opacity: 0, y: 12 }, { opacity: 1, y: 0, duration: 0.12, ease: "power2.out", immediateRender: false }, ${fmt(c.start)});`);
+      tw.push(`tl.fromTo("#cap${k}", { opacity: 1 }, { opacity: 0, duration: 0.08, ease: "none", immediateRender: false }, ${fmt(Math.min(c.end, DUR - 0.05))});`);
+    });
+  }
+
   const D = FONTS[display];
   const A = FONTS[accentFont];
   const K = FONTS[kickerFont];
@@ -637,6 +650,9 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       .tnglow { position: absolute; left: 140px; top: ${CY - 400}px; width: 800px; height: 800px; display: block; border-radius: 50%; background: radial-gradient(closest-side, ${P.accent}55, transparent); }
       .tncol { position: absolute; left: ${SAFE.x}px; right: ${SAFE.x}px; top: ${CY - 300}px; height: 460px; display: flex; align-items: center; justify-content: center; }
       .tnum { text-align: center; }
+      .caps { position: absolute; inset: 0; pointer-events: none; }
+      .cap { position: absolute; left: ${SAFE.x}px; right: ${SAFE.x}px; bottom: ${H - SAFE.bottom + 6}px; display: flex; justify-content: center; opacity: 0; }
+      .capt { display: block; max-width: ${W - 2 * SAFE.x}px; padding: 14px 28px; border-radius: 22px; background: rgba(0,0,0,0.62); color: #FFFFFF; font-family: ${fontStack("inter")}; font-weight: 700; font-size: 50px; line-height: 1.18; text-align: center; text-wrap: balance; }
       .hl-quote { font-family: ${fontStack(accentFont === "mono" ? display : accentFont)}; font-weight: ${(accentFont === "mono" ? D : A).weight}; font-style: ${(accentFont === "mono" ? D : A).style}; line-height: 1.12; }
     </style>
   </head>

@@ -23,6 +23,9 @@ import { fitText } from "./fit.ts";
 import { mixSoundtrack } from "../audio/mix.ts";
 import { isMood, pickMusic, type Mood, type MusicTrack } from "../audio/music.ts";
 import type { SfxCue } from "../audio/sfx.ts";
+import { NO_VOICE } from "../voice/catalog.ts";
+import type { SentenceSynth } from "../voice/piper.ts";
+import { makeVoiceover, type CaptionCue, type VoiceoverResult } from "../voice/voiceover.ts";
 
 /**
  * MAKE: a topic → a vertical video built from nothing (text, generated images, motion; music optional).
@@ -45,6 +48,9 @@ export const MakeReportSchema = z.object({
   music: z.string().nullable(),
   music_attribution: z.string().default(""),
   sfx: z.number().int().default(0),
+  /** voiceover voice id (make --voice), null = no narration */
+  voice: z.string().nullable().default(null),
+  voice_seconds: z.number().default(0),
   usd: z.number(),
   wall_seconds: z.number(),
   render_seconds: z.number(),
@@ -62,6 +68,14 @@ export interface MakeOptions {
   music?: string;
   /** sound effects on the motion (default on) */
   sfx?: boolean;
+  /** voiceover: a voice id from the catalogue (vedit voices) or "none" (default: no narration) */
+  voice?: string;
+  /** burn short captions of the voiceover into the video (default off: the scenes already carry the text) */
+  voiceCaptions?: boolean;
+  /** Piper speed: > 1 slower, < 1 faster */
+  voiceLengthScale?: number;
+  /** test hook: replaces the Piper call */
+  voiceSynth?: SentenceSynth;
   quality?: RenderQuality;
   style?: Partial<MakeStyle>;
   model?: string;
@@ -113,7 +127,7 @@ export async function writeMakeProject(script: Script, dir: string, o: { kicker?
 }
 
 /** Writes the art-directed HyperFrames project: images, fonts, composition fitted in Chrome, manifests. */
-export async function writeDirectorProject(script: Script, design: Design, images: Record<number, string>, dir: string, o: { gsapFile?: string } = {}): Promise<ComposedScenes & { entry: string; overflow: string[] }> {
+export async function writeDirectorProject(script: Script, design: Design, images: Record<number, string>, dir: string, o: { gsapFile?: string; captions?: CaptionCue[] } = {}): Promise<ComposedScenes & { entry: string; overflow: string[] }> {
   await fs.mkdir(path.join(dir, "assets", "img"), { recursive: true });
   await linkOrCopy(o.gsapFile ?? DEFAULT_GSAP, path.join(dir, "assets", "gsap.min.js"));
   const rel: Record<number, string> = {};
@@ -127,10 +141,10 @@ export async function writeDirectorProject(script: Script, design: Design, image
   const fontFaces = await installFonts(dir, [...fontIds]);
   const entry = path.join(dir, "index.html");
   // pass 1: default sizes → measure in Chrome → pass 2 with the fitted sizes
-  let composed = composeScenes(script, design, { images: rel, fontFaces, gsapRel: "assets/gsap.min.js" });
+  let composed = composeScenes(script, design, { images: rel, fontFaces, gsapRel: "assets/gsap.min.js", captions: o.captions });
   await fs.writeFile(entry, composed.html);
   const fit = await fitText(entry);
-  composed = composeScenes(script, design, { images: rel, fontFaces, gsapRel: "assets/gsap.min.js", sizes: fit.sizes });
+  composed = composeScenes(script, design, { images: rel, fontFaces, gsapRel: "assets/gsap.min.js", sizes: fit.sizes, captions: o.captions });
   await fs.writeFile(entry, composed.html);
   const name = `make-${script.title.toLowerCase().replace(/[^a-z0-9а-яё]+/gi, "-").replace(/^-|-$/g, "").slice(0, 40) || "video"}`;
   await fs.writeFile(path.join(dir, "hyperframes.json"), JSON.stringify({ $schema: "https://hyperframes.heygen.com/schema/hyperframes.json", registry: "https://raw.githubusercontent.com/heygen-com/hyperframes/main/registry", paths: { blocks: "compositions", components: "compositions/components", assets: "assets" }, media: { autoProxy: true } }, null, 2) + "\n");
@@ -213,6 +227,19 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
   say(`  «${s.script.title}», ${s.script.beats.length} битов, ${scriptDuration(s.script)}s${s.usd ? `, ≈$${s.usd.toFixed(3)}` : ""}`);
   for (const b of s.script.beats) say(`    · ${b.text}  [${b.icon}, ${b.seconds}s]`);
 
+  // 2b. voiceover: synthesise every beat's spoken line, stretch the beats to the speech
+  let vo: VoiceoverResult | null = null;
+  const wantVoice = opts.voice?.trim();
+  if (wantVoice && !NO_VOICE.test(wantVoice)) {
+    say(`▸ озвучка (${wantVoice}, Piper локально)…`);
+    vo = await runStep(job.id, "design", () => makeVoiceover(s.script, wantVoice, path.join(dir, "make", "voice"), { lengthScale: opts.voiceLengthScale, synth: opts.voiceSynth, onEvent: (l) => say(`  ${l.trim()}`) }));
+    warnings.push(...vo.warnings);
+    s = { ...s, script: vo.script };
+    await writeJson(path.join(dir, "script.json"), ScriptSchema, s.script);
+    await addCost(job.id, { step: "design", provider: "piper (local)", model: vo.voice.piper?.key ?? vo.voice.id, units: { voice_seconds: vo.duration, beats: vo.beats.length }, usd: 0 });
+    say(`  голос ${vo.voice.id} (${vo.voice.license}): ${vo.beats.map((b) => (b.end - b.start).toFixed(1)).join(" + ")} с речи → ролик ${scriptDuration(s.script).toFixed(1)} с`);
+  }
+
   // 3. art director → images → composition (fit in Chrome) → lint
   const projectDir = path.join(dir, "make", "project");
   let usd = s.usd;
@@ -222,6 +249,7 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     say("▸ композиция (простая)…");
     composed = await runStep(job.id, "design", async () => {
       const c = await writeMakeProject(s.script, projectDir, { kicker: topicClean.length <= 48 ? topicClean : s.script.title, style: opts.style });
+      if (vo && opts.voiceCaptions) warnings.push("субтитры озвучки есть только в композиции арт-директора (без --no-director)");
       warnings.push(...(await lintProject(projectDir)));
       return c;
     });
@@ -281,7 +309,7 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
 
     say("▸ композиция…");
     composed = await runStep(job.id, "design", async () => {
-      const c = await writeDirectorProject(s.script, design, images, projectDir);
+      const c = await writeDirectorProject(s.script, design, images, projectDir, { captions: vo && opts.voiceCaptions ? vo.captions : undefined });
       if (c.overflow.length) warnings.push(`текст не влез даже на минимальном размере: ${c.overflow.join(", ")}`);
       warnings.push(...(await lintProject(projectDir)));
       return c;
@@ -315,9 +343,10 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     }
   }
   const cues = opts.sfx === false ? [] : (composed.cues ?? []);
-  const mixed = await mixSoundtrack({ video: rendered, out: output, duration: composed.duration, music: track?.file ?? null, speech: false, sfx: cues });
-  if (track) say(`  музыка: «${track.title}»${track.creator ? ` — ${track.creator}` : ""} (${track.license}, ${track.source}); эффектов ${mixed.cues}`);
-  else say(`  эффектов ${mixed.cues}`);
+  const mixed = await mixSoundtrack({ video: rendered, out: output, duration: composed.duration, music: track?.file ?? null, speech: false, voice: vo?.track ?? null, sfx: cues });
+  const voiceNote = vo ? `; голос ${vo.voice.id} поверх (музыка и эффекты приглушаются под речью)` : "";
+  if (track) say(`  музыка: «${track.title}»${track.creator ? ` — ${track.creator}` : ""} (${track.license}, ${track.source}); эффектов ${mixed.cues}${voiceNote}`);
+  else say(`  эффектов ${mixed.cues}${voiceNote}`);
   // contact sheet: the middle of every scene, for a quick look (and for the bot)
   const timingsFile = path.join(projectDir, "layout.json");
   try {
@@ -351,6 +380,8 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     music: track ? track.file : null,
     music_attribution: track?.attribution ?? "",
     sfx: mixed.cues,
+    voice: vo ? vo.voice.id : null,
+    voice_seconds: vo ? Math.round(vo.beats.reduce((n, b) => n + b.end - b.start, 0) * 10) / 10 : 0,
     usd,
     wall_seconds: (Date.now() - t0) / 1000,
     render_seconds: renderSeconds,

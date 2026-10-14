@@ -526,13 +526,19 @@ program
   .option("--from <job>", "взять сценарий, дизайн и картинки из прошлой задачи make (перерендер)")
   .option("--no-director", "без арт-директора: простая композиция с иконками")
   .option("--no-images", "без генерации картинок")
-  .action(async (topic: string, opts: { lang: string; seconds: number; audience?: string; trends: boolean; music?: string; sfx: boolean; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: boolean }) => {
+  .option("--voice <id>", "озвучка голосом из каталога (vedit voices), например denis; none — без голоса", "none")
+  .option("--voice-captions", "субтитры озвучки поверх сцен (по умолчанию нет: текст уже на экране)")
+  .option("--voice-speed <x>", "темп голоса: 0.8 — быстрее, 1.2 — медленнее", (v) => Number(v))
+  .action(async (topic: string, opts: { lang: string; seconds: number; audience?: string; trends: boolean; music?: string; sfx: boolean; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: boolean; voice: string; voiceCaptions?: boolean; voiceSpeed?: number }) => {
     try {
       if (!["draft", "looks", "delivery"].includes(opts.quality)) throw new Error("--quality: ожидается draft | looks | delivery");
       if (!Number.isFinite(opts.seconds) || opts.seconds < 15 || opts.seconds > 90) throw new Error("--seconds: ожидается 15–90");
+      if (opts.voiceSpeed !== undefined && !(opts.voiceSpeed >= 0.5 && opts.voiceSpeed <= 2)) throw new Error("--voice-speed: ожидается 0.5–2");
+      const { requireVoice, NO_VOICE } = await import("./voice/catalog.ts");
+      if (!NO_VOICE.test(opts.voice)) requireVoice(opts.voice);
       const { make } = await import("./make/index.ts");
-      const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, sfx: opts.sfx, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images, onEvent: (l) => console.log(l) });
-      console.log(`\n✔ ${r.output} (${r.duration.toFixed(1)} с, ${r.beats} битов, рендер ${r.render_seconds.toFixed(0)} с${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""})`);
+      const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, sfx: opts.sfx, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images, voice: opts.voice, voiceCaptions: opts.voiceCaptions, voiceLengthScale: opts.voiceSpeed, onEvent: (l) => console.log(l) });
+      console.log(`\n✔ ${r.output} (${r.duration.toFixed(1)} с, ${r.beats} битов${r.voice ? `, голос ${r.voice}` : ""}, рендер ${r.render_seconds.toFixed(0)} с${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""})`);
       if (r.script.hashtags.length) console.log(`  #${r.script.hashtags.join(" #")}`);
       if (r.music_attribution) console.log(`  ${r.music_attribution}`);
       for (const w of r.warnings) console.log(`  ⚠ ${w}`);
@@ -550,7 +556,7 @@ avatar
   .option("--text-file <file>", "текст из файла")
   .option("--topic <topic>", "тема: монолог напишет Claude")
   .option("--photo <file>", "портрет (фронтально, лицо крупно); без него — сгенерированный вымышленный ведущий")
-  .option("--voice <file>", "образец голоса для клонирования, 5–10 с чистой речи на языке текста")
+  .option("--voice <id|file>", "голос из каталога (vedit voices: denis — синтез локально, chatterbox_denis — клон в Colab) или файл-образец 5–10 с для клонирования")
   .option("--speech <file>", "своя запись речи: без синтеза, аватар говорит ею")
   .option("--lang <code>", "язык речи (Chatterbox: ru, en, tr, de, …)", "ru")
   .option("--seconds <n>", "длина монолога по теме, с", (v) => Number(v), 40)
@@ -563,7 +569,9 @@ avatar
       if ([opts.text, opts.textFile, opts.topic].filter(Boolean).length > 1) throw new Error("укажите что-то одно: --text, --text-file или --topic");
       const text = opts.textFile ? await fs.readFile(path.resolve(opts.textFile), "utf8") : opts.text;
       const { exportAvatarJob, colabSteps } = await import("./avatar/export.ts");
-      const r = await exportAvatarJob({ text, topic: opts.topic, photo: opts.photo, voice: opts.voice, speech: opts.speech, language: opts.lang, seconds: opts.seconds, mode: opts.voiceOnly ? "voice_only" : "avatar", images: opts.images, model: opts.model, onEvent: (l) => console.log(l) });
+      const { getVoice } = await import("./voice/catalog.ts");
+      const voiceId = opts.voice && getVoice(opts.voice) && !(await fs.stat(opts.voice).then(() => true, () => false)) ? opts.voice : undefined;
+      const r = await exportAvatarJob({ text, topic: opts.topic, photo: opts.photo, voice: voiceId ? undefined : opts.voice, voiceId, speech: opts.speech, language: opts.lang, seconds: opts.seconds, mode: opts.voiceOnly ? "voice_only" : "avatar", images: opts.images, model: opts.model, onEvent: (l) => console.log(l) });
       console.log(`\n✔ ${r.bundle} (${(r.bytes / 1024 / 1024).toFixed(1)} МБ)`);
       console.log(`  ${r.state.lines.length} строк, ≈${r.state.estimated_seconds.toFixed(0)} с речи; портрет: ${r.state.portrait}; голос: ${r.state.voice}`);
       for (const [i, l] of r.state.lines.slice(0, 12).entries()) console.log(`  ${String(i + 1).padStart(2)}. ${l}`);
@@ -618,6 +626,42 @@ withRenderOptions(
     fail(err);
   }
 });
+
+program
+  .command("voices")
+  .description("каталог голосов для озвучки (make --voice) и аватара (avatar export --voice)")
+  .option("--json", "вывести JSON")
+  .option("--sample <id>", "синтезировать пробу голоса (Piper, локально) в workspace/_voices/<id>.wav")
+  .option("--text <text>", "текст пробы")
+  .action(async (opts: { json?: boolean; sample?: string; text?: string }) => {
+    try {
+      const { VOICES, formatVoices, requireVoice, isLocal, piperVoiceFor } = await import("./voice/catalog.ts");
+      const { piperStatus, synthesize } = await import("./voice/piper.ts");
+      if (opts.sample) {
+        const v = requireVoice(opts.sample);
+        const p = piperVoiceFor(v);
+        if (!p) throw new Error(`${v.id} звучит только в Colab (встроенный голос Chatterbox); локальная проба невозможна`);
+        const { WORKSPACE_ROOT } = await import("./lib/workspace.ts");
+        const out = path.join(WORKSPACE_ROOT, "_voices", `${v.id}.wav`);
+        const text = opts.text ?? (p.language === "ru" ? "Привет! Это проба голоса. В 2026 году кофе подорожал на 30%." : "Hi! This is a voice sample. Coffee got 30% more expensive in 2026.");
+        const r = await synthesize(text, p.id, out, { onEvent: (l) => console.log(l) });
+        console.log(`✔ ${out} (${r.duration.toFixed(1)} с${p.id !== v.id ? `; тембр-источник клона ${v.id}` : ""})`);
+        for (const x of r.sentences) console.log(`  ${x.start.toFixed(2)}–${x.end.toFixed(2)}  ${x.spoken}`);
+        return;
+      }
+      const st = await piperStatus();
+      if (opts.json) {
+        console.log(JSON.stringify({ piper: st, voices: VOICES.map((v) => ({ ...v, local: isLocal(v), downloaded: !!v.piper && st.models.includes(v.piper.key) })) }, null, 2));
+        return;
+      }
+      console.log(formatVoices());
+      console.log(`\nPiper: ${st.binary ? "установлен" : "скачается при первом синтезе (~22 МБ)"}; скачанные голоса: ${st.models.join(", ") || "нет (каждый ~60 МБ, при первом использовании)"}`);
+      console.log("Свой голос: аватар — vedit avatar export --voice мой_голос.ogg (клон) или --speech запись.ogg; в боте — голосовое сообщение.");
+      console.log('Примеры: vedit make "тема" --voice denis · vedit avatar export --text "…" --voice chatterbox_denis · vedit voices --sample dmitri');
+    } catch (err) {
+      fail(err);
+    }
+  });
 
 program
   .command("modules")

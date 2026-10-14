@@ -27,8 +27,20 @@ export const AvatarScriptSchema = z
     lines: z.array(z.string().min(1).max(600)).max(80),
     /** reference clip for voice cloning, 24 kHz mono WAV, ≤ 12 s */
     voice_ref: z.string().optional(),
-    /** the user's own recording: TTS is skipped, the avatar lip-syncs to it */
+    /** the user's own recording (or speech synthesised locally by Piper): TTS is skipped, the avatar lip-syncs to it */
     speech: z.string().optional(),
+    /** where `speech` came from when vedit synthesised it (a catalogue voice): engine, voice and line timings */
+    speech_meta: z
+      .object({
+        engine: z.string(),
+        voice: z.string(),
+        model: z.string().default(""),
+        license: z.string().default(""),
+        lines: z.array(z.object({ i: z.number().int(), text: z.string(), start: z.number(), end: z.number() })).default([]),
+      })
+      .optional(),
+    /** catalogue voice id the bundle was made with (vedit voices), for the notebook's log */
+    voice_id: z.string().optional(),
     portrait: z.string().default("portrait.png"),
     mode: AvatarModeSchema.default("avatar"),
     tts: z
@@ -80,7 +92,10 @@ export const AvatarStateSchema = z.object({
   hashtags: z.array(z.string()).default([]),
   mode: AvatarModeSchema,
   portrait: z.enum(["photo", "generated", "none"]),
-  voice: z.enum(["default", "clone", "own-recording"]),
+  /** default = Chatterbox's built-in voice; clone = a reference clip (the user's or a catalogue preset's); library = speech synthesised locally (Piper) */
+  voice: z.enum(["default", "clone", "own-recording", "library"]),
+  /** catalogue voice id (vedit voices), when one was chosen */
+  voice_id: z.string().optional(),
   bundle: z.string(),
   bundle_bytes: z.number(),
   /** estimated speech length, s (≈ 14 characters per second) */

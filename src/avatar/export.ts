@@ -10,6 +10,8 @@ import { createJob, exists, jobDir, writeJson } from "../lib/workspace.ts";
 import { writeZip, type ZipInput } from "../lib/zip.ts";
 import { ANIMATE_DEFAULTS, AvatarScriptSchema, AvatarStateSchema, TTS_DEFAULTS, TTS_LANGUAGES, type AvatarMode, type AvatarScript, type AvatarState } from "./schema.ts";
 import { classifyAvatarInput, estimateSeconds, linesFromText, writeMonologue } from "./script.ts";
+import { getVoice, languageCode, requireVoice, type VoiceDef } from "../voice/catalog.ts";
+import { synthesize, type SentenceSynth } from "../voice/piper.ts";
 
 /**
  * `vedit avatar export` / Telegram /avatar: everything the Colab notebook needs in one avatar_job.zip
@@ -26,6 +28,11 @@ export const NOTEBOOK_NAME = "colab_vedit_avatar.ipynb";
 export const PORTRAIT_MAX = 1280;
 /** voice reference: Chatterbox conditions on ≤ 10 s; a little more leaves room for trimmed silence */
 export const VOICE_REF_SECONDS = 12;
+/** what a Piper voice reads to become a Chatterbox cloning reference (~8–10 s of calm speech) */
+export const REF_TEXT: Record<string, string> = {
+  ru: "Привет! Сегодня я коротко расскажу, как это устроено и почему это важно. Без воды, только главное, так что оставайтесь со мной до конца.",
+  en: "Hi! Today I will briefly explain how this works and why it matters. No fluff, only the essentials, so stay with me until the end.",
+};
 
 export interface AvatarExportOptions {
   /** the words, as written by the user */
@@ -39,6 +46,11 @@ export interface AvatarExportOptions {
   voice?: string;
   /** the user's own narration: TTS is skipped */
   speech?: string;
+  /** a catalogue voice (vedit voices): Piper voices are synthesised here into speech_in.wav (Colab only animates);
+   *  Chatterbox presets add a Piper-made voice_ref.wav. The user's own --voice / --speech win over it. */
+  voiceId?: string;
+  /** test hook: replaces the Piper call */
+  voiceSynth?: SentenceSynth;
   language?: string;
   /** monologue length for a topic, s */
   seconds?: number;
@@ -110,7 +122,9 @@ export async function exportAvatarJob(o: AvatarExportOptions): Promise<AvatarExp
     else text = c.value;
   }
   if (!text && !topic && !o.speech) throw new Error("нужен текст (--text), тема (--topic) или своя запись речи (--speech)");
-  if (!o.speech && !(TTS_LANGUAGES as readonly string[]).includes(language)) {
+  const catalogVoice: VoiceDef | undefined = o.voiceId && !o.speech && !o.voice ? requireVoice(o.voiceId) : undefined;
+  const localSpeech = catalogVoice?.engine === "piper";
+  if (!o.speech && !localSpeech && !(TTS_LANGUAGES as readonly string[]).includes(language)) {
     throw new Error(`синтез речи не знает язык «${language}» (поддержаны: ${TTS_LANGUAGES.join(", ")}). Запишите голос сами и передайте --speech файл`);
   }
   if (mode === "avatar" && !o.photo && o.images === false && !o.generatePortrait) throw new Error("нужен портрет: --photo фото.jpg (генерация выключена --no-images)");
@@ -169,6 +183,7 @@ export async function exportAvatarJob(o: AvatarExportOptions): Promise<AvatarExp
   let voice: AvatarState["voice"] = "default";
   let voiceRef: string | undefined;
   let speech: string | undefined;
+  let speechMeta: AvatarScript["speech_meta"];
   if (o.speech) {
     const d = await prepareAudio(o.speech, path.join(stage, "speech_in.wav"));
     speech = "speech_in.wav";
@@ -180,6 +195,31 @@ export async function exportAvatarJob(o: AvatarExportOptions): Promise<AvatarExp
     voice = "clone";
     if (d < 5) warnings.push(`образец голоса всего ${d.toFixed(1)} с — клон будет неточным, лучше 5–10 с чистой речи`);
     warnings.push("образец голоса должен быть на том же языке, что и текст (иначе появится акцент)");
+  } else if (catalogVoice?.engine === "piper") {
+    // the whole speech is made here, on the CPU: the notebook skips Chatterbox entirely
+    if (!lines.length) throw new Error("нечего озвучивать: нет текста");
+    if (catalogVoice.language !== languageCode(language)) warnings.push(`голос ${catalogVoice.id} говорит на «${catalogVoice.language}», а текст на «${language}» — будет акцент`);
+    say(`▸ речь локально (Piper, ${catalogVoice.id})…`);
+    const raw = path.join(stage, "piper_speech.wav");
+    const r = await synthesize(lines, catalogVoice.id, raw, { synth: o.voiceSynth, onEvent: (l) => say(`  ${l.trim()}`) });
+    await ffmpeg(["-i", raw, "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", path.join(stage, "speech_in.wav")]);
+    await fs.rm(raw, { force: true });
+    speech = "speech_in.wav";
+    voice = "library";
+    speechMeta = { engine: "piper", voice: catalogVoice.id, model: catalogVoice.piper?.key ?? "", license: catalogVoice.license, lines: r.lines };
+    await addCost(job.id, { step: "design", provider: "piper (local)", model: catalogVoice.piper?.key ?? catalogVoice.id, units: { voice_seconds: r.duration }, usd: 0 });
+  } else if (catalogVoice?.refFrom) {
+    // a Chatterbox clone preset: Piper reads a neutral paragraph, Chatterbox clones that timbre in Colab
+    const src = getVoice(catalogVoice.refFrom);
+    if (!src) throw new Error(`голос ${catalogVoice.id}: нет источника ${catalogVoice.refFrom}`);
+    say(`▸ образец голоса ${src.id} для клона (Piper)…`);
+    const raw = path.join(stage, "piper_ref.wav");
+    await synthesize(REF_TEXT[src.language] ?? REF_TEXT.en, src.id, raw, { synth: o.voiceSynth, onEvent: (l) => say(`  ${l.trim()}`) });
+    await prepareAudio(raw, path.join(stage, "voice_ref.wav"), VOICE_REF_SECONDS);
+    await fs.rm(raw, { force: true });
+    voiceRef = "voice_ref.wav";
+    voice = "clone";
+    if (src.language !== languageCode(language)) warnings.push(`образец ${src.id} на «${src.language}», текст на «${language}» — будет акцент`);
   }
 
   const script = AvatarScriptSchema.parse({
@@ -190,6 +230,8 @@ export async function exportAvatarJob(o: AvatarExportOptions): Promise<AvatarExp
     lines,
     ...(voiceRef ? { voice_ref: voiceRef } : {}),
     ...(speech ? { speech } : {}),
+    ...(speechMeta ? { speech_meta: speechMeta } : {}),
+    ...(catalogVoice ? { voice_id: catalogVoice.id } : {}),
     portrait: "portrait.png",
     mode,
     tts: TTS_DEFAULTS,
@@ -218,6 +260,7 @@ export async function exportAvatarJob(o: AvatarExportOptions): Promise<AvatarExp
     mode,
     portrait,
     voice,
+    ...(catalogVoice ? { voice_id: catalogVoice.id } : {}),
     bundle,
     bundle_bytes: bytes,
     estimated_seconds: lines.length ? estimateSeconds(lines) : 0,

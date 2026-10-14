@@ -11,7 +11,10 @@ export const BeatSchema = z.object({
   text: z.string().min(1).max(140),
   emphasis: z.string().default(""),
   icon: z.string().default("sparkles"),
-  seconds: z.number().min(2).max(10).default(4),
+  /** voice-stretched beats (make --voice) may run longer than a read-only beat */
+  seconds: z.number().min(2).max(15).default(4),
+  /** what the narrator says on this beat (make --voice): 1–2 short spoken sentences; empty = the on-screen text */
+  voiceover: z.string().max(300).optional(),
 });
 export const ScriptSchema = z.object({
   title: z.string().min(1).max(60),
@@ -26,7 +29,7 @@ export type Beat = z.infer<typeof BeatSchema>;
 const ScriptOutSchema = z.object({
   title: z.string(),
   language: z.string(),
-  beats: z.array(z.object({ text: z.string(), emphasis: z.string(), icon: z.string(), seconds: z.number() })),
+  beats: z.array(z.object({ text: z.string(), emphasis: z.string(), icon: z.string(), seconds: z.number(), voiceover: z.string().optional() })),
   hashtags: z.array(z.string()),
 });
 
@@ -72,7 +75,8 @@ export async function normalizeScript(raw: unknown, opts: ScriptOptions = {}): P
     const text = b.text.replace(/\s+/g, " ").trim();
     if (!text) continue;
     const emphasis = text.toLowerCase().includes(b.emphasis.trim().toLowerCase()) && b.emphasis.trim() ? b.emphasis.trim() : "";
-    beats.push({ text, emphasis, icon: await resolveIcon(b.icon), seconds: beatSeconds(text, b.seconds) });
+    const voiceover = (b.voiceover ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
+    beats.push({ text, emphasis, icon: await resolveIcon(b.icon), seconds: beatSeconds(text, b.seconds), ...(voiceover ? { voiceover } : {}) });
   }
   return ScriptSchema.parse({
     title: out.title.replace(/\s+/g, " ").trim().slice(0, 60),
