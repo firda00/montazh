@@ -142,9 +142,10 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
           // the mix normalises in one pass (dynamic loudnorm lands within ~1 LU): a linear trim brings a planned mix to the target
           if (plan) {
             const m = await measureLoudness(fin.output);
-            if (Number.isFinite(m.input_i) && Math.abs(m.input_i + 14) > 0.3) {
+            // always through the limiter: the one-pass mix can leave true peaks above 0 dBFS even when the level is right
+            if (Number.isFinite(m.input_i)) {
               const trimmed = fin.output.replace(/\.mp4$/i, ".trim.mp4");
-              await ffmpeg(["-i", fin.output, "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-af", `volume=${(-14 - m.input_i).toFixed(2)}dB,alimiter=limit=0.79:level=false`, "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", trimmed]);
+              await ffmpeg(["-i", fin.output, "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-af", `volume=${(-14 - m.input_i).toFixed(2)}dB,alimiter=limit=0.71:level=false`, "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", trimmed]);
               await fs.rename(trimmed, fin.output);
             }
           }

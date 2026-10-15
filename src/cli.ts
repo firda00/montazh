@@ -295,6 +295,7 @@ withRenderOptions(
 
 interface HighlightsCliOpts extends RenderCliOpts {
   prompt?: string;
+  perPerson?: boolean;
   target?: number;
   editor: boolean;
   render: boolean;
@@ -333,6 +334,21 @@ async function highlightsPipeline(jobId: string, media: import("./schemas/index.
       console.log("  (нет входа Claude — титр и порядок по правилам)");
     }
   }
+  const { perPersonIntent } = await import("./highlights/intent.ts");
+  if (opts.perPerson || perPersonIntent(opts.prompt)) {
+    const { planPerPerson, whoIsWhoSheet } = await import("./highlights/perperson.ts");
+    console.log("▸ understand + plan: события, броски по кадрам, кто бросал (Gemini + цвет одежды), ролик на каждого");
+    const r = await runStep(jobId, "plan", () => planPerPerson(jobId, media, { instruction: opts.prompt, llm, music: opts.bgMusic, onLog: (l) => console.log(`    ${l}`) }));
+    for (const x of r.report.reels) console.log(`  ${x.id} «${x.title}»: ${x.look}; попаданий ${x.makes_in_reel}/${x.makes}${x.misses_in_reel ? ` + ${x.misses_in_reel} у дужки` : ""}, ${x.duration.toFixed(1)} с`);
+    for (const x of r.report.skipped) console.log(`  – ${x.person} (${x.look}): ${x.why}`);
+    for (const n of r.report.notes) console.log(`  ⚠ ${n}`);
+    const sheet = await whoIsWhoSheet(media.source_path, r.players, path.join(jobDir(jobId), "persons.jpg"), { persons: r.report.reels.map((x) => x.person) }).catch((err) => `(лист не собран: ${err instanceof Error ? err.message.split("\n")[0] : err})`);
+    console.log(`  кто есть кто: ${sheet}`);
+    console.log("▸ cut");
+    printCutReport(await runStep(jobId, "cut", () => cut(jobId, r.edl, media, { snap: false })));
+    if (opts.render) await runRender(jobId, { ...opts, design: opts.design ?? "sport_highlights", bgMusic: undefined }, r.edl);
+    return;
+  }
   console.log("▸ understand + plan: события (Gemini), уточнение бросков по кадрам, отбор, музыка");
   const r = await runStep(jobId, "plan", () => planHighlights(jobId, media, { instruction: opts.prompt, target: opts.target, llm, music: opts.bgMusic, onLog: (l) => console.log(`    ${l}`) }));
   printHighlights(r.report);
@@ -351,6 +367,7 @@ withRenderOptions(
     .option("-p, --prompt <text>", "инструкция (длина, формат, титр в «кавычках»)")
     .option("--target <s>", "длина ролика, с", (v) => Number(v))
     .option("--no-editor", "без вызова Claude")
+    .option("--per-person", "отдельный ролик на каждого игрока (так же по словам «по отдельности», «на каждого игрока»)")
     .option("--no-render", "остановиться после черновой нарезки"),
 ).action(async (target: string, opts: HighlightsCliOpts) => {
   try {

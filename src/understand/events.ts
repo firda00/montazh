@@ -24,7 +24,7 @@ export const EVENT_TYPES = ["shot_make", "shot_miss", "dunk_layup", "nice_pass",
 export type EventType = (typeof EVENT_TYPES)[number];
 
 /** Preferred models, newest flash first; unavailable ones are skipped (VEDIT_EVENTS_MODEL overrides with a comma list). */
-export const DEFAULT_EVENT_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest"];
+export const DEFAULT_EVENT_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3-flash-preview", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
 
 export const SportEventSchema = z.object({
   id: z.string(),
@@ -77,6 +77,8 @@ export const EventsFileSchema = z.object({
   models: z.array(z.string()),
   /** which passes ran over the chunks ("main", "social") */
   passes: z.array(z.string()).default(["main"]),
+  /** chunks whose people pass failed (quota): the next run asks again */
+  social_missing: z.array(z.number().int()).default([]),
   chunks: z.array(z.object({ index: z.number().int(), start: z.number(), end: z.number(), hash: z.string(), model: z.string(), events: z.number().int(), cached: z.boolean(), input_tokens: z.number(), output_tokens: z.number() })),
   hoops: z.array(HoopSampleSchema),
   events: z.array(SportEventSchema),
@@ -272,7 +274,7 @@ export interface DetectEventsOptions {
   to?: number;
 }
 
-function sha(...parts: (string | number)[]) {
+export function sha(...parts: (string | number)[]) {
   const h = createHash("sha256");
   for (const p of parts) h.update(String(p)).update("\0");
   return h.digest("hex").slice(0, 16);
@@ -342,6 +344,7 @@ export async function detectEvents(jobId: string, source: string, duration: numb
     ...(opts.social === false ? [] : [{ name: "social", prompt: "events.social.user", fps: 0.5, version: sha(loadPrompt("events.gemini.system"), loadPrompt("events.social.user"), JSON.stringify(EVENTS_RESPONSE_SCHEMA)) }]),
   ];
   const socialEvents: SportEvent[] = [];
+  const socialMissing: number[] = [];
   for (const chunk of chunks) {
     // one upload per chunk, shared by the passes that are not cached yet
     let clip: string | null = null;
@@ -381,6 +384,7 @@ export async function detectEvents(jobId: string, source: string, duration: numb
         } catch (err) {
           // the people pass is a bonus: without it the edit just has fewer story beats
           if (pass.name === "main") throw err;
+          socialMissing.push(chunk.index);
           warnings.push(`чанк ${chunk.index} (люди): ${err instanceof Error ? err.message.split("\n")[0].slice(0, 160) : err}`);
         }
       }
@@ -454,6 +458,7 @@ export async function detectEvents(jobId: string, source: string, duration: numb
     sport,
     models,
     passes: passes.map((p) => p.name),
+    social_missing: socialMissing,
     chunks: records,
     hoops,
     events,

@@ -61,7 +61,7 @@ export interface HighlightsOptions {
 export async function ensureEvents(jobId: string, media: Media, o: HighlightsOptions = {}): Promise<EventsFile> {
   const have = await loadEvents(jobId);
   const wantSocial = o.events?.social !== false;
-  if (have && have.source === path.resolve(media.source_path) && have.chunks.length && (!wantSocial || have.passes.includes("social"))) return have;
+  if (have && have.source === path.resolve(media.source_path) && have.chunks.length && (!wantSocial || (have.passes.includes("social") && !have.social_missing.length && !have.warnings.some((w) => w.includes("(люди)"))))) return have;
   return detectEvents(jobId, media.source_path, media.duration, { sport: sportOf(o.instruction), onLog: o.onLog, ...o.events });
 }
 
@@ -74,7 +74,7 @@ export function defaultTitle(sport: string, instruction?: string): string {
 }
 
 /** Music start: the beat nearest to ~15 % into the track (past a quiet intro), at most 30 s. */
-async function chooseMusic(jobId: string, want: string, seconds: number): Promise<{ track: MusicTrack; offset: number; grid: BeatGrid | null } | null> {
+export async function chooseMusic(jobId: string, want: string, seconds: number, seed = jobId): Promise<{ track: MusicTrack; offset: number; grid: BeatGrid | null } | null> {
   let track: MusicTrack | null;
   if (want === "none") return null;
   if (want !== "auto" && !isMood(want)) {
@@ -83,7 +83,7 @@ async function chooseMusic(jobId: string, want: string, seconds: number): Promis
   } else {
     // cuts sit on the beat grid: the track must cover the whole edit (a loop seam would break it)
     const mood = want === "auto" ? "sport" : want;
-    track = (await pickMusic(mood, jobId, { minSeconds: Math.ceil(seconds), strictLength: true })) ?? (await pickMusic(mood, jobId, { minSeconds: 60 }));
+    track = (await pickMusic(mood, seed, { minSeconds: Math.ceil(seconds), strictLength: true })) ?? (await pickMusic(mood, seed, { minSeconds: 60 }));
   }
   if (!track) return null;
   const dur = Number((await ffprobe(track.file)).format.duration) || 0;
@@ -120,7 +120,7 @@ export function isJunkText(text: string): boolean {
 const TURKIC_CONFUSIONS = ["tr", "az", "kk", "ky", "tk", "ug", "tt", "ba"];
 
 /** Whisper on the clips where people talk → transcript.json in source time (captions only there). */
-async function transcribeSpeech(jobId: string, media: Media, ranges: { start: number; end: number }[], log: (l: string) => void): Promise<Transcript> {
+export async function transcribeSpeech(jobId: string, media: Media, ranges: { start: number; end: number }[], log: (l: string) => void): Promise<Transcript> {
   const dir = jobDir(jobId);
   const segments: Transcript["segments"] = [];
   let language = "ru";

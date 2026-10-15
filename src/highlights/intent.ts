@@ -65,3 +65,8 @@ export function parseHighlightsBrief(instruction: string | undefined): Highlight
   if (q) out.title = q[1].trim();
   return out;
 }
+
+/** "по отдельности", "на каждого игрока", "каждого человека", "отдельные ролики": one reel per person. */
+export function perPersonIntent(instruction: string | undefined): boolean {
+  return /по\s+отдельност|на\s+каждого|каждого\s+(игрока|человека|участника)|отдельн\w*\s+(ролик|нарезк|видео)|each\s+player|per\s+person|har\s+bir\s+o.yinchi/i.test(instruction ?? "");
+}

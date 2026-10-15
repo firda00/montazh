@@ -98,7 +98,10 @@ export function estimateSeconds(p: Pick<HighlightPick, "role" | "replay" | "even
     return 1.5 + s + 0.6 + (p.replay ? (T + 0.4 - (K - 0.45)) / slow : 0);
   }
   if (p.role === "social") return Math.min(7, p.event.end - p.event.start);
-  return Math.min(3.2, p.event.end - p.event.start);
+  // the same window buildHighlightEdl cuts for a miss / moment
+  const K = p.event.refined?.motion_t ?? p.event.key;
+  const s0 = Math.max(p.event.start, K - 1.8);
+  return Math.max(Math.min(p.event.end + 0.5, K + 1.2), s0 + 1.5) - s0;
 }
 
 const overlaps = (a: SportEvent, b: SportEvent, pad = 1) => a.start - pad < b.end && b.start - pad < a.end;
@@ -195,6 +198,10 @@ export interface HighlightEdlOptions extends HighlightOptions {
   title?: string;
   /** music already chosen (beats come from it) */
   music?: { file: string; offset: number };
+  /** output id (per-person reels: reel_p1 …) */
+  id?: string;
+  /** seconds of reaction after the last make (default 0.6 like every make) */
+  closingTail?: number;
 }
 
 export interface HighlightEdl {
@@ -276,7 +283,8 @@ export function buildHighlightEdl(picks: HighlightPick[], o: HighlightEdlOptions
       if (idx === 0 || p.replay) sfx.push({ t: impact, kind: "impact", gain: -6 });
       void slowLenOut;
       // tail: reaction, zoom easing back; the cut lands on a beat when one is near
-      let tail = 0.6;
+      // the last make of a reel holds the reaction longer: the closing beat
+      let tail = idx === picks.length - 1 && o.closingTail ? o.closingTail : 0.6;
       if (beats.length) {
         const end = cursor + Math.ceil(tail * TARGET_FPS - 1e-6) / TARGET_FPS;
         const b = nearestBeat(beats, end, 0.15);
@@ -310,7 +318,7 @@ export function buildHighlightEdl(picks: HighlightPick[], o: HighlightEdlOptions
   const title = (o.title ?? "").trim();
   if (title) titles.unshift({ at: 0.15, duration: 2.4, text: title, style: "hero" });
   const output: Output = {
-    id: "highlights",
+    id: o.id ?? "highlights",
     aspect,
     target_duration: o.target ?? 50,
     clips,

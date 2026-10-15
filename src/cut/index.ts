@@ -250,7 +250,7 @@ export async function cut(jobId: string, edl: Edl, media: Media, opts: CutOption
     });
     const outPath = path.join(dir, `rough_${output.id}.mp4`);
     try {
-      await ffmpeg(buildCutArgs(output, clips, media, outPath, focuses));
+      await ffmpeg(await viaScript(buildCutArgs(output, clips, media, outPath, focuses), path.join(dir, `cut_${output.id}.filter.txt`)));
       const probe = await ffprobe(outPath);
       report.outputs.push({
         id: output.id,
@@ -286,4 +286,16 @@ export async function cut(jobId: string, edl: Edl, media: Media, opts: CutOption
     throw new Error(`all outputs failed:\n${report.outputs.filter((o) => o.status === "failed").map((o) => `  ${o.id}: ${o.error}`).join("\n")}`);
   }
   return { ...report, partial: failed > 0 };
+}
+
+/**
+ * Windows limits a command line to 32k characters: a long reel (50+ clips with zoom expressions) does not
+ * fit. Above 8k characters the filter graph goes to a file (`-/filter_complex <file>`, ffmpeg ≥ 7).
+ */
+export async function viaScript(args: string[], file: string): Promise<string[]> {
+  const i = args.indexOf("-filter_complex");
+  if (i < 0 || args.join(" ").length < 8000) return args;
+  const fs = await import("node:fs/promises");
+  await fs.writeFile(file, args[i + 1]);
+  return [...args.slice(0, i), "-/filter_complex", file, ...args.slice(i + 2)];
 }

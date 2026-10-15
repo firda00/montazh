@@ -199,6 +199,7 @@ export const MODULES: ModuleDef[] = [
       { id: "gemini-events", title: "Gemini API: видео со звуком 480p, 2 кадра/с, media_resolution low; кэш workspace/_cache/events", deps: "GEMINI_API_KEY; модели gemini-3.8-flash → 3.6-flash → 3.7-flash → 3.5-flash → flash-latest", license: "условия Gemini API (бесплатный уровень: данные могут использоваться Google)" },
       { id: "local-refine", title: "Трек мяча у кольца (фон-медиана, коричневые пятна размера мяча) + онсет звука", deps: "ffmpeg (raw-кадры ROI, f32 PCM)", license: "свой код" },
       { id: "beats", title: "Сетка битов музыки (автокорреляция онсетов)", deps: "ffmpeg", license: "свой код" },
+      { id: "players", title: "--per-person: кто бросал — проход «игроки» Gemini по чанкам + мяч назад к рукам (findShooter) + правки players.fix.json; ролик на каждого", deps: "GEMINI_API_KEY; ffmpeg", license: "условия Gemini API; свой код" },
     ],
     job: (j) => j.preset === "sport_highlights",
     cost: (e) => e.provider === "gemini-events",

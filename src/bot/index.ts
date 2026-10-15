@@ -404,6 +404,21 @@ async function runHighlightsBot(a: Pick<PipelineArgs, "source" | "instruction" |
   try {
     llm = selectStructuredLlm();
   } catch {}
+  // "по отдельности", "на каждого игрока": one reel per person, all sent
+  const { perPersonIntent } = await import("../highlights/intent.ts");
+  if (perPersonIntent(a.instruction)) {
+    const { planPerPerson } = await import("../highlights/perperson.ts");
+    await a.progress("▸ разбираю, кто бросал: отдельный ролик на каждого игрока…");
+    const pp = await runStep(jobId, "plan", () => planPerPerson(jobId!, media!, { instruction: a.instruction, llm, onLog: (l) => a.log(`  ${l}`) }));
+    await a.progress(`▸ роликов: ${pp.report.reels.length} — ${pp.report.reels.map((x) => `«${x.title}» (${x.makes_in_reel} попаданий, ${x.duration.toFixed(0)} с)`).join("; ")}`);
+    checkCancel(a.signal);
+    const cr = await runStep(jobId, "cut", () => cut(jobId!, pp.edl, media!, { snap: false }));
+    const failedPP = cr.outputs.filter((o) => o.status !== "ok").map((o) => ({ id: o.id, error: o.error ?? "ошибка нарезки" }));
+    const okPP = cr.outputs.filter((o) => o.status === "ok").map((o) => o.id);
+    const rendered = okPP.length ? await renderIds(jobId, okPP, pp.edl, a.progress, a.log) : { outputs: [], failed: [] };
+    const credits = [...new Set(pp.report.reels.map((x) => x.music_attribution).filter(Boolean))].join("\n");
+    return { jobId, outputs: rendered.outputs, failed: [...failedPP, ...rendered.failed], reasoning: `${pp.edl.reasoning}${credits ? `\n${credits}` : ""}`, notes: pp.report.notes.slice(0, 3) };
+  }
   const r = await runStep(jobId, "plan", () => planHighlights(jobId!, media!, { instruction: a.instruction, llm, onLog: (l) => a.log(`  ${l}`) }));
   const e = r.report.events;
   await a.progress(`▸ попаданий ${e.makes} из ${e.shots} бросков; в ролике ${r.report.timeline.length} момент(ов), ${r.report.duration.toFixed(0)} с${r.report.music ? `, музыка «${r.report.music.title}»` : ""}`);
