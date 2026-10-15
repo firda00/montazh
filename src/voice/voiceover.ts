@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Script } from "../make/script.ts";
-import { getVoice, languageCode, piperVoiceFor, requireVoice, VOICES, type VoiceDef } from "./catalog.ts";
+import { AUTO_VOICE, autoVoice, getVoice, languageCode, piperVoiceFor, requireVoice, VOICES, type VoiceDef } from "./catalog.ts";
+import { geminiApiKey, NARRATOR_STYLE, type GeminiTtsOptions } from "./gemini.ts";
+import { cloudApiKey, type CloudTtsOptions } from "./cloudtts.ts";
 import { concatPcm, synthesize, writeWav, type PcmClip, type SentenceSynth, type SynthResult } from "./piper.ts";
 import { normalizeForTts } from "./normalize.ts";
 
@@ -35,7 +37,11 @@ export interface SpokenWord {
 }
 
 export interface VoiceoverResult {
+  /** the voice that actually spoke (a Gemini voice without a key → its Piper fallback) */
   voice: VoiceDef;
+  engine: "piper" | "gemini" | "cloud";
+  /** gemini/cloud: the model that answered */
+  model?: string;
   script: Script;
   /** the voice on the video timeline (WAV, starts at 0, as long as the video) */
   track: string;
@@ -156,10 +162,27 @@ export function speechWords(sentences: { line: number; text: string; start: numb
   return out;
 }
 
+/** Paid-tier price of a narration (free tiers make it $0 in practice): Gemini API 3.8 Flash TTS ≈ 32 audio tokens/s × $9/1M;
+ *  Cloud Gemini-TTS 2.5 Flash 25 tokens/s × $10/1M; Chirp 3: HD $30 / 1M characters (first 1M a month free). */
+export function ttsUsd(engine: string, model: string | undefined, speechSeconds: number, chars: number): number {
+  const usd = engine === "gemini" ? speechSeconds * 32 * 9e-6 : model === "chirp3-hd" ? chars * 30e-6 : speechSeconds * 25 * (/pro/.test(model ?? "") ? 20e-6 : 10e-6);
+  return Math.round(usd * 1e4) / 1e4;
+}
+
+/** Gemini style for the narration: the narrator style plus a pace hint from --voice-speed (Piper length_scale semantics). */
+export function geminiStyle(lengthScale?: number): string {
+  const base = process.env.VEDIT_GEMINI_TTS_STYLE || NARRATOR_STYLE;
+  if (lengthScale === undefined || Math.abs(lengthScale - 1) < 0.05) return base;
+  return `${base}; ${lengthScale < 1 ? "noticeably faster pace than usual" : "slower, unhurried pace"}`;
+}
+
 /** A catalogue voice usable locally for `make`: Piper as is; a Chatterbox preset falls back to its Piper source or the language default. */
-export function resolveMakeVoice(id: string, language: string): { voice: VoiceDef; warning?: string } {
+export function resolveMakeVoice(id: string, language: string, hasGoogleKey = !!(geminiApiKey() || cloudApiKey())): { voice: VoiceDef; warning?: string } {
+  if (AUTO_VOICE.test(id.trim())) return { voice: autoVoice(language, hasGoogleKey) };
   const v = requireVoice(id);
   const code = languageCode(language);
+  // Gemini voices speak the language of the text (Russian, English, Uzbek… detected automatically)
+  if (v.engine === "gemini" || v.engine === "chirp3") return { voice: v };
   if (v.engine === "piper") return { voice: v, warning: v.language !== code ? `голос ${v.id} говорит на «${v.language}», а ролик на «${language}» — будет акцент` : undefined };
   const p = piperVoiceFor(v) ?? VOICES.find((x) => x.engine === "piper" && x.language === code) ?? getVoice("denis")!;
   return { voice: p, warning: `голос ${v.id} работает только в аватаре (Colab); для ролика взят локальный ${p.id}` };
@@ -171,6 +194,10 @@ export interface VoiceoverOptions {
   /** false: Piper's flat defaults (no noise tweaks, no per-sentence variation) */
   lively?: boolean;
   synth?: SentenceSynth;
+  /** Gemini engine: style / test hooks */
+  gemini?: GeminiTtsOptions;
+  /** Cloud TTS engine: key / test hooks */
+  cloud?: CloudTtsOptions;
   onEvent?: (l: string) => void;
 }
 
@@ -186,8 +213,13 @@ export async function makeVoiceover(script: Script, voiceId: string, dir: string
     lengthScale: o.lengthScale ?? NARRATION.lengthScale,
     ...(lively ? { noiseScale: NARRATION.noiseScale, noiseW: NARRATION.noiseW, vary: true, sentencePauseMs: NARRATION.sentencePauseMs } : {}),
     synth: o.synth,
+    gemini: { ...o.gemini, style: o.gemini?.style ?? geminiStyle(o.lengthScale) },
+    // Chirp 3 HD has no style prompt, only pace: a touch brisker than 1.0 for narration (or 1 / --voice-speed)
+    cloud: { ...o.cloud, speakingRate: o.cloud?.speakingRate ?? (o.lengthScale ? Math.round((1 / o.lengthScale) * 100) / 100 : 1.05) },
     onEvent: o.onEvent,
   });
+  warnings.push(...synth.warnings);
+  const spoke = getVoice(synth.voice) ?? voice;
   const speech = synth.clips.map((c) => c.pcm.length / c.rate);
   const fitted = fitBeatsToSpeech(script, speech);
   const long = speech.map((s, i) => (VOICE_LEAD + s + VOICE_TAIL > BEAT_MAX ? i : -1)).filter((i) => i >= 0);
@@ -199,7 +231,7 @@ export async function makeVoiceover(script: Script, voiceId: string, dir: string
   await writeWav(track, laid.pcm, laid.rate);
   const beats = synth.clips.map((c, i) => ({ beat: i, start: r3(laid.at[i]), end: r3(laid.at[i] + c.pcm.length / c.rate), text: lines[i] }));
   const captions = captionCues(synth.sentences, synth.lines.map((l) => l.start), laid.at);
-  const words = speechWords(synth.sentences, synth.lines.map((l) => l.start), laid.at, voice.language);
-  await fs.writeFile(path.join(dir, "voice.json"), JSON.stringify({ voice: voice.id, license: voice.license, engine: voice.engine, duration: r3(duration), beats, sentences: synth.sentences, captions, words, warnings }, null, 1));
-  return { voice, script: fitted, track, duration: r3(duration), beats, captions, words, warnings };
+  const words = speechWords(synth.sentences, synth.lines.map((l) => l.start), laid.at, spoke.language);
+  await fs.writeFile(path.join(dir, "voice.json"), JSON.stringify({ voice: spoke.id, license: spoke.license, engine: synth.engine, model: synth.model, duration: r3(duration), beats, sentences: synth.sentences, captions, words, warnings }, null, 1));
+  return { voice: spoke, engine: synth.engine, model: synth.model, script: fitted, track, duration: r3(duration), beats, captions, words, warnings };
 }

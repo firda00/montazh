@@ -10,8 +10,11 @@ import { createJob, exists, jobDir, writeJson } from "../lib/workspace.ts";
 import { writeZip, type ZipInput } from "../lib/zip.ts";
 import { ANIMATE_DEFAULTS, AvatarScriptSchema, AvatarStateSchema, TTS_DEFAULTS, TTS_LANGUAGES, type AvatarMode, type AvatarScript, type AvatarState } from "./schema.ts";
 import { classifyAvatarInput, estimateSeconds, linesFromText, writeMonologue } from "./script.ts";
-import { getVoice, languageCode, requireVoice, type VoiceDef } from "../voice/catalog.ts";
+import { DEFAULT_GEMINI_VOICE, getVoice, languageCode, requireVoice, type VoiceDef } from "../voice/catalog.ts";
 import { synthesize, type SentenceSynth } from "../voice/piper.ts";
+import { ttsUsd } from "../voice/voiceover.ts";
+import { geminiApiKey } from "../voice/gemini.ts";
+import { cloudApiKey } from "../voice/cloudtts.ts";
 
 /**
  * `vedit avatar export` / Telegram /avatar: everything the Colab notebook needs in one avatar_job.zip
@@ -122,8 +125,11 @@ export async function exportAvatarJob(o: AvatarExportOptions): Promise<AvatarExp
     else text = c.value;
   }
   if (!text && !topic && !o.speech) throw new Error("нужен текст (--text), тема (--topic) или своя запись речи (--speech)");
-  const catalogVoice: VoiceDef | undefined = o.voiceId && !o.speech && !o.voice ? requireVoice(o.voiceId) : undefined;
-  const localSpeech = catalogVoice?.engine === "piper";
+  // no voice given: Gemini Charon when a Google TTS key exists (speech made here, Colab only animates), else Chatterbox in Colab
+  const voiceId = o.voiceId ?? (!o.speech && !o.voice && (geminiApiKey() || cloudApiKey()) ? DEFAULT_GEMINI_VOICE : undefined);
+  const catalogVoice: VoiceDef | undefined = voiceId && !o.speech && !o.voice ? requireVoice(voiceId) : undefined;
+  // Piper and Gemini voices are spoken here (Gemini without a key falls back to its Piper voice inside synthesize)
+  const localSpeech = catalogVoice?.engine === "piper" || catalogVoice?.engine === "gemini" || catalogVoice?.engine === "chirp3";
   if (!o.speech && !localSpeech && !(TTS_LANGUAGES as readonly string[]).includes(language)) {
     throw new Error(`синтез речи не знает язык «${language}» (поддержаны: ${TTS_LANGUAGES.join(", ")}). Запишите голос сами и передайте --speech файл`);
   }
@@ -195,19 +201,21 @@ export async function exportAvatarJob(o: AvatarExportOptions): Promise<AvatarExp
     voice = "clone";
     if (d < 5) warnings.push(`образец голоса всего ${d.toFixed(1)} с — клон будет неточным, лучше 5–10 с чистой речи`);
     warnings.push("образец голоса должен быть на том же языке, что и текст (иначе появится акцент)");
-  } else if (catalogVoice?.engine === "piper") {
-    // the whole speech is made here, on the CPU: the notebook skips Chatterbox entirely
+  } else if (catalogVoice && localSpeech) {
+    // the whole speech is made here (Piper on the CPU / Gemini API): the notebook skips Chatterbox entirely
     if (!lines.length) throw new Error("нечего озвучивать: нет текста");
-    if (catalogVoice.language !== languageCode(language)) warnings.push(`голос ${catalogVoice.id} говорит на «${catalogVoice.language}», а текст на «${language}» — будет акцент`);
-    say(`▸ речь локально (Piper, ${catalogVoice.id})…`);
+    if (catalogVoice.engine === "piper" && catalogVoice.language !== languageCode(language)) warnings.push(`голос ${catalogVoice.id} говорит на «${catalogVoice.language}», а текст на «${language}» — будет акцент`);
+    say(`▸ речь здесь (${catalogVoice.engine === "piper" ? "Piper" : "Google TTS"}, ${catalogVoice.id})…`);
     const raw = path.join(stage, "piper_speech.wav");
     const r = await synthesize(lines, catalogVoice.id, raw, { synth: o.voiceSynth, onEvent: (l) => say(`  ${l.trim()}`) });
+    warnings.push(...r.warnings);
+    const spoke = getVoice(r.voice) ?? catalogVoice;
     await ffmpeg(["-i", raw, "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", path.join(stage, "speech_in.wav")]);
     await fs.rm(raw, { force: true });
     speech = "speech_in.wav";
     voice = "library";
-    speechMeta = { engine: "piper", voice: catalogVoice.id, model: catalogVoice.piper?.key ?? "", license: catalogVoice.license, lines: r.lines };
-    await addCost(job.id, { step: "design", provider: "piper (local)", model: catalogVoice.piper?.key ?? catalogVoice.id, units: { voice_seconds: r.duration }, usd: 0 });
+    speechMeta = { engine: r.engine, voice: spoke.id, model: r.model ?? spoke.piper?.key ?? "", license: spoke.license, lines: r.lines };
+    await addCost(job.id, { step: "design", provider: r.engine === "gemini" ? "gemini tts" : r.engine === "cloud" ? "cloud tts" : "piper (local)", model: r.model ?? spoke.piper?.key ?? spoke.id, units: { voice_seconds: r.duration }, usd: r.engine === "piper" ? 0 : ttsUsd(r.engine, r.model, r.duration, lines.join(" ").length) });
   } else if (catalogVoice?.refFrom) {
     // a Chatterbox clone preset: Piper reads a neutral paragraph, Chatterbox clones that timbre in Colab
     const src = getVoice(catalogVoice.refFrom);

@@ -67,6 +67,18 @@ export interface ComposedScenes {
   cues: SfxCue[];
 }
 
+/** a number short enough to roll as an odometer (1–9 digits) */
+export const odoDigits = (v: string) => {
+  const n = (v.match(/\d/g) ?? []).length;
+  return n >= 1 && n <= 9;
+};
+/** number text → static characters + 0-9-0-9 digit strips (rolled by rollNumber in composeScenes) */
+export function odoHtml(v: string, id: string): string {
+  if (!odoDigits(v)) return esc(v);
+  const strip = Array.from({ length: 20 }, (_, k) => `<span class="odd">${k % 10}</span>`).join("");
+  return [...v].map((ch, q) => (/\d/.test(ch) ? `<span class="od"><span class="ods" id="${id}-od${q}">${strip}</span></span>` : `<span class="odc">${ch === " " ? "&nbsp;" : esc(ch)}</span>`)).join("");
+}
+
 const r1 = (n: number) => Math.round(n * 10) / 10;
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
 const fmt = (n: number) => String(r3(n));
@@ -354,7 +366,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
     const sp = o.speech?.[i];
     let wordAt: number[];
     if (sp && sp.words.length) {
-      wordAt = capTimes(alignWords(toks.map((x) => x.word), sp).times.map((x) => r3(inScene(t, Math.max(at - 0.1, x - 0.06)))), t.start + 0.7 * t.duration, at);
+      wordAt = capTimes(alignWords(toks.map((x) => x.word), sp).times.map((x) => r3(inScene(t, Math.max(at - 0.1, x - 0.06)))), t.start + Math.min(2.2, 0.45 * t.duration), at);
       // never an empty frame after the cut: the first word lands on the cut even if it is said later
       if (wordAt.length && wordAt[0] > at + 0.25) wordAt[0] = r3(at + 0.1);
       toks.forEach((_, w) => tw.push(`tl.fromTo("#${id}-w${w}", { ${e.from} }, { ${e.to}, duration: ${e.d}, ease: "${e.ease}" }, ${fmt(wordAt[w])});`));
@@ -391,7 +403,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       return r3(inScene(t, hit >= 0 ? Math.max(even - 0.3, al.times[hit] - 0.08) : even));
     });
     for (let k = 1; k < times.length; k++) if (times[k] < times[k - 1] + 0.25) times[k] = r3(times[k - 1] + 0.25);
-    return capTimes(times, t.start + 0.75 * t.duration, from);
+    return capTimes(times, t.start + Math.max(0.45 * t.duration, Math.min(t.duration - 0.8, from - t.start + 1.0)), from);
   };
 
   /**
@@ -420,7 +432,20 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       ? `<div class="blk spread al-left" style="left:${S.x}px;width:${textW}px;top:${bandTop}px;bottom:${F.h - S.bottom}px"><div class="grp">${head.filter(Boolean).join("")}</div><div class="grp">${tail}</div></div>`
       : block(anchor, S.x, textW, "left", [...head, tail]);
   const numEl = (id: string, n: { value: string; unit: string }, def: number, maxw: number, maxh: number, cls = "") =>
-    `<div class="num${cls}" id="${id}-num" style="font-size:${size(`${id}-num`, def)}px" ${fitAttrs(`${id}-num`, maxw, maxh, 110)}><span class="num-v">${esc(n.value)}</span>${n.unit ? `<span class="num-u">${esc(n.unit)}</span>` : ""}</div>`;
+    `<div class="num${cls}" id="${id}-num" style="font-size:${size(`${id}-num`, def)}px" ${fitAttrs(`${id}-num`, maxw, maxh, 110)}><span class="num-v${odoDigits(n.value) ? " odo" : ""}">${odoHtml(n.value, `${id}-num`)}</span>${n.unit ? `<span class="num-u">${esc(n.unit)}</span>` : ""}</div>`;
+  /** the digit strips of a number roll in, right-most digits spinning longest; returns when the number lands */
+  const rollNumber = (id: string, value: string, at: number): number => {
+    const ds = [...value].map((ch, q) => ({ ch, q })).filter((x) => /\d/.test(x.ch));
+    if (!odoDigits(value)) return at;
+    let land = at;
+    ds.forEach((d, k) => {
+      const dur = r3(0.75 + (ds.length - k) * 0.11);
+      land = Math.max(land, at + k * 0.04 + dur);
+      tw.push(`tl.fromTo("#${id}-num-od${d.q}", { yPercent: 0 }, { yPercent: ${-(10 + Number(d.ch)) * 5}, duration: ${dur}, ease: "power3.out" }, ${fmt(at + k * 0.04)});`);
+    });
+    for (let q = 0; q < Math.min(4, ds.length + 1); q++) cues.push({ t: r3(at + 0.08 + q * 0.12), kind: "tick", gain: -6 });
+    return r3(land);
+  };
   const subEl = (scene: Scene, id: string, cls = "") => (scene.sub ? `<span class="sub${cls}" id="${id}-sub">${esc(scene.sub)}</span>` : "");
   /** a scrim that makes text legible over a photo, dark where the text sits */
   const scrim = (id: string, anchor: Scene["anchor"], side: "v" | "left", dim = 0) => {
@@ -476,7 +501,12 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
           const al = anchor === "center" ? "center" : "left";
           body.push(block(anchor, S.x, textW, al, [kicker(scene.kicker, `${id}-k`), numEl(id, n, SQ ? 300 : 400, textW, SQ ? 340 : 480), headline("hl-hero", SQ ? 80 : 100, textW, SQ ? 360 : 520, 44, al), subEl(scene, id)]));
         }
-        tw.push(`tl.fromTo("#${id}-num", { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.6, ease: "expo.out" }, ${fmt(t.start + 0.04)});`);
+        body.unshift(`<span class="ghost" id="${id}-ghost" style="font-size:${px(LS ? 760 : SQ ? 640 : 820)}px;top:${Math.round(anchor === "top" ? CY : bandTop - px(60))}px">${esc(n.value)}${esc(n.unit)}</span>`);
+        tw.push(`tl.fromTo("#${id}-ghost", { x: ${px(160)}, opacity: 0 }, { x: ${-px(340)}, opacity: 1, duration: ${fmt(t.duration)}, ease: "none" }, ${fmt(t.start)});`);
+        // visible on the cut frame already (no empty frame after a hard cut), the digits are still spinning
+        tw.push(`tl.fromTo("#${id}-num", { opacity: 0.35, scale: 0.7 }, { opacity: 1, scale: 1, duration: 0.6, ease: "expo.out" }, ${fmt(t.start)});`);
+        const landed = rollNumber(id, n.value, t.start + 0.08);
+        if (landed > t.start + 0.6) tw.push(`tl.fromTo("#${id}-num", { scale: 1.07 }, { scale: 1, duration: 0.3, ease: "back.out(3)", immediateRender: false }, ${fmt(landed - 0.05)});`);
         cues.push({ t: t.start + 0.04, kind: "impact" });
         enter(scene, `${id}-hl`, t.start + 0.4, i);
         break;
@@ -501,6 +531,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
         const w = LS ? Math.min(1100, Math.round(textW * 0.64)) : textW;
         body.push(block(anchor, S.x, w, "left", [kicker(scene.kicker, `${id}-k`), numEl(id, n, LS ? 280 : SQ ? 260 : 330, w, LS ? 380 : SQ ? 300 : 420), headline("hl-mnum", LS ? 84 : SQ ? 76 : 92, w, LS ? 340 : SQ ? 300 : 460, 42, "left"), subEl(scene, id)], { cls: "onphoto" }));
         tw.push(`tl.fromTo("#${id}-num", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.55, ease: "expo.out" }, ${fmt(t.start + 0.08)});`);
+        rollNumber(id, n.value, t.start + 0.12);
         cues.push({ t: t.start + 0.08, kind: "impact", gain: -2 });
         enter(scene, `${id}-hl`, t.start + 0.4, i);
         break;
@@ -759,6 +790,12 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       const m = scene.image.motion;
       const [from, to] = m === "zoom_out" ? ["scale: 1.16", "scale: 1"] : m === "pan_left" ? ["scale: 1.14, xPercent: 3", "scale: 1.14, xPercent: -3"] : m === "pan_right" ? ["scale: 1.14, xPercent: -3", "scale: 1.14, xPercent: 3"] : ["scale: 1", "scale: 1.14"];
       tw.push(`tl.fromTo("#${id}-img", { ${from} }, { ${to}, duration: ${fmt(t.duration)}, ease: "none" }, ${fmt(t.start)});`);
+      // parallax: the text layer drifts the other way, slower than the photo
+      if (body.some((b) => b.includes(`id="${id}-hl"`))) tw.push(`tl.fromTo("#${id}-hl", { y: ${px(18)} }, { y: ${-px(26)}, duration: ${fmt(t.duration)}, ease: "none" }, ${fmt(t.start)});`);
+    }
+    if (!(LAYOUTS_3D as readonly string[]).includes(layout) && !layout.startsWith("media_") && t.duration > 1.5) {
+      // a slow push-in after the entrance: a held typographic frame is never a still frame
+      tw.push(`tl.fromTo("#${id}-in", { scale: 1 }, { scale: 1.045, duration: ${fmt(t.duration - 0.4)}, ease: "sine.inOut", immediateRender: false }, ${fmt(t.start + 0.36)});`);
     }
     body.push(counter(i));
     // transitions: how this scene arrives (entry on .in), how the previous one leaves (exit on its .out)
@@ -861,6 +898,13 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       .rule { display: block; width: ${px(180)}px; height: 6px; border-radius: 3px; background: ${P.accent}; transform-origin: center; }
       .num { display: block; white-space: nowrap; font-family: ${fontStack(display)}; font-weight: ${D.weight}; line-height: 0.95; letter-spacing: -0.04em; }
       .num-v { background-image: linear-gradient(170deg, ${P.accent2} 0%, ${P.accent} 70%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+      .num-v.odo { background-image: none; color: ${P.accent}; }
+      .od { display: inline-block; height: 1em; overflow: hidden; vertical-align: top; font-variant-numeric: tabular-nums; }
+      .ods { display: block; }
+      .odd { display: block; height: 1em; line-height: 1; }
+      .odc { display: inline-block; height: 1em; line-height: 1; vertical-align: top; }
+      .num:has(.odo) { line-height: 1; }
+      .ghost { position: absolute; left: ${-px(40)}px; display: block; white-space: nowrap; font-family: ${fontStack(display)}; font-weight: ${D.weight}; line-height: 0.9; letter-spacing: -0.05em; color: transparent; -webkit-text-stroke: ${px(4)}px ${P.accent}38; }
       .num-u { font-size: 0.34em; margin-left: 0.12em; color: ${P.accent}; letter-spacing: -0.01em; }
       .hl-hero { line-height: 1.08; }
       .ph { position: absolute; display: block; overflow: hidden; }

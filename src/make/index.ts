@@ -18,7 +18,7 @@ import { describeFindings } from "./slop.ts";
 import { researchTrends, trendsText, TrendsSchema, type Trends, type TrendsOptions } from "./trends.ts";
 import { DesignSchema, directDesign, fallbackDesign, type Design } from "./design.ts";
 import { generateImages, type ImageOptions } from "./images.ts";
-import { findPhotos, photoCreditLine, type PhotoCredit, type PhotoOptions } from "./photos.ts";
+import { creditRejected, findPhotos, photoCreditLine, type PhotoCredit, type PhotoOptions } from "./photos.ts";
 import { composeScenes, FPS, type BeatSpeech, type ComposedScenes } from "./scenes.ts";
 import { detectAspect, frameFor, stripAspectWords, type Aspect, type Frame } from "../lib/aspect.ts";
 import { installFonts } from "./fonts.ts";
@@ -28,7 +28,7 @@ import { isMood, pickMusic, type Mood, type MusicTrack } from "../audio/music.ts
 import type { SfxCue } from "../audio/sfx.ts";
 import { NO_VOICE } from "../voice/catalog.ts";
 import type { SentenceSynth } from "../voice/piper.ts";
-import { makeVoiceover, type CaptionCue, type VoiceoverResult } from "../voice/voiceover.ts";
+import { makeVoiceover, ttsUsd, type CaptionCue, type VoiceoverResult } from "../voice/voiceover.ts";
 
 /**
  * MAKE: a topic → a vertical video built from nothing (text, generated images, motion; music optional).
@@ -280,13 +280,17 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
   let vo: VoiceoverResult | null = null;
   const wantVoice = opts.voice?.trim();
   if (wantVoice && !NO_VOICE.test(wantVoice)) {
-    say(`▸ озвучка (${wantVoice}, Piper локально)…`);
+    say(`▸ озвучка (${wantVoice})…`);
     vo = await runStep(job.id, "design", () => makeVoiceover(s.script, wantVoice, path.join(dir, "make", "voice"), { lengthScale: opts.voiceLengthScale, synth: opts.voiceSynth, onEvent: (l) => say(`  ${l.trim()}`) }));
     warnings.push(...vo.warnings);
     s = { ...s, script: vo.script };
     await writeJson(path.join(dir, "script.json"), ScriptSchema, s.script);
-    await addCost(job.id, { step: "design", provider: "piper (local)", model: vo.voice.piper?.key ?? vo.voice.id, units: { voice_seconds: vo.duration, beats: vo.beats.length }, usd: 0 });
-    say(`  голос ${vo.voice.id} (${vo.voice.license}): ${vo.beats.map((b) => (b.end - b.start).toFixed(1)).join(" + ")} с речи → ролик ${scriptDuration(s.script).toFixed(1)} с`);
+    if (vo.engine !== "piper") {
+      const speechS = vo.beats.reduce((n, b) => n + b.end - b.start, 0);
+      const chars = vo.beats.reduce((n, b) => n + b.text.length, 0);
+      await addCost(job.id, { step: "design", provider: vo.engine === "gemini" ? "gemini tts" : "cloud tts", model: vo.model ?? vo.engine, units: { voice_seconds: Math.round(speechS * 10) / 10, beats: vo.beats.length, chars }, usd: ttsUsd(vo.engine, vo.model, speechS, chars) });
+    } else await addCost(job.id, { step: "design", provider: "piper (local)", model: vo.voice.piper?.key ?? vo.voice.id, units: { voice_seconds: vo.duration, beats: vo.beats.length }, usd: 0 });
+    say(`  голос ${vo.voice.id} (${vo.engine === "gemini" ? `Gemini API ${vo.model}` : vo.engine === "cloud" ? `Cloud TTS ${vo.model}` : "Piper"}; ${vo.voice.license}): ${vo.beats.map((b) => (b.end - b.start).toFixed(1)).join(" + ")} с речи → ролик ${scriptDuration(s.script).toFixed(1)} с`);
   }
 
   // 3. art director → photos → composition (fit in Chrome) → lint
@@ -327,7 +331,8 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     }
     await writeJson(path.join(dir, "design.json"), DesignSchema, design);
     const I = design.identity;
-    mood = I.music;
+    mood = energeticMood(I.music, `${topic} ${opts.audience ?? ""}`);
+    if (mood !== I.music) say(`  музыка: «${I.music}» → «${mood}» (под голос нужен бодрый ровный трек, не нарастающий эпик)`);
     say(`  айдентика: ${I.palette.bg}/${I.palette.accent}, ${I.display_font} + ${I.accent_font}, ${I.texture}${I.chrome === "header" ? ", шапка" : ""}`);
     for (const sc of design.scenes) say(`    ${sc.beat}: ${sc.layout} [${sc.anchor}, ${sc.transition}]${sc.image ? ` +фото «${sc.image.query}»` : ""} — ${sc.headline}`);
 
@@ -344,6 +349,12 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
       todo = [];
       for (const w of wanted) {
         const old = path.join(reuseImgDir, `scene_${w.beat}.jpg`);
+        const oldCredit = oldCredits.find((x) => x.beat === w.beat);
+        if (oldCredit && creditRejected(oldCredit)) {
+          say(`  фото ${w.beat}: «${oldCredit.title}» больше не проходит отбор (карта/график) — ищу заново`);
+          todo.push(w);
+          continue;
+        }
         if (await exists(old)) {
           await fs.mkdir(imgDir, { recursive: true });
           await fs.copyFile(old, path.join(imgDir, `scene_${w.beat}.jpg`));
@@ -466,6 +477,12 @@ function photoHint(queries: string[]): string {
   for (const q of queries) for (const w of new Set(q.toLowerCase().split(/\s+/).filter((x) => x.length > 3))) n.set(w, (n.get(w) ?? 0) + 1);
   const best = [...n.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
   return best && best[1] >= 2 ? best[0] : "";
+}
+
+/** Slow cinematic build-ups fight a narrator: "dramatic" becomes "upbeat" unless the topic asks for drama. */
+export function energeticMood(mood: Mood, topic: string): Mood {
+  if (mood !== "dramatic") return mood;
+  return /драм|эпич|трагед|катастроф|триллер|тревож|страшн|ужас|dramatic|epic|tragic|thriller/i.test(topic) ? mood : "upbeat";
 }
 
 /** Text that credits the pictures and the music (CC BY needs it): for the description under the video. */

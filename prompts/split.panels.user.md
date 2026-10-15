@@ -5,4 +5,4 @@ TASK OF THE EDIT: {{instruction}}
 TRANSCRIPT (output timeline):
 {{phrases}}
 
-Design the hook title and 2–5 panels covering 0–{{duration}} s. Return the JSON only.
+Design the hook title and 2–5 panels covering 0–{{duration}} s: real photos of what is named, animated graphics for numbers/claims/quotes, AI images only as a documentary last resort, no symbolic metaphors. Every panel has a graphic. Return the JSON only.

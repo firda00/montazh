@@ -50,7 +50,7 @@ test("catalogue: unique ids, clean licences only (no NC / unknown), ruslan and i
   for (const v of VOICES) {
     assert.ok(v.license && v.engineLicense && v.source && v.name, v.id);
     assert.ok(!/(\bNC\b|non-?commercial|некоммерч|unknown|неизвест)/i.test(v.license), `${v.id}: ${v.license}`);
-    assert.ok(/(CC0|public domain|MIT|CC-BY|Apache)/i.test(v.license), `${v.id}: ${v.license}`);
+    assert.ok(v.engine === "gemini" || v.engine === "chirp3" ? /(Gemini API|Google Cloud).*коммерц/i.test(v.license) : /(CC0|public domain|MIT|CC-BY|Apache)/i.test(v.license), `${v.id}: ${v.license}`);
     if (v.engine === "piper") assert.ok(v.piper && v.piper.bytes > 1e6 && v.piper.key.includes(v.piper.path.split("/")[2]), v.id);
     if (v.refFrom) assert.equal(getVoice(v.refFrom)?.engine, "piper", v.id);
   }
@@ -164,7 +164,8 @@ test("mix graph: voice on top, music and effects side-chain ducked under it, lou
   assert.match(fc, /\[1:a\][^;]*loudnorm=I=-16[^;]*asplit=3\[vo\]\[vk0\]\[vk1\]/);
   assert.match(fc, /\[mus\]\[vk0\]sidechaincompress/);
   assert.match(fc, /\[fxbus\]\[vk1\]sidechaincompress[^;]*\[fxduck\]/);
-  assert.match(fc, /loudnorm=I=-27/, "music bed lower under a voiceover");
+  assert.match(fc, /loudnorm=I=-22/, "music bed 6 dB under the voice in the gaps (ducked further while it talks)");
+  assert.match(fc, /\[mus\]\[vk0\]sidechaincompress=threshold=0\.004:ratio=3:attack=10:release=160/, "gentle, fast-release ducking");
   assert.match(fc, /\[vo\]\[duck\]\[fxduck\]amix=inputs=3[^;]*loudnorm=I=-14/);
   assert.match(fc, /\[3:a\]adelay=1000\|1000,volume=-2\.0dB/, "effects 5 dB quieter under a voice");
   // without a voice nothing changes
@@ -312,7 +313,7 @@ test("bot: /voice lists, sets (with a sample voice message), turns off; /make an
   assert.match(MSG.help, /\/send file \| video \| both/);
 
   await bot.handleUpdate(msg({ text: "/voice" }));
-  assert.match(fake.texts().at(-1)!, /сейчас без голоса[\s\S]*denis[\s\S]*chatterbox_default/);
+  assert.match(fake.texts().at(-1)!, /сейчас: авто — (dmitri|gemini_charon)[\s\S]*gemini_charon[\s\S]*denis[\s\S]*chatterbox_default/);
   await bot.handleUpdate(msg({ text: "/voice ДЕНИС" }));
   await bot.idle();
   assert.equal(bot.state.chats["9"].voice, "denis");
@@ -349,7 +350,7 @@ test("bot: /voice lists, sets (with a sample voice message), turns off; /make an
   assert.match(fake.texts().at(-1)!, /Им будет говорить \/avatar/);
 
   await bot.handleUpdate(msg({ text: "/voice off" }));
-  assert.equal(bot.state.chats["9"].voice, undefined);
+  assert.equal(bot.state.chats["9"].voice, "off");
   assert.equal(fake.texts().at(-1), MSG.voiceOff);
   await bot.handleUpdate(msg({ text: "/make тема" }));
   await bot.idle();

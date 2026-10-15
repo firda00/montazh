@@ -4,14 +4,18 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { exists, jobDir, readJson } from "../lib/workspace.ts";
+export { photoCreditLine };
 import { EdlSchema, MediaSchema, TranscriptSchema, PresetSchema, JobSchema, ScenesSchema, type Scenes } from "../schemas/index.ts";
 import { CutReportSchema, clipFocus } from "../cut/index.ts";
 import { loadPreset } from "../plan/presets.ts";
 import { buildDesignTimeline, paginate, type DesignTimeline, type OutPhrase } from "./timeline.ts";
 import { applyTranslations, translatePhrases } from "./translate.ts";
 import { selectStructuredLlm, type StructuredFn } from "../lib/llm.ts";
-import { directPanels, fallbackPanels, PanelsSchema, type Panels } from "./panels.ts";
+import { directPanels, fallbackPanels, PanelsSchema, resanitizePanels, type Panels } from "./panels.ts";
 import { generateImages } from "../make/images.ts";
+import { findPhotos, photoCreditLine, type PhotoCredit } from "../make/photos.ts";
+import { FRAMES } from "../lib/aspect.ts";
+import { panelFrame } from "./hyperframes/split.ts";
 import { addCost } from "../lib/cost.ts";
 import { writeJson } from "../lib/workspace.ts";
 import type { DesignSpec } from "../schemas/index.ts";
@@ -31,6 +35,8 @@ export interface DesignJob {
   /** split layout: top-half panels, the hook title and their images (absolute paths by panel index) */
   panels?: Panels;
   panel_images?: Record<number, string>;
+  /** split layout: real photos used on panels (CC BY needs attribution: lines go into the description) */
+  panel_credits?: PhotoCredit[];
 }
 
 export interface ExportOptions {
@@ -84,7 +90,7 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
 
   const pages = timeline.phrases.flatMap((p) => paginate(p, design.captions.max_words, design.captions.max_chars).map((words) => ({ start: words[0].start, end: words[words.length - 1].end, words })));
   // split layout: the director decides what the top half shows; images via Antigravity (cached per output)
-  let split: { panels?: Panels; panel_images?: Record<number, string> } = {};
+  let split: { panels?: Panels; panel_images?: Record<number, string>; panel_credits?: PhotoCredit[] } = {};
   if (design.layout === "split") {
     const panelsFile = path.join(dir, "design", `${outputId}.panels.json`);
     const imgDir = path.join(dir, "design", `${outputId}-panels`);
@@ -97,15 +103,46 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
         panels = d.panels;
         await addCost(jobId, { step: "design", provider: d.provider === "anthropic" ? "anthropic" : d.provider, model: d.model, units: { ...d.usage, calls: 1, panels: d.panels.panels.length, estimate: d.estimate ? 1 : 0 }, usd: d.usd });
       } catch (err) {
-        panels = fallbackPanels(timeline.duration, output.titles[0]?.text ?? "");
+        panels = fallbackPanels(timeline.duration, output.titles[0]?.text ?? "", timeline.phrases);
         warnings.push(`режиссёр панелей не ответил, простая панель: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
       }
       await fs.mkdir(path.dirname(panelsFile), { recursive: true });
       await writeJson(panelsFile, PanelsSchema, panels);
     }
+    // saved panels (also ones from before the anti-slop rules) pass the metaphor filter again
+    panels = resanitizePanels(panels, timeline.phrases);
+    for (const n of panels.notes) warnings.push(n);
     const images: Record<number, string> = {};
+    let credits: PhotoCredit[] = [];
+    const creditsFile = path.join(imgDir, "credits.json");
+    if (await exists(creditsFile)) credits = JSON.parse(await fs.readFile(creditsFile, "utf8")) as PhotoCredit[];
+    // 1) real photos (Openverse: CC0 / PDM / CC BY), cropped to the panel frame; cached as scene_<i>.jpg
+    const box = panelFrame(1080, 1920, design.split.seam);
+    const frame = { ...FRAMES["9:16"], w: box.w, h: box.h };
+    const photoTodo: { beat: number; query: string }[] = [];
+    for (const [i, p] of panels.panels.entries()) {
+      if (p.source !== "photo") continue;
+      const f = path.join(imgDir, `scene_${i}.jpg`);
+      if ((await exists(f)) && credits.some((c) => c.beat === i)) images[i] = f;
+      else photoTodo.push({ beat: i, query: p.photo_query });
+    }
+    if (photoTodo.length && opts.panelImages !== false) {
+      try {
+        const r = await findPhotos(photoTodo, imgDir, { frame });
+        for (const [b, f] of r.files) images[b] = f;
+        credits = [...credits.filter((c) => !r.files.has(c.beat)), ...r.credits];
+        await fs.mkdir(imgDir, { recursive: true });
+        await fs.writeFile(creditsFile, JSON.stringify(credits, null, 1));
+        if (r.missing.length) warnings.push(`фото для панелей ${r.missing.join(", ")} не нашлось — там будет графика`);
+        await addCost(jobId, { step: "design", provider: "openverse", model: "images", units: { requests: r.requests, photos: r.files.size }, usd: 0 });
+      } catch (err) {
+        warnings.push(`поиск фото не удался: ${err instanceof Error ? err.message.split("\n")[0] : String(err)} — панели покажут графику`);
+      }
+    }
+    // 2) AI images only for panels the director left as "ai" (documentary prompts that passed the filter)
     const todo: { beat: number; prompt: string }[] = [];
     for (const [i, p] of panels.panels.entries()) {
+      if (p.source !== "ai") continue;
       const f = path.join(imgDir, `scene_${i}.jpg`);
       if (await exists(f)) images[i] = f;
       else todo.push({ beat: i, prompt: p.image_prompt });
@@ -114,13 +151,15 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
       try {
         const r = await generateImages(todo, imgDir, { style: panels.image_style || design.split.image_style });
         for (const [b, f] of r.files) images[b] = f;
-        if (r.missing.length) warnings.push(`картинки панелей не получены: ${r.missing.join(", ")}`);
+        if (r.missing.length) warnings.push(`картинки панелей не получены: ${r.missing.join(", ")} — там будет графика`);
         await addCost(jobId, { step: "design", provider: "antigravity-cli", model: r.model, units: { ...r.usage, images: r.files.size, wall_seconds: r.wall_seconds, subscription: 1 }, usd: 0 });
       } catch (err) {
         warnings.push(`картинки панелей не сгенерированы: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
       }
     }
-    split = { panels, panel_images: images };
+    // 3) everything else (and any missing picture) is a code-rendered graphic
+    const usedCredits = credits.filter((c) => images[c.beat] && panels.panels[c.beat]?.source === "photo");
+    split = { panels, panel_images: images, panel_credits: usedCredits };
   }
   return { job_id: jobId, rough_path: path.join(dir, `rough_${outputId}.mp4`), timeline, pages, design, preset: preset.name, captions_language: target, translated, warnings, ...(faceY !== undefined ? { face_y: faceY } : {}), ...split };
 }
@@ -148,4 +187,19 @@ if (process.argv[1] && path.resolve(process.argv[1]).endsWith(path.join("design"
   const text = JSON.stringify(job, null, 2);
   if (out) await fs.writeFile(out, text);
   else process.stdout.write(text);
+}
+
+/** "Фото (Openverse): …" lines for the split panels of these outputs (CC BY needs attribution in the description). */
+export async function panelCreditsText(jobId: string, outputIds: string[]): Promise<string> {
+  const lines: string[] = [];
+  for (const id of outputIds) {
+    const f = path.join(jobDir(jobId), "design", `${id}-panels`, "credits.json");
+    if (!(await exists(f))) continue;
+    try {
+      const credits = JSON.parse(await fs.readFile(f, "utf8")) as PhotoCredit[];
+      for (const c of credits) if (await exists(c.file)) lines.push(photoCreditLine(c));
+    } catch {}
+  }
+  const uniq = [...new Set(lines)];
+  return uniq.length ? `Фото (Openverse): ${uniq.join("; ")}` : "";
 }

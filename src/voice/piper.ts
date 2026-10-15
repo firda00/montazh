@@ -8,8 +8,34 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { fileURLToPath } from "node:url";
 import { ffmpeg } from "../lib/ffmpeg.ts";
-import { requireVoice, type VoiceDef } from "./catalog.ts";
-import { normalizeForTts, splitSentences } from "./normalize.ts";
+import { piperVoiceFor, requireVoice, type VoiceDef } from "./catalog.ts";
+import { GEMINI_KEY_HELP, geminiApiKey, geminiTts, GeminiTtsError, NARRATOR_STYLE, type GeminiTtsOptions } from "./gemini.ts";
+import { bcp47, CLOUD_KEY_HELP, cloudApiKey, cloudTts, type CloudTtsOptions } from "./cloudtts.ts";
+
+/** What to tell the user when no Google TTS key exists (either source works). */
+export const TTS_KEYS_HELP = `Подойдёт любой из двух ключей (если есть оба — берётся Cloud).
+
+Вариант 1 — Google Cloud:
+${CLOUD_KEY_HELP}
+
+Вариант 2 — Google AI Studio:
+${GEMINI_KEY_HELP}`;
+
+export type CloudKind = "cloud-gemini" | "cloud-chirp3" | "gemini-api";
+
+/** Which Google backend speaks a gemini/chirp3 voice: the Cloud key first, then the Gemini API key; null = none. */
+export function cloudBackend(voice: VoiceDef, o: Pick<SynthOptions, "gemini" | "cloud"> = {}): { kind: CloudKind; warning?: string } | null {
+  const cloud = o.cloud?.key !== undefined ? o.cloud.key : cloudApiKey();
+  const gemini = o.gemini?.key !== undefined ? o.gemini.key : geminiApiKey();
+  if (cloud) return { kind: voice.engine === "chirp3" ? "cloud-chirp3" : "cloud-gemini" };
+  if (gemini) {
+    return voice.engine === "chirp3"
+      ? { kind: "gemini-api", warning: `голос ${voice.id} — Chirp 3 HD из Cloud TTS; ключа GOOGLE_CLOUD_API_KEY нет, говорю тем же голосом ${voice.gemini?.voiceName} через Gemini API` }
+      : { kind: "gemini-api" };
+  }
+  return null;
+}
+import { normalizeForTts, splitSentences, stripMarkup } from "./normalize.ts";
 
 /**
  * Local Piper TTS (rhasspy/piper 2023.11.14-2, MIT; CPU, ~0.1× real time on an i7).
@@ -69,9 +95,13 @@ export interface SynthOptions {
   /** text normalisation (numbers → words…); default on */
   normalize?: boolean;
   synth?: SentenceSynth;
-  /** parallel piper processes (default 3) */
+  /** parallel piper processes (default 3; Gemini requests: 1, VEDIT_GEMINI_TTS_CONCURRENCY up to 2) */
   concurrency?: number;
   onEvent?: (line: string) => void;
+  /** Gemini engine: a delivery style for the whole narration (default NARRATOR_STYLE) and test hooks (fetch, key, cacheDir) */
+  gemini?: GeminiTtsOptions;
+  /** Cloud Text-to-Speech (Gemini-TTS / Chirp 3: HD): key, pace, test hooks; the style comes from gemini.style */
+  cloud?: CloudTtsOptions;
 }
 
 export interface SentenceTiming {
@@ -98,6 +128,12 @@ export interface SynthResult {
   sentences: SentenceTiming[];
   /** each line's own audio (no pauses around it), for placing lines on a timeline */
   clips: PcmClip[];
+  /** engine that actually spoke: piper, gemini (Gemini API) or cloud (Cloud TTS); a cloud voice without a key falls back to Piper */
+  engine: "piper" | "gemini" | "cloud";
+  /** gemini/cloud: the model that answered (gemini-2.5-flash-tts, chirp3-hd…) */
+  model?: string;
+  /** e.g. "no Gemini key — Piper dmitri instead" */
+  warnings: string[];
 }
 
 let defaultSynth: SentenceSynth | null = null;
@@ -311,10 +347,35 @@ export function sentenceParams(text: string, k: number, lengthScale: number, o: 
  * Empty lines are kept as zero-length entries so line indexes match the input.
  */
 export async function synthesize(text: string | string[], voiceId: string, outWav: string, o: SynthOptions = {}): Promise<SynthResult> {
-  const voice = requireVoice(voiceId);
-  if (voice.engine !== "piper") throw new Error(`голос ${voice.id} звучит только в Colab (движок ${voice.engine}); локально доступны Piper-голоса — vedit voices`);
-  const synth = o.synth ?? defaultSynth ?? piperSynth({ onEvent: o.onEvent });
+  let voice = requireVoice(voiceId);
+  const warnings: string[] = [];
   const lines = (Array.isArray(text) ? text : [text]).map((l) => l.replace(/\s+/g, " ").trim());
+  if (voice.engine === "gemini" || voice.engine === "chirp3") {
+    const backend = cloudBackend(voice, o);
+    let failure = "";
+    if (backend) {
+      if (backend.warning) o.onEvent?.(`⚠ ${backend.warning}`);
+      try {
+        const r = await synthesizeCloud(lines, voice, outWav, o, backend.kind);
+        return backend.warning ? { ...r, warnings: [backend.warning, ...r.warnings] } : r;
+      } catch (err) {
+        // a rejected key, exhausted quotas on every model, no network: the video still gets a (Piper) voice
+        if (!(err instanceof GeminiTtsError)) throw err;
+        failure = err.message;
+      }
+    }
+    const fb = piperVoiceFor(voice);
+    if (!fb) throw new Error(failure || TTS_KEYS_HELP);
+    const name = voice.engine === "chirp3" ? "Chirp 3 HD" : "Gemini";
+    const w = failure
+      ? `голос ${voice.id} (${name}) не получился (${failure.split("\n")[0]}) — озвучиваю Piper ${fb.id}.`
+      : `голос ${voice.id} (${name}) недоступен без ключа Google — озвучиваю Piper ${fb.id}.\n${TTS_KEYS_HELP}`;
+    warnings.push(w);
+    o.onEvent?.(`⚠ ${w}`);
+    voice = fb;
+  }
+  if (voice.engine !== "piper") throw new Error(`голос ${voice.id} звучит только в Colab (движок ${voice.engine}); здесь доступны Piper- и Gemini-голоса — vedit voices`);
+  const synth = o.synth ?? defaultSynth ?? piperSynth({ onEvent: o.onEvent });
   const lengthScale = o.lengthScale ?? 1.0;
   const jobs: { line: number; text: string; spoken: string }[] = [];
   lines.forEach((line, i) => {
@@ -360,7 +421,89 @@ export async function synthesize(text: string | string[], voiceId: string, outWa
   await writeWav(outWav, pcm, rate);
   const duration = r3(pcm.length / rate);
   o.onEvent?.(`  голос ${voice.id}: ${jobs.length} предложений, ${duration.toFixed(1)} с`);
-  return { file: outWav, voice: voice.id, duration, sampleRate: rate, lines: lineTimings, sentences, clips };
+  return { file: outWav, voice: voice.id, duration, sampleRate: rate, lines: lineTimings, sentences, clips, engine: "piper", warnings };
+}
+
+/** Sentence times inside one line of audio, proportional to the spoken length of each sentence. */
+export function splitLineTimes(spoken: string[], start: number, end: number): { start: number; end: number }[] {
+  const w = spoken.map((t) => t.replace(/[^\p{L}\p{N}]/gu, "").length + 4);
+  const total = w.reduce((a, b) => a + b, 0) || 1;
+  let t = start;
+  return w.map((x) => {
+    const d = ((end - start) * x) / total;
+    const r = { start: r3(t), end: r3(t + d) };
+    t += d;
+    return r;
+  });
+}
+
+/**
+ * Gemini / Chirp voice (Gemini API or Cloud TTS): one API request per line (a beat is one take, so its sentences keep one intonation, and the
+ * request count stays low for the free tier), the same style for every line, lines joined with the line pause.
+ * Sentence times inside a line are proportional to their spoken length.
+ */
+async function synthesizeCloud(lines: string[], voice: VoiceDef, outWav: string, o: SynthOptions, kind: CloudKind): Promise<SynthResult> {
+  const name = voice.gemini?.voiceName;
+  if (!name) throw new Error(`голос ${voice.id}: нет имени голоса Gemini`);
+  const languageCode = bcp47(voice.language);
+  const style = o.gemini?.style ?? process.env.VEDIT_GEMINI_TTS_STYLE ?? NARRATOR_STYLE;
+  const sentenceJobs = lines.map((line) =>
+    splitSentences(line)
+      // Gemini reads numbers, dates and currencies itself, in the right case (Piper needs them spelled out):
+      // only markup/emoji/hashtags are stripped unless normalisation is asked for explicitly
+      .map((sent) => ({ text: sent, spoken: o.normalize === true ? normalizeForTts(sent, voice.language) : stripMarkup(sent) }))
+      .filter((j) => /[\p{L}\p{N}]/u.test(j.spoken)),
+  );
+  if (!sentenceJobs.some((j) => j.length)) throw new Error("нечего озвучивать: текст пустой");
+  const conc = Math.max(1, Math.min(2, o.concurrency ?? (Number(process.env.VEDIT_GEMINI_TTS_CONCURRENCY) || 1)));
+  const models = new Set<string>();
+  let cached = 0;
+  const pieces = await mapLimit(sentenceJobs, conc, async (jobs) => {
+    if (!jobs.length) return null;
+    const text = jobs.map((j) => j.spoken).join(" ");
+    const onEvent = o.cloud?.onEvent ?? o.gemini?.onEvent ?? o.onEvent;
+    const r =
+      kind === "gemini-api"
+        ? await geminiTts(text, name, { ...o.gemini, style, onEvent })
+        : await cloudTts(text, { kind: kind === "cloud-chirp3" ? "chirp3" : "gemini", voiceName: name, languageCode }, { ...o.cloud, prompt: o.cloud?.prompt ?? style, onEvent });
+    models.add(r.model);
+    if (r.cached) cached++;
+    return trimSilence({ pcm: r.pcm, rate: r.rate }, 300, 60);
+  });
+  const rate = pieces.find((p) => p)?.rate ?? 24000;
+  if (pieces.some((p) => p && p.rate !== rate)) throw new Error("TTS вернул разную частоту для кусков одного голоса");
+  const lineGap = Math.round((rate * (o.linePauseMs ?? 380)) / 1000);
+  const sentences: SentenceTiming[] = [];
+  const lineTimings: LineTiming[] = lines.map((t, i) => ({ i, text: t, start: 0, end: 0 }));
+  const clips: PcmClip[] = [];
+  const all: Int16Array[] = [];
+  const gaps: number[] = [];
+  let at = 0;
+  let first = true;
+  pieces.forEach((p, i) => {
+    clips.push(p ?? { pcm: new Int16Array(0), rate });
+    if (!p || !p.pcm.length) return;
+    const gap = first ? 0 : lineGap;
+    first = false;
+    at += gap;
+    const t0 = at / rate;
+    const t1 = (at + p.pcm.length) / rate;
+    lineTimings[i].start = r3(t0);
+    lineTimings[i].end = r3(t1);
+    const times = splitLineTimes(sentenceJobs[i].map((j) => j.spoken), t0, t1);
+    sentenceJobs[i].forEach((j, k) => sentences.push({ line: i, text: j.text, spoken: j.spoken, ...times[k] }));
+    all.push(p.pcm);
+    gaps.push(gap);
+    at += p.pcm.length;
+  });
+  const tail = Math.round((rate * (o.tailMs ?? 150)) / 1000);
+  const pcm = concatPcm([...all, new Int16Array(tail)], [...gaps, 0]);
+  await writeWav(outWav, pcm, rate);
+  const duration = r3(pcm.length / rate);
+  const model = [...models].join(", ");
+  const engine = kind === "gemini-api" ? "gemini" : "cloud";
+  o.onEvent?.(`  голос ${voice.id} (${engine === "gemini" ? "Gemini API" : "Cloud TTS"} ${model}): ${sentenceJobs.filter((j) => j.length).length} запросов${cached ? ` (${cached} из кэша)` : ""}, ${duration.toFixed(1)} с`);
+  return { file: outWav, voice: voice.id, duration, sampleRate: rate, lines: lineTimings, sentences, clips, engine, model, warnings: [] };
 }
 
 /** A short sample of a voice as OGG/Opus (Telegram sendVoice). */

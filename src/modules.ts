@@ -23,6 +23,8 @@ import { DEFAULT_GEMINI_MODEL } from "./understand/vision/gemini.ts";
 import { DEFAULT_AGY_MODEL } from "./understand/vision/agy.ts";
 import { VOICES } from "./voice/catalog.ts";
 import { piperStatus } from "./voice/piper.ts";
+import { geminiApiKey, geminiTtsModels } from "./voice/gemini.ts";
+import { cloudApiKey, cloudGeminiModels } from "./voice/cloudtts.ts";
 
 /**
  * The module registry: every replaceable part of the pipeline, what it depends on (and under
@@ -209,6 +211,9 @@ export const MODULES: ModuleDef[] = [
     selector: "--renderer hyperframes; --quality, --workers",
     backends: [
       { id: "hyperframes", title: "HyperFrames 0.8.145", deps: "hyperframes (npm), Chromium; GSAP 3.14 vendored; Inter", license: "Apache-2.0; GSAP Standard (бесплатно, без ограничений с 2024); Inter OFL-1.1" },
+      { id: "split-photos", title: "split_news: настоящие фото на панелях — Openverse (как в make), кэш design/<id>-panels/, атрибуция в credits.json и в описании бота", deps: "сеть; ffmpeg (кадрирование под рамку)", license: "только CC0 / Public Domain Mark / CC BY; CC BY — атрибуция обязательна (строки добавляются автоматически)" },
+      { id: "split-graphics", title: "split_news: моушн-графика кодом (src/design/panel-graphics.ts: одометр, графики, цитата, таймлайн, сравнение, чат, поиск, пост, список) + фильтр ИИ-метафор", deps: "HyperFrames + GSAP", license: "свой код (приёмы как у компонентов number-wheel / headline-slam реестра HyperFrames, Apache-2.0; код не копировался)" },
+      { id: "split-ai", title: "split_news: ИИ-картинка Antigravity — только последний вариант, документальный промпт", deps: "agy + вход Google", license: "условия Antigravity; $0" },
       { id: "remotion", title: "Remotion (прототип, выключен)", deps: "tools/remotion-overlay", license: "коммерческая от 4 сотрудников — не использовать в проде" },
     ],
     step: "render",
@@ -242,17 +247,23 @@ export const MODULES: ModuleDef[] = [
     id: "voice",
     stage: "design",
     title: "Голоса (озвучка)",
-    what: "каталог голосов: Piper локально на CPU (make --voice, avatar --voice denis) и пресеты Chatterbox для аватара; $0",
+    what: "каталог голосов: Gemini TTS (облако, живая интонация, нужен GEMINI_API_KEY), Piper локально на CPU (запасной, $0) и пресеты Chatterbox для аватара",
     selector: "vedit voices; vedit make --voice <id>; vedit avatar export --voice <id>; Telegram /voice",
     backends: [
       { id: "piper", title: "Piper 2023.11.14-2 (rhasspy), бинарник + onnx-модели, скачиваются при первом использовании в tools/voice/", deps: "piper(.exe), espeak-ng-data, onnxruntime (в архиве релиза); ~22 МБ + ~60 МБ на голос", license: "MIT (Piper); espeak-ng GPL-3.0 — только как внешний процесс" },
-      ...VOICES.map((v) => ({ id: `voice:${v.id}`, title: `${v.name} [${v.engine}, ${v.language}]`, deps: v.piper ? `huggingface rhasspy/piper-voices ${v.piper.key}` : v.refFrom ? `образец от Piper ${v.refFrom} + Chatterbox в Colab` : "Chatterbox в Colab", license: v.license })),
+      { id: "gemini-tts", title: "Gemini TTS (Google Gemini API): по одному запросу на бит, один стиль диктора на ролик, ретраи на 429, кэш workspace/_cache/tts/gemini", deps: "GEMINI_API_KEY (или GOOGLE_API_KEY); модели VEDIT_GEMINI_TTS_MODEL → gemini-3.8-flash-tts → 3.8-flash-lite-tts → 3.1-flash-tts-preview → 2.5-flash-preview-tts", license: "условия Gemini API: коммерческое использование озвучки разрешено; бесплатный уровень — данные могут использоваться Google, для продакшена платный (≈$9 / 1M аудио-токенов ≈ $0.02 за минуту речи)" },
+      { id: "cloud-tts", title: "Google Cloud Text-to-Speech: Gemini-TTS (gemini_*, стиль диктора) и Chirp 3: HD (chirp_*), по запросу на бит, кэш workspace/_cache/tts/cloud; если есть оба ключа — берётся этот", deps: "GOOGLE_CLOUD_API_KEY (ключ Cloud Console с доступом к Cloud Text-to-Speech API, биллинг включён); модели VEDIT_CLOUD_TTS_MODEL → gemini-2.5-flash-tts → 2.5-pro-tts → 3.1-flash-tts-preview", license: "условия Google Cloud: коммерческое использование разрешено; Chirp 3 HD — 1 млн символов/мес бесплатно, далее $30 / 1M; Gemini-TTS — $0.50 / 1M токенов текста + $10 / 1M аудио-токенов (25 ток/с ≈ $0.015 за минуту), бесплатной квоты нет" },
+      ...VOICES.map((v) => ({ id: `voice:${v.id}`, title: `${v.name} [${v.engine}, ${v.language}]`, deps: v.piper ? `huggingface rhasspy/piper-voices ${v.piper.key}` : v.engine === "chirp3" ? `Cloud TTS ru-RU-Chirp3-HD-${v.gemini?.voiceName}; без Cloud-ключа — Gemini API, без ключей — Piper ${v.fallback}` : v.gemini ? `Gemini-TTS ${v.gemini.voiceName} (Cloud TTS или Gemini API); без ключа — Piper ${v.fallback}` : v.refFrom ? `образец от Piper ${v.refFrom} + Chatterbox в Colab` : "Chatterbox в Colab", license: v.license })),
     ],
     step: "design",
-    cost: (e) => /piper/i.test(e.provider),
-    probe: async () => {
+    cost: (e) => /piper|gemini tts|cloud tts/i.test(e.provider),
+    probe: async (env) => {
       const st = await piperStatus();
-      return { active: "piper", ready: true, note: `${st.binary ? "piper установлен" : "piper скачается при первом синтезе"}; голоса: ${st.models.join(", ") || "ещё не скачаны"}` };
+      const piper = `${st.binary ? "piper установлен" : "piper скачается при первом синтезе"}; голоса: ${st.models.join(", ") || "ещё не скачаны"}`;
+      const cloud = !!cloudApiKey(env);
+      const key = !!geminiApiKey(env);
+      if (cloud) return { active: "cloud-tts+piper", ready: true, note: `Cloud TTS: ${cloudGeminiModels(env)[0]} + Chirp 3 HD${key ? "; Gemini API — запасной" : ""}; ${piper}` };
+      return { active: key ? "gemini-tts+piper" : "piper", ready: true, note: key ? `Gemini: ${geminiTtsModels(env)[0]}; ${piper}` : `нет GOOGLE_CLOUD_API_KEY / GEMINI_API_KEY — gemini_*/chirp_* звучат голосом Piper; ${piper}` };
     },
   },
   {

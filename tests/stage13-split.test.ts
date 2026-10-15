@@ -20,7 +20,7 @@ const RAW = {
   ],
   panels: [
     { start: 9, end: 20, image_prompt: "AI chat on a monitor", cards: [{ kind: "code", corner: "bl", title: "", lines: ["answer = llm.ask(q)", "verify(answer)"] }] },
-    { start: 0, end: 9.4, image_prompt: "a gavel and an apple", cards: [{ kind: "quote", corner: "tl", title: "", lines: ["Реальность — это высший судья"] }, { kind: "tags", corner: "tl", title: "", lines: ["реальность", "законы физики"] }, { kind: "stat", corner: "br", title: "", lines: [] }] },
+    { start: 0, end: 9.4, source: "photo", photo_query: "Isaac Newton portrait", image_prompt: "a gavel and an apple", cards: [{ kind: "quote", corner: "tl", title: "", lines: ["Реальность — это высший судья"] }, { kind: "tags", corner: "tl", title: "", lines: ["реальность", "законы физики"] }, { kind: "stat", corner: "br", title: "", lines: [] }] },
     { start: 20, end: 25, image_prompt: "", cards: [] },
   ],
   image_style: "cinematic purple neon",

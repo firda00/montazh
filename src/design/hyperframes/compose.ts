@@ -1,5 +1,11 @@
 import type { DesignJob } from "../export.ts";
 import { buildSplitLayer } from "./split.ts";
+
+/** "фото: Gage Skidmore · CC BY-SA… · wikimedia" — the on-frame credit line of a panel photo */
+export function shortPhotoCredit(c: { creator: string; license: string; license_version: string; source: string }): string {
+  const lic = c.license === "cc0" ? "CC0" : c.license === "pdm" ? "Public Domain" : `CC ${c.license.toUpperCase()} ${c.license_version}`.trim();
+  return [`фото: ${c.creator || "автор не указан"}`.slice(0, 40), lic, c.source].filter(Boolean).join(" · ");
+}
 import type { Layout, LayoutPage } from "../layout-types.ts";
 
 /** Paths inside the generated project (relative to index.html). */
@@ -103,7 +109,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
   // split layout: the hook title replaces the EDL titles (they would collide with the top panels)
   const split =
     D.layout === "split" && job.panels
-      ? buildSplitLayer({ W, H, duration: DUR, design: D, panels: job.panels, images: assets.panelRel ?? {}, faceY: job.face_y, serifFamily: `'VPlayfairItalic', serif`, monoFamily: `'VMono', monospace`, displayFamily: `'${layout.font.family.replace(/['"<>]/g, "")}', sans-serif` })
+      ? buildSplitLayer({ W, H, duration: DUR, design: D, panels: job.panels, images: assets.panelRel ?? {}, credits: Object.fromEntries((job.panel_credits ?? []).map((c) => [c.beat, shortPhotoCredit(c)])), faceY: job.face_y, serifFamily: `'VPlayfairItalic', serif`, monoFamily: `'VMono', monospace`, displayFamily: `'${layout.font.family.replace(/['"<>]/g, "")}', sans-serif` })
       : null;
   if (split) tw.push(...split.tweens);
   if (!split) layout.titlesOut.forEach((t) => {

@@ -13,7 +13,7 @@ WHAT YOU DESIGN
    - image_style: one English sentence describing the photographic look, used only if a photo cannot be found and an image has to be generated (documentary, natural light, no text).
    - brand: a short label (≤ 14 chars), only shown if chrome is "header".
    - chrome: "none" (default: no persistent header, no page counter, no progress bar — those make every frame look like the same slide template) or "header" (only for a numbered list/countdown video where the counter carries meaning).
-   - music: "upbeat", "chill", "dramatic", "inspiring", "tech", "funky", "emotional" — the mood of the background track.
+   - music: "upbeat", "chill", "dramatic", "inspiring", "tech", "funky", "emotional" — the mood of the background track. Default to an energetic, forward-moving bed ("upbeat", "tech" or "funky") that sits under a narrator; "dramatic" (slow cinematic build-ups) only when the topic is a tragedy/thriller or the user asks for drama; news, money and explainers are never "dramatic".
 2. scenes — exactly one per beat, in order. For each choose a layout and fill only the fields it uses:
    PHOTO-LED (preferred: at least half of the beats, the image is a REAL PHOTO found by keywords):
    - "media_full": the photo fills the frame with a slow camera push or pan; the headline sits in the upper or lower third (anchor) on a soft scrim. The workhorse: places, people at work, objects, products, events.

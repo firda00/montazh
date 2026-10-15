@@ -73,7 +73,10 @@ test("composeScenes: deterministic, one section per beat on the frame grid, acce
   assert.equal((a.html.match(/class="clip scene /g) ?? []).length, 4);
   assert.match(a.html, /class="clip scene L-hero_number hook"/);
   assert.match(a.html, /class="clip scene L-headline"/, "media_full without an image renders as a headline");
-  assert.match(a.html, /class="num-v">\+70%<\/span><span class="num-u">за год</);
+  // the number rolls in as an odometer: static "+", "%" and one 0-9-0-9 strip per digit
+  assert.match(a.html, /class="num-v odo"><span class="odc">\+<\/span><span class="od"><span class="ods" id="sc\d-num-od1">/);
+  assert.match(a.html, /<span class="odc">%<\/span><\/span><span class="num-u">за год</);
+  assert.match(a.html, /tl\.fromTo\("#sc\d-num-od1", \{ yPercent: 0 \}, \{ yPercent: -85/);
   assert.match(a.html, /class="w acc-w-serif"/);
   assert.match(a.html, /class="acc acc-marker" id="sc1-hl-a0"/);
   assert.match(a.html, /class="wm"><span class="w"/, "mask entrance wraps words");

@@ -13,12 +13,21 @@ const SFX_GAIN: Record<SfxKind, number> = { whoosh: 3, pop: -7, tick: -9, impact
 /** effects sit this much lower under a voiceover (before the ducking) */
 export const SFX_UNDER_VOICE_DB = -5;
 
+/**
+ * Music bed under a voiceover (voice levelled to −16 LUFS first). Measured on the coffee make (ebur128 on the
+ * stems, before the final −14 LUFS): the bed sits at −22 LUFS and swells to −16…−21 LUFS in the gaps between
+ * beats, and a gentle side-chain (ratio 3, 10 ms attack, 160 ms release) holds it at −34.7 LUFS while the
+ * narrator talks, i.e. −18.8 dB under the voice (−15.9 LUFS) — audible, not fighting. The old setting
+ * (−27 LUFS, ratio 8) left it at −39.5 LUFS, −23.6 dB under the voice: inaudible on phone speakers.
+ */
+export const VOICE_BED = { lufs: -22, threshold: 0.004, ratio: 3, attack: 10, release: 160, knee: 4 } as const;
+
 export interface MixOptions {
   video: string;
   out: string;
   duration: number;
   music?: string | null;
-  /** music level before the final normalisation (LUFS); defaults: −16 alone, −24 under speech, −27 under a voiceover */
+  /** music level before the final normalisation (LUFS); defaults: −16 alone, −24 under speech, VOICE_BED.lufs under a voiceover */
   musicLufs?: number;
   /** the video's audio track is speech to keep on top (montage); false for silent motion graphics */
   speech?: boolean;
@@ -68,9 +77,10 @@ export function buildMixGraph(o: MixOptions, ctx: { hasAudio: boolean; sfxFile: 
 
   if (o.music) {
     inputs.push("-stream_loop", "-1", "-i", o.music);
-    const lufs = o.musicLufs ?? (voice ? -27 : speech ? -24 : -16);
-    const fadeOut = Math.min(2.5, D / 4);
-    chains.push(`[${idx}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS,loudnorm=I=${lufs}:TP=-2:LRA=11,afade=t=in:st=0:d=0.8,afade=t=out:st=${(D - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}[mus]`);
+    const lufs = o.musicLufs ?? (voice ? VOICE_BED.lufs : speech ? -24 : -16);
+    // under a narrator the bed stays up to the last words and fades over the tail only
+    const fadeOut = Math.min(voice ? 1.0 : 2.5, D / 4);
+    chains.push(`[${idx}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS,loudnorm=I=${lufs}:TP=-2:LRA=11,afade=t=in:st=0:d=${voice ? 0.15 : 0.8},afade=t=out:st=${(D - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}[mus]`);
     idx++;
     if (speech) {
       chains.push(`[0:a]aresample=48000,aformat=channel_layouts=stereo${voice ? "[sp]" : ",asplit=2[sp][sc]"}`);
@@ -80,8 +90,9 @@ export function buildMixGraph(o: MixOptions, ctx: { hasAudio: boolean; sfxFile: 
       mixIn.push("[orig]");
     }
     if (voice) {
-      // music dips ~10 dB while the narrator talks and comes back in the pauses between beats
-      chains.push(`[mus]${keys.shift()}sidechaincompress=threshold=0.015:ratio=8:attack=20:release=350:makeup=1[duck]`);
+      // music dips ~11 dB while the narrator talks and swells back quickly in the pauses between beats
+      const B = VOICE_BED;
+      chains.push(`[mus]${keys.shift()}sidechaincompress=threshold=${B.threshold}:ratio=${B.ratio}:attack=${B.attack}:release=${B.release}:knee=${B.knee}:makeup=1[duck]`);
       mixIn.push("[duck]");
     } else if (speech) {
       // music dips ~9 dB while someone talks, comes back in the pauses

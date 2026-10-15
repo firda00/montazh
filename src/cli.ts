@@ -528,7 +528,7 @@ program
   .option("--images <mode>", "картинки: photo (настоящие фото Openverse CC0/PD/CC BY, по умолчанию) | ai (генерация Antigravity) | none", "photo")
   .option("--no-images", "без картинок (то же, что --images none)")
   .option("--aspect <a>", "кадр: 9:16 (Reels/Shorts) | 16:9 (YouTube) | 1:1 | auto (по словам темы: «для ютуба» → 16:9)", "auto")
-  .option("--voice <id>", "озвучка голосом из каталога (vedit voices), например denis; none — без голоса", "none")
+  .option("--voice <id>", "озвучка голосом из каталога (vedit voices), например gemini_charon или denis; auto (по умолчанию) — Gemini Charon при ключе Google, иначе Piper dmitri; none — без голоса", "auto")
   .option("--voice-captions", "субтитры озвучки поверх сцен (по умолчанию нет: текст уже на экране)")
   .option("--voice-speed <x>", "темп голоса: 0.8 — быстрее, 1.2 — медленнее", (v) => Number(v))
   .action(async (topic: string, opts: { lang: string; seconds: number; audience?: string; trends: boolean; music?: string; sfx: boolean; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: string | boolean; aspect: string; voice: string; voiceCaptions?: boolean; voiceSpeed?: number }) => {
@@ -539,8 +539,8 @@ program
       if (typeof opts.images === "string" && !["photo", "ai", "none"].includes(opts.images)) throw new Error("--images: ожидается photo | ai | none");
       const { isAspect } = await import("./lib/aspect.ts");
       if (opts.aspect !== "auto" && !isAspect(opts.aspect)) throw new Error("--aspect: ожидается 9:16 | 16:9 | 1:1 | auto");
-      const { requireVoice, NO_VOICE } = await import("./voice/catalog.ts");
-      if (!NO_VOICE.test(opts.voice)) requireVoice(opts.voice);
+      const { requireVoice, NO_VOICE, AUTO_VOICE } = await import("./voice/catalog.ts");
+      if (!NO_VOICE.test(opts.voice) && !AUTO_VOICE.test(opts.voice)) requireVoice(opts.voice);
       const { make, creditsText } = await import("./make/index.ts");
       const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, sfx: opts.sfx, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images as boolean | "photo" | "ai" | "none", aspect: isAspect(opts.aspect) ? opts.aspect : undefined, voice: opts.voice, voiceCaptions: opts.voiceCaptions, voiceLengthScale: opts.voiceSpeed, onEvent: (l) => console.log(l) });
       console.log(`\n✔ ${r.output} (${r.aspect} ${r.width}×${r.height}, ${r.duration.toFixed(1)} с, ${r.beats} битов${r.voice ? `, голос ${r.voice}` : ""}, рендер ${r.render_seconds.toFixed(0)} с${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""})`);
@@ -637,33 +637,44 @@ program
   .command("voices")
   .description("каталог голосов для озвучки (make --voice) и аватара (avatar export --voice)")
   .option("--json", "вывести JSON")
-  .option("--sample <id>", "синтезировать пробу голоса (Piper, локально) в workspace/_voices/<id>.wav")
+  .option("--sample <id>", "синтезировать пробу голоса (Piper локально / Gemini API) в workspace/_voices/<id>.wav")
   .option("--text <text>", "текст пробы")
   .action(async (opts: { json?: boolean; sample?: string; text?: string }) => {
     try {
-      const { VOICES, formatVoices, requireVoice, isLocal, piperVoiceFor } = await import("./voice/catalog.ts");
+      const { VOICES, formatVoices, requireVoice, isLocal, sampleVoiceFor, GEMINI_LICENSE_NOTE } = await import("./voice/catalog.ts");
       const { piperStatus, synthesize } = await import("./voice/piper.ts");
+      const { geminiApiKey, geminiTtsModels } = await import("./voice/gemini.ts");
+      const { cloudApiKey, cloudGeminiModels } = await import("./voice/cloudtts.ts");
+      const { TTS_KEYS_HELP } = await import("./voice/piper.ts");
       if (opts.sample) {
         const v = requireVoice(opts.sample);
-        const p = piperVoiceFor(v);
+        const p = sampleVoiceFor(v);
         if (!p) throw new Error(`${v.id} звучит только в Colab (встроенный голос Chatterbox); локальная проба невозможна`);
         const { WORKSPACE_ROOT } = await import("./lib/workspace.ts");
         const out = path.join(WORKSPACE_ROOT, "_voices", `${v.id}.wav`);
         const text = opts.text ?? (p.language === "ru" ? "Привет! Это проба голоса. В 2026 году кофе подорожал на 30%." : "Hi! This is a voice sample. Coffee got 30% more expensive in 2026.");
         const r = await synthesize(text, p.id, out, { onEvent: (l) => console.log(l) });
-        console.log(`✔ ${out} (${r.duration.toFixed(1)} с${p.id !== v.id ? `; тембр-источник клона ${v.id}` : ""})`);
+        console.log(`✔ ${out} (${r.duration.toFixed(1)} с, ${r.engine}${r.model ? ` ${r.model}` : ""}${r.voice !== v.id ? `; говорил ${r.voice}` : ""})`);
         for (const x of r.sentences) console.log(`  ${x.start.toFixed(2)}–${x.end.toFixed(2)}  ${x.spoken}`);
         return;
       }
       const st = await piperStatus();
+      const gemini = { key: !!geminiApiKey(), models: geminiTtsModels() };
+      const cloud = { key: !!cloudApiKey(), models: [...cloudGeminiModels(), "chirp3-hd"] };
       if (opts.json) {
-        console.log(JSON.stringify({ piper: st, voices: VOICES.map((v) => ({ ...v, local: isLocal(v), downloaded: !!v.piper && st.models.includes(v.piper.key) })) }, null, 2));
+        console.log(JSON.stringify({ piper: st, gemini, cloud, voices: VOICES.map((v) => ({ ...v, local: isLocal(v), downloaded: !!v.piper && st.models.includes(v.piper.key) })) }, null, 2));
         return;
       }
       console.log(formatVoices());
-      console.log(`\nPiper: ${st.binary ? "установлен" : "скачается при первом синтезе (~22 МБ)"}; скачанные голоса: ${st.models.join(", ") || "нет (каждый ~60 МБ, при первом использовании)"}`);
+      console.log(`
+Piper: ${st.binary ? "установлен" : "скачается при первом синтезе (~22 МБ)"}; скачанные голоса: ${st.models.join(", ") || "нет (каждый ~60 МБ, при первом использовании)"}`);
+      console.log(`Google Cloud TTS (GOOGLE_CLOUD_API_KEY): ${cloud.key ? `ключ есть — gemini_* через Gemini-TTS (${cloud.models.slice(0, -1).join(" → ")}), chirp_* через Chirp 3 HD` : "ключа нет"}`);
+      console.log(`Gemini API (GEMINI_API_KEY): ${gemini.key ? `ключ есть${cloud.key ? " (запасной)" : `, модели ${gemini.models.join(" → ")}`}` : "ключа нет"}`);
+      console.log(GEMINI_LICENSE_NOTE);
+      if (!gemini.key && !cloud.key) console.log(`gemini_* и chirp_* пока звучат голосом Piper.
+${TTS_KEYS_HELP}`);
       console.log("Свой голос: аватар — vedit avatar export --voice мой_голос.ogg (клон) или --speech запись.ogg; в боте — голосовое сообщение.");
-      console.log('Примеры: vedit make "тема" --voice denis · vedit avatar export --text "…" --voice chatterbox_denis · vedit voices --sample dmitri');
+      console.log('Примеры: vedit make "тема" --voice gemini_charon (или auto) · vedit make "тема" --voice denis · vedit avatar export --text "…" --voice chatterbox_denis · vedit voices --sample dmitri');
     } catch (err) {
       fail(err);
     }

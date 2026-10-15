@@ -7,7 +7,13 @@ import { createJob, exists, jobDir, loadJob, readJson, runStep, writeJson, WORKS
 import { PlanError } from "../plan/backend/types.ts";
 import { MediaSchema, TranscriptSchema, type Edl, type Transcript } from "../schemas/index.ts";
 import { makeBotApi, TelegramError, type BotApi, type CallMethod, type DownloadFn, type Limits, type TgMessage, type TgUpdate } from "./telegram-api.ts";
-import { getVoice, isLocal, NO_VOICE, piperVoiceFor, voicesListText, type VoiceDef } from "../voice/catalog.ts";
+import { autoVoice, GEMINI_LICENSE_NOTE, getVoice, isCloud, isLocal, NO_VOICE, piperVoiceFor, sampleVoiceFor, voicesListText, type VoiceDef } from "../voice/catalog.ts";
+import { geminiApiKey } from "../voice/gemini.ts";
+import { cloudApiKey } from "../voice/cloudtts.ts";
+import { TTS_KEYS_HELP } from "../voice/piper.ts";
+
+/** a Google TTS key (Cloud TTS or Gemini API) is configured */
+const hasGoogleTtsKey = () => !!(cloudApiKey() || geminiApiKey());
 import { detectAspect, isAspect, type Aspect } from "../lib/aspect.ts";
 
 // same hints as src/cli.ts (cli.ts runs commander on import, so the table is duplicated here)
@@ -37,7 +43,7 @@ export const MSG = {
     "/make <тема> — ролик по теме из ничего: тренды, сценарий, настоящие фото, моушн-графика, музыка. Вертикальный 9:16; для YouTube — /make 16:9 тема (или «… для ютуба»)",
     "Несколько видео подряд (или альбомом) → /viral — соберу один самый вирусный ролик из всех; /clear — новая подборка",
     "/style pop | split | calm — стиль монтажа (split: сверху сгенерированные картинки с карточками, снизу спикер)",
-    "/voice — голоса для озвучки: /voice denis — выбрать (пришлю пробу), /voice off — без голоса; голос озвучит /make и /avatar",
+    "/voice — голоса для озвучки: /voice gemini_charon — выбрать (пришлю пробу), /voice off — без голоса; голос озвучит /make и /avatar",
     "/send file | video | both — как присылать ролики: файлом в исходном качестве (по умолчанию), видео с плеером (Telegram пережмёт) или и так и так",
     "/avatar <текст или тема> — говорящий аватар (бесплатно, через Google Colab): пришлите заранее фото (лицо анфас) и голосовое 5–10 с — аватар будет с вашим лицом и голосом; без них — вымышленный ведущий. Готовый avatar_result.zip пришлите сюда — смонтирую рилс",
     "/cancel — отменить текущую работу (после текущего шага)",
@@ -65,16 +71,27 @@ export const MSG = {
   avatarUsage: "Напишите текст или тему: /avatar почему кофе дорожает (тема — монолог напишу сам) или /avatar текст: Привет! Сегодня расскажу… Фото и голосовое для аватара можно прислать заранее; /avatar сброс — забыть их.",
   avatarStart: (photo: boolean, voice: boolean, voiceId?: string) =>
     `Готовлю задание для аватара: ${photo ? "ваше фото" : "вымышленный ведущий (сгенерирую портрет)"}, ${voice ? "ваш голос (клон)" : voiceId ? `голос ${voiceId}` : "стандартный голос"}. Это 1–3 минуты.`,
-  voiceList: (current?: string) =>
+  voiceList: (current?: string, hasKey = hasGoogleTtsKey()) =>
     [
-      `Голоса для озвучки (${current ? `сейчас: ${current}` : "сейчас без голоса"}):`,
+      `Голоса для озвучки (${current === "off" ? "сейчас без голоса" : current ? `сейчас: ${current}` : `сейчас: авто — ${autoVoice("ru", hasKey).id}`}):`,
       voicesListText(current),
       "",
       "/voice <id> — выбрать (пришлю пробу), /voice off — без голоса.",
-      "Piper-голоса (denis, dmitri, ljspeech, john, cori) звучат и в /make, и в /avatar; chatterbox_* — только в /avatar (синтез в Colab).",
+      `gemini_* и chirp_* — живые голоса Google (облако; нужен ключ GOOGLE_CLOUD_API_KEY или GEMINI_API_KEY${hasKey ? " — есть" : " — пока нет, вместо них звучит Piper"}); они озвучивают и /make, и /avatar. ${GEMINI_LICENSE_NOTE}`,
+      "Piper-голоса (denis, dmitri, ljspeech, john, cori) — локально, без ключа; chatterbox_* — только в /avatar (синтез в Colab).",
+      "Без выбора /make озвучивается автоматически: Gemini, если есть ключ, иначе Piper.",
       "Ваше голосовое сообщение для /avatar важнее выбранного голоса.",
     ].join("\n"),
-  voiceSet: (v: VoiceDef) => `Голос: ${v.id} — ${v.name}. Лицензия: ${v.license}.\n${isLocal(v) ? "Им будут озвучены /make и /avatar." : "Им будет говорить /avatar (Colab); для /make возьму локальный " + (piperVoiceFor(v)?.id ?? "голос по языку") + "."}`,
+  voiceSet: (v: VoiceDef, hasKey = hasGoogleTtsKey()) =>
+    `Голос: ${v.id} — ${v.name}. Лицензия: ${v.license}.
+${
+      isCloud(v) && !hasKey
+        ? `Ключа Google пока нет — до его появления /make и /avatar озвучит Piper ${piperVoiceFor(v)?.id}.
+${TTS_KEYS_HELP}`
+        : isLocal(v)
+          ? "Им будут озвучены /make и /avatar."
+          : "Им будет говорить /avatar (Colab); для /make возьму локальный " + (piperVoiceFor(v)?.id ?? "голос по языку") + "."
+    }`,
   voiceOff: "Озвучка выключена: /make снова без голоса, /avatar — стандартный голос Chatterbox (или ваше голосовое).",
   voiceUnknown: (id: string) => `Не знаю голос «${id}». /voice — список.`,
   sendUsage: (cur: string) => `Сейчас: ${cur}. /send file — файлом в исходном качестве (по умолчанию); /send video — видео с плеером (Telegram сжимает); /send both — и то и другое.`,
@@ -350,8 +367,20 @@ export const runFullPipeline: PipelineFn = async ({ source, sources, instruction
   checkCancel(signal);
 
   const rendered = okIds.length ? await renderIds(job.id, okIds, edl, progress, log) : { outputs: [], failed: [] };
-  return { jobId: job.id, outputs: rendered.outputs, failed: [...failed, ...rendered.failed], reasoning: edl.reasoning, notes: p.report.warnings.slice(0, 3) };
+  const credits = await photoCredits(job.id, rendered.outputs);
+  return { jobId: job.id, outputs: rendered.outputs, failed: [...failed, ...rendered.failed], reasoning: `${edl.reasoning}${credits ? `
+${credits}` : ""}`, notes: p.report.warnings.slice(0, 3) };
 };
+
+/** attribution of real photos on split panels (empty when there are none) */
+async function photoCredits(jobId: string, outputs: { id: string }[]): Promise<string> {
+  try {
+    const { panelCreditsText } = await import("../design/export.ts");
+    return await panelCreditsText(jobId, outputs.map((o) => o.id));
+  } catch {
+    return "";
+  }
+}
 
 /** revise(job) → cut affected → render outputs whose design/render changed (same rule as `vedit revise`). */
 export const runRevisePipeline: ReviseFn = async ({ jobId, edit, progress, signal, log }) => {
@@ -388,7 +417,9 @@ export const runRevisePipeline: ReviseFn = async ({ jobId, edit, progress, signa
     return { jobId, outputs: [], failed, reasoning: r.edl.reasoning };
   }
   const rendered = await renderIds(jobId, toRender, r.edl, progress, log);
-  return { jobId, outputs: rendered.outputs, failed: [...failed, ...rendered.failed], reasoning: r.edl.reasoning };
+  const credits = await photoCredits(jobId, rendered.outputs);
+  return { jobId, outputs: rendered.outputs, failed: [...failed, ...rendered.failed], reasoning: `${r.edl.reasoning}${credits ? `
+${credits}` : ""}` };
 };
 
 // ── state ──────────────────────────────────────────────────────────────────────
@@ -724,7 +755,9 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     if (!topic) return say(chatId, MSG.makeUsage);
     await updateChat(chatId, { prompt: topic });
     await say(chatId, `${MSG.makeStart}${aspect !== "9:16" ? ` Кадр ${aspect}.` : ""}`);
-    const voice = chat(chatId).voice;
+    // no /voice choice → "auto" (Gemini with a key, else Piper); /voice off → silent
+    const chosen = chat(chatId).voice;
+    const voice = chosen === "off" ? undefined : (chosen ?? "auto");
     launch(chatId, "make", (r) => makeFn({ topic, voice, aspect, progress: progressFor(chatId, r), onJob: (jobId) => void updateChat(chatId, { jobId }), signal: r.ac.signal, log: (l) => log(`[${chatId}] ${l}`) }));
   }
 
@@ -746,7 +779,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const photo = c.avatar_photo && (await exists(c.avatar_photo)) ? c.avatar_photo : undefined;
     const voice = c.avatar_voice && (await exists(c.avatar_voice)) ? c.avatar_voice : undefined;
     // the user's own voice note wins over the catalogue voice
-    const voiceId = voice ? undefined : c.voice;
+    const voiceId = voice || c.voice === "off" ? undefined : c.voice;
     await updateChat(chatId, { prompt: input });
     await say(chatId, MSG.avatarStart(!!photo, !!voice, voiceId));
     launch(chatId, "avatar", (r) =>
@@ -816,14 +849,15 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const c = chat(chatId);
     if (!arg) return say(chatId, MSG.voiceList(c.voice));
     if (NO_VOICE.test(arg)) {
-      await updateChat(chatId, { voice: undefined });
+      await updateChat(chatId, { voice: "off" });
       return say(chatId, MSG.voiceOff);
     }
     const v = getVoice(arg);
     if (!v) return say(chatId, MSG.voiceUnknown(arg));
     await updateChat(chatId, { voice: v.id });
     await say(chatId, MSG.voiceSet(v));
-    const src = piperVoiceFor(v);
+    // Gemini voices without a key: the sample comes from their Piper fallback (that is what will actually speak)
+    const src = isCloud(v) && !hasGoogleTtsKey() ? piperVoiceFor(v) : sampleVoiceFor(v);
     if (!src) return;
     // the sample is synthesised in the background (first use downloads the voice, ~60 MB)
     const task = (async () => {

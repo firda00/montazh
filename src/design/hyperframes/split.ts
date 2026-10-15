@@ -1,9 +1,11 @@
 import type { DesignSpec } from "../../schemas/index.ts";
 import type { Card, Panels } from "../panels.ts";
+import { graphicsCss, renderGraphic } from "../panel-graphics.ts";
 
 /**
  * Split-screen layer for the montage overlay: the speaker video moves into the bottom half, the top
- * half shows one panel per segment (generated image in a framed card + UI cards over its corners)
+ * half shows one panel per segment in a framed card — a real photo (Ken Burns + UI cards over its corners),
+ * a code-rendered motion graphic (src/design/panel-graphics.ts), or, last resort, a generated image —
  * and a three-line hook title sits on the seam for the first seconds. Returns CSS, sections and
  * GSAP tweens that composeHyperframes() splices into the composition.
  */
@@ -19,8 +21,10 @@ export interface SplitInput {
   duration: number;
   design: DesignSpec;
   panels: Panels;
-  /** panel index → image path relative to the project */
+  /** panel index → image path relative to the project (photo or AI image); a panel without one shows its graphic */
   images: Record<number, string>;
+  /** panel index → short credit shown on the photo ("фото: Автор · CC BY 2.0 · Wikimedia") */
+  credits?: Record<number, string>;
   /** face height in the rough frame (0 = top), to keep the head in the bottom box */
   faceY?: number;
   /** CSS font stacks; they go into style="" attributes, so single quotes only */
@@ -74,6 +78,14 @@ function highlight(line: string): string {
     .replace(/\b(\d+(?:\.\d+)?)\b/g, '<i class="n">$1</i>');
 }
 
+/** The framed card of the top half: where photos are cropped to and graphics are laid out. */
+export function panelFrame(W: number, H: number, seamFrac: number): { x: number; y: number; w: number; h: number } {
+  const seam = Math.round(seamFrac * H);
+  const x = 54;
+  const y = 150;
+  return { x, y, w: W - 2 * x, h: seam - y - 60 };
+}
+
 export function buildSplitLayer(s: SplitInput): SplitLayer {
   const D = s.design;
   const SP = D.split;
@@ -94,14 +106,24 @@ export function buildSplitLayer(s: SplitInput): SplitLayer {
     const id = `sp${i}`;
     const dur = Math.max(0.1, p.end - p.start);
     const img = s.images[i];
-    const cards = p.cards.map((c, k) => cardHtml(c, `${id}-c${k}`, s.monoFamily, s.serifFamily)).join("");
+    // a graphic panel (or a photo/AI panel whose picture is missing) shows its code-rendered graphic
+    const gfx = !img && p.graphic ? renderGraphic(p.graphic, { id, w: cardW, h: cardH, start: p.start, duration: dur, accent, bg: SP.panel_bg, displayFamily: s.displayFamily, serifFamily: s.serifFamily, monoFamily: s.monoFamily }) : null;
+    const cards = (gfx ? [] : p.cards).map((c, k) => cardHtml(c, `${id}-c${k}`, s.monoFamily, s.serifFamily)).join("");
+    const credit = img && s.credits?.[i] ? `<span class="sp-credit" id="${id}-cr">${esc(s.credits[i])}</span>` : "";
+    const inner = img ? `<img class="sp-img" id="${id}-img" src="${img}" alt="" />${credit}` : gfx ? gfx.html : `<span class="sp-noimg"></span>`;
     sections.push(
-      `      <section id="${id}" class="clip sp-panel" data-start="${fmt(p.start)}" data-duration="${fmt(dur)}" data-track-index="5">\n        <span class="sp-glow" id="${id}-glow"></span>\n        <span class="sp-frame" id="${id}-frame">${img ? `<img class="sp-img" id="${id}-img" src="${img}" alt="" />` : `<span class="sp-noimg"></span>`}</span>\n        ${cards}\n      </section>`,
+      `      <section id="${id}" class="clip sp-panel" data-start="${fmt(p.start)}" data-duration="${fmt(dur)}" data-track-index="5">\n        <span class="sp-glow" id="${id}-glow"></span>\n        <span class="sp-frame" id="${id}-frame">${inner}</span>\n        ${cards}\n      </section>`,
     );
-    tweens.push(`tl.fromTo("#${id}-frame", { opacity: 0, y: 40, scale: 0.96 }, { opacity: 1, y: 0, scale: 1, duration: 0.55, ease: "expo.out" }, ${fmt(p.start)});`);
-    if (img) tweens.push(`tl.fromTo("#${id}-img", { scale: 1.02 }, { scale: 1.12, duration: ${fmt(dur)}, ease: "none" }, ${fmt(p.start)});`);
+    // panel change: the new card pushes in from below with a slight scale (a cut, not a fade)
+    tweens.push(`tl.fromTo("#${id}-frame", { opacity: 0, y: 70, scale: 0.94 }, { opacity: 1, y: 0, scale: 1, duration: 0.5, ease: "expo.out" }, ${fmt(p.start)});`);
+    if (img) {
+      // Ken Burns with a drift direction that alternates per panel
+      const dir = i % 2 ? -1 : 1;
+      tweens.push(`tl.fromTo("#${id}-img", { scale: 1.04, xPercent: ${-2 * dir} }, { scale: 1.14, xPercent: ${2 * dir}, duration: ${fmt(dur)}, ease: "none" }, ${fmt(p.start)});`);
+    }
+    if (gfx) tweens.push(...gfx.tweens);
     const hookEnd = s.panels.hook_title.length ? Math.min(4.5, s.panels.panels[0]?.end ?? 4.5, s.duration) : 0;
-    p.cards.forEach((c, k) => {
+    (gfx ? [] : p.cards).forEach((c, k) => {
       // bottom-corner cards of the first panel wait for the hook title on the seam to leave
       const lower = c.corner === "bl" || c.corner === "br";
       const at = Math.max(p.start + 0.45 + k * 0.35, lower && p.start < hookEnd ? hookEnd + 0.1 : 0);
@@ -147,6 +169,8 @@ export function buildSplitLayer(s: SplitInput): SplitLayer {
       .sp-glow { position: absolute; left: ${cardX - 30}px; top: ${cardY - 20}px; width: ${cardW + 60}px; height: ${cardH + 40}px; display: block; border-radius: 48px; background: radial-gradient(closest-side, ${accent}66, transparent); }
       .sp-frame { position: absolute; left: ${cardX}px; top: ${cardY}px; width: ${cardW}px; height: ${cardH}px; display: block; overflow: hidden; border-radius: 30px; border: 2px solid rgba(255,255,255,0.18); box-shadow: 0 0 0 1px ${accent}55, 0 30px 90px rgba(0,0,0,0.6); background: #000; }
       .sp-img { display: block; width: 100%; height: 100%; object-fit: cover; }
+      .sp-credit { position: absolute; right: 16px; bottom: 14px; display: block; max-width: 70%; padding: 6px 12px; border-radius: 10px; background: rgba(0,0,0,0.55); font-family: ${s.monoFamily}; font-size: 17px; line-height: 1.3; color: rgba(255,255,255,0.78); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      ${graphicsCss({ w: cardW, h: cardH, accent, bg: SP.panel_bg, displayFamily: s.displayFamily, monoFamily: s.monoFamily })}
       .sp-noimg { display: block; width: 100%; height: 100%; background: linear-gradient(140deg, ${accent}55, ${SP.panel_bg}); }
       .sc-card { position: absolute; display: flex; flex-direction: column; gap: 10px; max-width: 470px; padding: 22px 26px; border-radius: 22px; background: rgba(14,11,28,0.86); border: 1px solid rgba(255,255,255,0.16); box-shadow: 0 20px 60px rgba(0,0,0,0.55); color: #FFFFFF; }
       .sc-tl { ${corner("tl")} } .sc-tr { ${corner("tr")} } .sc-bl { ${corner("bl")} } .sc-br { ${corner("br")} }
