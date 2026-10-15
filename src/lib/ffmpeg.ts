@@ -63,3 +63,19 @@ export function parseRate(rate: string | undefined): number {
   const [n, d] = rate.split("/").map(Number);
   return d ? n / d : n;
 }
+
+/** ffmpeg writing raw bytes to stdout (`-f rawvideo|f32le … -`): returns the bytes. Keep outputs small (ROI frames, short audio windows). */
+export function ffmpegBuffer(args: string[]): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(FFMPEG, ["-hide_banner", "-loglevel", "error", "-nostdin", ...args], { windowsHide: true });
+    const chunks: Buffer[] = [];
+    let stderr = "";
+    child.stdout.on("data", (d: Buffer) => chunks.push(d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", (err) => reject(new ProcessError(`${FFMPEG} failed to start: ${err.message}`, "")));
+    child.on("close", (code) => {
+      if (code === 0) resolve(Buffer.concat(chunks));
+      else reject(new ProcessError(`${FFMPEG} exited with code ${code}:\n${stderr.trim().split("\n").slice(-6).join("\n")}`, stderr));
+    });
+  });
+}

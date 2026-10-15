@@ -6,11 +6,13 @@ import { EdlSchema, type Edl } from "../schemas/index.ts";
 import { exportDesignJob, type ExportOptions } from "../design/export.ts";
 import { CutReportSchema } from "../cut/index.ts";
 import type { OverlayRenderer, RenderQuality } from "../design/renderer.ts";
-import { finalizeOutput, outputPath } from "./finalize.ts";
+import { finalizeOutput, measureLoudness, outputPath } from "./finalize.ts";
+import { ffmpeg } from "../lib/ffmpeg.ts";
 import { loadJob } from "../lib/workspace.ts";
 import { loadPreset } from "../plan/presets.ts";
 import { mixSoundtrack } from "../audio/mix.ts";
 import { isMood, pickMusic, type Mood, type MusicTrack } from "../audio/music.ts";
+import { SFX_KINDS, type SfxCue } from "../audio/sfx.ts";
 
 export const RenderReportSchema = z.object({
   renderer: z.string(),
@@ -55,13 +57,13 @@ export interface RenderOptions extends ExportOptions {
 }
 
 /** Music track for a montage output, or null (decided once per job and reused by every output). */
-async function montageMusic(jobId: string, want: string, pace: string): Promise<MusicTrack | null> {
+async function montageMusic(jobId: string, want: string, pace: string, fallbackMood?: Mood): Promise<MusicTrack | null> {
   if (want === "none") return null;
   if (want !== "auto" && !isMood(want)) {
     if (!(await exists(want))) throw new Error(`музыка не найдена: ${want}`);
     return { file: path.resolve(want), title: path.parse(want).name, creator: "", license: "own", source: "file", url: "", attribution: "" };
   }
-  const mood: Mood = want === "auto" ? (pace === "calm" ? "chill" : "upbeat") : (want as Mood);
+  const mood: Mood = want === "auto" ? (fallbackMood ?? (pace === "calm" ? "chill" : "upbeat")) : (want as Mood);
   return pickMusic(mood, jobId, { minSeconds: 30 });
 }
 
@@ -114,12 +116,14 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
       const tf = Date.now();
       const fin = await finalizeOutput(rendered.file, rough, outputPath(dir, output.id), { previewAt: (job.timeline.titles[0]?.at ?? 0.5) + 0.6 });
       // background music, ducked under the speech
-      const wantMusic = opts.music ?? (output.music.enabled || preset.music_default ? "auto" : "none");
+      const wantMusic = opts.music ?? (output.audio?.music ?? (output.music.enabled || preset.music_default ? "auto" : "none"));
+      const plan = output.audio; // sound design decided at plan time (highlights)
+      const cues = (output.sfx ?? []).filter((c): c is SfxCue => (SFX_KINDS as readonly string[]).includes(c.kind));
       let musicNote: { music?: string; music_attribution?: string } = {};
       if (wantMusic !== "none") {
         if (track === undefined) {
           try {
-            track = await montageMusic(jobId, wantMusic, preset.pace);
+            track = await montageMusic(jobId, wantMusic, preset.pace, plan?.music ? "sport" : undefined);
           } catch (err) {
             track = null;
             warnings.push(err instanceof Error ? err.message : String(err));
@@ -129,8 +133,21 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
         if (track) {
           opts.onEvent?.(`    музыка: «${track.title}»${track.creator ? ` — ${track.creator}` : ""} (${track.license})`);
           const tmp = fin.output.replace(/\.mp4$/i, ".music.mp4");
-          await mixSoundtrack({ video: fin.output, out: tmp, duration: fin.duration, music: track.file, speech: true });
+          await mixSoundtrack(
+            plan
+              ? { video: fin.output, out: tmp, duration: fin.duration, music: track.file, speech: false, musicOffset: plan.music_offset, musicLufs: plan.music_lufs, origGainDb: plan.orig_gain_db, duck: plan.duck, sfx: cues }
+              : { video: fin.output, out: tmp, duration: fin.duration, music: track.file, speech: true, sfx: cues },
+          );
           await fs.rename(tmp, fin.output);
+          // the mix normalises in one pass (dynamic loudnorm lands within ~1 LU): a linear trim brings a planned mix to the target
+          if (plan) {
+            const m = await measureLoudness(fin.output);
+            if (Number.isFinite(m.input_i) && Math.abs(m.input_i + 14) > 0.3) {
+              const trimmed = fin.output.replace(/\.mp4$/i, ".trim.mp4");
+              await ffmpeg(["-i", fin.output, "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-af", `volume=${(-14 - m.input_i).toFixed(2)}dB,alimiter=limit=0.79:level=false`, "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", trimmed]);
+              await fs.rename(trimmed, fin.output);
+            }
+          }
           musicNote = { music: track.file, music_attribution: track.attribution };
         }
       }

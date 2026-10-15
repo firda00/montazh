@@ -8,7 +8,7 @@ import { WORKSPACE_ROOT } from "../lib/workspace.ts";
  * bytes every time. Generated once into workspace/_cache/sfx/<kind>.wav (48 kHz stereo).
  */
 
-export const SFX_KINDS = ["whoosh", "pop", "tick", "impact", "riser", "ding", "swipe"] as const;
+export const SFX_KINDS = ["whoosh", "pop", "tick", "impact", "riser", "ding", "swipe", "swish"] as const;
 export type SfxKind = (typeof SFX_KINDS)[number];
 
 export interface SfxCue {
@@ -34,6 +34,8 @@ const RECIPES: Record<SfxKind, { d: number; graph: string }> = {
   // bell: the call to action
   ding: { d: 1.0, graph: "aevalsrc='(0.5*sin(2*PI*1318*t)+0.25*sin(2*PI*2637*t)+0.12*sin(2*PI*3955*t))*exp(-4.5*t)':s=48000:d=1.0" },
   // short airy swipe: marker highlights
+  // net swish: a soft band-passed noise burst with a quick rise and a longer airy tail (a make in sports highlights)
+  swish: { d: 0.45, graph: "anoisesrc=d=0.45:c=pink:a=0.6:r=48000,bandpass=f=3800:width_type=q:w=0.9,afade=t=in:st=0:d=0.04,afade=t=out:st=0.04:d=0.41:curve=exp" },
   swipe: { d: 0.28, graph: "anoisesrc=d=0.28:c=white:a=0.35:r=48000,highpass=f=2500,afade=t=in:st=0:d=0.08,afade=t=out:st=0.08:d=0.2:curve=exp" },
 };
 

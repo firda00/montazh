@@ -96,6 +96,36 @@ export function clipFocus(clip: Pick<Clip, "src_start" | "src_end">, scenes: Sce
   return wsum > 0 ? { x: wx / wsum, y: wy / wsum } : null;
 }
 
+const num = (n: number) => String(Math.round(n * 10000) / 10000);
+
+/** hfr clips are cut from the original when it has a higher frame rate than the normalized copy (and audio to concat). */
+export function useOriginal(c: Pick<Clip, "hfr">, media: Media): boolean {
+  return !!c.hfr && media.has_audio && media.source.fps > TARGET_FPS + 1 && media.source_path !== media.normalized_path;
+}
+
+/**
+ * Animated punch-in (and shake) on a frame already at the delivery size: scale with eval=frame to
+ * W·Z(t), then a W×H window around the zoom point. crop's iw/ih are fixed when the filter is
+ * configured, so the window maths uses W·Z(t) explicitly. Z eases out (cubic) from `from` to `to`
+ * over `ease` s after `at`. Shake: ±14 px / ±9 px at 22 Hz, decaying in ~0.35 s; without a zoom a
+ * shake runs at 1.04× so the window has room to move.
+ */
+export function zoomShakeFilter(aspect: Aspect, zoom?: Clip["zoom"], shake: number[] = []): string {
+  const { w, h } = OUTPUT_SIZE[aspect];
+  const z = zoom ?? { x: 0.5, y: 0.5, from: 1.04, to: 1.04, ease: 0, at: 0 };
+  const ease = Math.max(0.001, z.ease);
+  const Z = z.from === z.to ? num(z.from) : `(${num(z.from)}+${num(z.to - z.from)}*(1-pow(1-clip((t-${num(z.at)})/${num(ease)},0,1),3)))`;
+  const wobble = (amp: number, phase: number) => shake.map((s) => `+${amp}*sin(2*PI*22*(t-${num(s)})+${phase})*exp(-(t-${num(s)})*9)*gte(t,${num(s)})`).join("");
+  const x = `clip(${num(z.x)}*${w}*${Z}-${w / 2}${wobble(14, 0)},0,${w}*${Z}-${w})`;
+  const y = `clip(${num(z.y)}*${h}*${Z}-${h / 2}${wobble(9, 1.3)},0,${h}*${Z}-${h})`;
+  return `scale=w='trunc(${w}*${Z}/2)*2':h='trunc(${h}*${Z}/2)*2':eval=frame:flags=bicubic,crop=${w}:${h}:x='${x}':y='${y}',unsharp=5:5:0.6:5:5:0`;
+}
+
+/** Short white flashes (brightness +0.32, decaying in ~0.15 s) at clip-output times. */
+export function flashFilter(times: number[]): string {
+  return `eq=brightness='${times.map((t) => `0.32*exp(-(t-${num(t)})*16)*gte(t,${num(t)})`).join("+")}':eval=frame`;
+}
+
 /** scenes.json of a job, when the understand step has run. */
 export async function loadScenes(jobId: string): Promise<Scenes | undefined> {
   const file = path.join(jobDir(jobId), "scenes.json");
@@ -131,15 +161,20 @@ export function expectedDuration(clips: Clip[]) {
 export function buildCutArgs(output: Output, clips: Clip[], media: Media, outPath: string, focuses: (Focus | null)[] = []): string[] {
   const args: string[] = [];
   for (const c of clips) {
-    args.push("-ss", c.src_start.toFixed(3), "-to", c.src_end.toFixed(3), "-i", media.normalized_path);
+    // hfr: the original at its own frame rate (60 fps → smooth 0.5× slow motion); the normalized copy is 30 fps
+    args.push("-ss", c.src_start.toFixed(3), "-to", c.src_end.toFixed(3), "-i", useOriginal(c, media) ? media.source_path : media.normalized_path);
   }
   const chains: string[] = [];
   const concatInputs: string[] = [];
   clips.forEach((c, i) => {
     const setpts = c.speed === 1 ? "PTS-STARTPTS" : `(PTS-STARTPTS)/${c.speed}`;
     const vf = cropScaleFilter(output.aspect, c.crop === "auto_face" ? focuses[i] : null, upscaleFactor(output.aspect, media));
-    chains.push(`[${i}:v]setpts=${setpts},${vf},fps=${TARGET_FPS},format=yuv420p[v${i}]`);
-    const audio = ["asetpts=PTS-STARTPTS", ...atempoChain(c.speed), "aresample=48000"].join(",");
+    const fx = [c.zoom || c.shake?.length ? zoomShakeFilter(output.aspect, c.zoom, c.shake) : "", c.flash?.length ? flashFilter(c.flash) : ""].filter(Boolean).map((f) => `,${f}`).join("");
+    chains.push(`[${i}:v]setpts=${setpts},${vf}${fx},fps=${TARGET_FPS},format=yuv420p[v${i}]`);
+    const vol = c.volume !== undefined && c.volume !== 1 ? [`volume=${num(c.volume)}`] : [];
+    // the original may be mono / another rate: concat needs one layout
+    const tail = useOriginal(c, media) ? "aresample=48000,aformat=channel_layouts=stereo" : "aresample=48000";
+    const audio = ["asetpts=PTS-STARTPTS", ...atempoChain(c.speed), ...vol, tail].join(",");
     chains.push(`[${i}:a]${audio}[a${i}]`);
     concatInputs.push(`[v${i}][a${i}]`);
   });

@@ -331,6 +331,10 @@ export const runFullPipeline: PipelineFn = async ({ source, sources, instruction
   const { cut } = await import("../cut/index.ts");
 
   const many = (sources ?? []).length > 1;
+  // sports / action footage ("как мы играем в баскет", "броски", "трюки"): highlights mode, no speech plan
+  const { highlightsIntent, wantsHighlights } = await import("../highlights/intent.ts");
+  const intent = many ? null : highlightsIntent(instruction);
+  if (intent === "strong") return runHighlightsBot({ source, instruction, progress, onJob, signal, log });
   const job = await createJob(many ? `combined:${sources!.length} videos` : source, { prompt: instruction, preset });
   onJob(job.id);
   log(`job ${job.id}`);
@@ -353,6 +357,11 @@ export const runFullPipeline: PipelineFn = async ({ source, sources, instruction
   await progress(`▸ анализ речи… (${media.duration.toFixed(0)} с видео)`);
   const u = await runStep(job.id, "understand", () => understand(job.id, media, { onLog: (l) => log(`    ${l}`) }));
   checkCancel(signal);
+  // "лучшие моменты" of a video that is mostly not speech → highlights on the same job
+  if (intent === "weak") {
+    const spoken = u.transcript.segments.reduce((s, seg) => s + seg.words.reduce((a, w) => a + Math.max(0, w.end - w.start), 0), 0);
+    if (wantsHighlights(intent, spoken / Math.max(1, media.duration))) return runHighlightsBot({ source, instruction, progress, onJob, signal, log, jobId: job.id, media });
+  }
 
   await progress("▸ план…");
   const p = await runStep(job.id, "plan", () => plan(job.id, { instruction, preset, onEvent: (l) => log(`  ${l.trim()}`) }));
@@ -371,6 +380,43 @@ export const runFullPipeline: PipelineFn = async ({ source, sources, instruction
   return { jobId: job.id, outputs: rendered.outputs, failed: [...failed, ...rendered.failed], reasoning: `${edl.reasoning}${credits ? `
 ${credits}` : ""}`, notes: p.report.warnings.slice(0, 3) };
 };
+
+/** Highlights for sports footage: events (Gemini) → best moments → slow motion, punch-ins, music on the beat. */
+async function runHighlightsBot(a: Pick<PipelineArgs, "source" | "instruction" | "progress" | "onJob" | "signal" | "log"> & { jobId?: string; media?: import("../schemas/index.ts").Media }): Promise<PipelineResult> {
+  const { ingestLight } = await import("../ingest/index.ts");
+  const { planHighlights } = await import("../highlights/index.ts");
+  const { cut } = await import("../cut/index.ts");
+  const { selectStructuredLlm } = await import("../lib/llm.ts");
+  const { updateJobPreset } = await import("../highlights/job.ts");
+  let jobId = a.jobId;
+  let media = a.media;
+  if (!jobId || !media) {
+    const job = await createJob(a.source, { prompt: a.instruction, preset: "sport_highlights" });
+    jobId = job.id;
+    a.onJob(jobId);
+    a.log(`job ${jobId} (highlights)`);
+    await a.progress("▸ подготовка видео…");
+    media = await runStep(jobId, "ingest", () => ingestLight(jobId!, a.source));
+  } else await updateJobPreset(jobId, "sport_highlights");
+  checkCancel(a.signal);
+  await a.progress(`▸ ищу броски и лучшие моменты… (${Math.round(media.duration / 60)} мин видео)`);
+  let llm = null;
+  try {
+    llm = selectStructuredLlm();
+  } catch {}
+  const r = await runStep(jobId, "plan", () => planHighlights(jobId!, media!, { instruction: a.instruction, llm, onLog: (l) => a.log(`  ${l}`) }));
+  const e = r.report.events;
+  await a.progress(`▸ попаданий ${e.makes} из ${e.shots} бросков; в ролике ${r.report.timeline.length} момент(ов), ${r.report.duration.toFixed(0)} с${r.report.music ? `, музыка «${r.report.music.title}»` : ""}`);
+  checkCancel(a.signal);
+  await a.progress("▸ нарезка: замедления и наезды…");
+  const cr = await runStep(jobId, "cut", () => cut(jobId!, r.edl, media!, { snap: false }));
+  const failed = cr.outputs.filter((o) => o.status !== "ok").map((o) => ({ id: o.id, error: o.error ?? "ошибка нарезки" }));
+  checkCancel(a.signal);
+  const ok = cr.outputs.filter((o) => o.status === "ok").map((o) => o.id);
+  const rendered = ok.length ? await renderIds(jobId, ok, r.edl, a.progress, a.log) : { outputs: [], failed: [] };
+  const credit = r.report.music?.attribution ? `\n${r.report.music.attribution}` : "";
+  return { jobId, outputs: rendered.outputs, failed: [...failed, ...rendered.failed], reasoning: `${r.edl.reasoning}${credit}`, notes: r.report.notes.slice(0, 3) };
+}
 
 /** attribution of real photos on split panels (empty when there are none) */
 async function photoCredits(jobId: string, outputs: { id: string }[]): Promise<string> {

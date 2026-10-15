@@ -1,0 +1,48 @@
+{
+  "name": "sport_highlights",
+  "description": "Хайлайты игры (баскетбол, футбол, трюки): лучшие броски с замедлением и наездом на кольцо, музыка по битам, титр-хук, редкие плашки на сильных моментах",
+  "pace": "dynamic",
+  "clip_seconds": {
+    "min": 2,
+    "max": 7
+  },
+  "caption_style": "bold_pop",
+  "title_style": "hero",
+  "default_aspect": "9:16",
+  "music_default": true,
+  "notes": [
+    "сильнейший бросок первым",
+    "промахи — не больше двух, только смешные",
+    "живой звук только там, где говорят люди"
+  ],
+  "design": {
+    "colors": {
+      "text": "#FFFFFF",
+      "highlight": "#FFC400",
+      "stroke": "#000000",
+      "title": "#FFFFFF",
+      "title_bg": "rgba(0,0,0,0.55)"
+    },
+    "captions": {
+      "anchor_y": 0.8,
+      "max_words": 4,
+      "max_chars": 22,
+      "font_size": 64,
+      "stroke_width": 6,
+      "word_animation": "pop",
+      "page_animation": "fade_up",
+      "backing": { "enabled": true, "color": "rgba(0,0,0,0.45)", "padding": 10, "radius": 16 },
+      "shade": { "enabled": false }
+    },
+    "titles": {
+      "anchor_y": 0.17,
+      "font_size": 104,
+      "max_lines": 2,
+      "animation": "slide_up",
+      "padding": 20,
+      "radius": 18,
+      "avoid_face": false
+    },
+    "outro": { "enabled": false }
+  }
+}

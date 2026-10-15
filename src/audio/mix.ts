@@ -9,7 +9,7 @@ import { sfxFile, thinCues, type SfxCue, type SfxKind } from "./sfx.ts";
  */
 
 /** relative levels per effect (dB), tuned so a whoosh is felt, not heard over the music */
-const SFX_GAIN: Record<SfxKind, number> = { whoosh: 3, pop: -7, tick: -9, impact: -3, riser: -1, ding: -5, swipe: -3 };
+const SFX_GAIN: Record<SfxKind, number> = { whoosh: 3, pop: -7, tick: -9, impact: -3, riser: -1, ding: -5, swipe: -3, swish: 0 };
 /** effects sit this much lower under a voiceover (before the ducking) */
 export const SFX_UNDER_VOICE_DB = -5;
 
@@ -35,6 +35,12 @@ export interface MixOptions {
   voice?: string | null;
   sfx?: SfxCue[];
   targetLufs?: number;
+  /** seconds into the music file where the bed starts (cuts snapped to its beats assume this offset) */
+  musicOffset?: number;
+  /** gain on the video's own audio (dB), e.g. court noise under a highlights bed */
+  origGainDb?: number;
+  /** output ranges where the music dips (−10 dB, 0.25 s ramps): people talking in a highlights edit */
+  duck?: { start: number; end: number }[];
 }
 
 export interface MixResult {
@@ -49,6 +55,16 @@ export interface MixGraph {
   cues: SfxCue[];
   /** nothing to mix: the video is copied through */
   copy: boolean;
+}
+
+const gainFilter = (db?: number) => (db ? `,volume=${db.toFixed(1)}dB` : "");
+
+/** Music volume automation: −10 dB inside each range with 0.25 s ramps (eval per frame). */
+export function duckFilter(ranges?: { start: number; end: number }[]): string {
+  if (!ranges?.length) return "";
+  const r = (n: number) => String(Math.round(n * 1000) / 1000);
+  const dips = ranges.map((x) => `clip(min((t-${r(x.start - 0.25)})/0.25,(${r(x.end + 0.25)}-t)/0.25),0,1)`).join("+");
+  return `,volume='1-0.684*min(1,${dips})':eval=frame`;
 }
 
 /** The ffmpeg command for a mix (pure: the caller probes the video and resolves effect files). */
@@ -76,17 +92,17 @@ export function buildMixGraph(o: MixOptions, ctx: { hasAudio: boolean; sfxFile: 
   }
 
   if (o.music) {
-    inputs.push("-stream_loop", "-1", "-i", o.music);
+    inputs.push("-stream_loop", "-1", ...(o.musicOffset ? ["-ss", o.musicOffset.toFixed(3)] : []), "-i", o.music);
     const lufs = o.musicLufs ?? (voice ? VOICE_BED.lufs : speech ? -24 : -16);
     // under a narrator the bed stays up to the last words and fades over the tail only
     const fadeOut = Math.min(voice ? 1.0 : 2.5, D / 4);
-    chains.push(`[${idx}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS,loudnorm=I=${lufs}:TP=-2:LRA=11,afade=t=in:st=0:d=${voice ? 0.15 : 0.8},afade=t=out:st=${(D - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}[mus]`);
+    chains.push(`[${idx}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS,loudnorm=I=${lufs}:TP=-2:LRA=11,afade=t=in:st=0:d=${voice ? 0.15 : 0.8},afade=t=out:st=${(D - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}${duckFilter(o.duck)}[mus]`);
     idx++;
     if (speech) {
       chains.push(`[0:a]aresample=48000,aformat=channel_layouts=stereo${voice ? "[sp]" : ",asplit=2[sp][sc]"}`);
       mixIn.push("[sp]");
     } else if (ctx.hasAudio) {
-      chains.push(`[0:a]aresample=48000,aformat=channel_layouts=stereo[orig]`);
+      chains.push(`[0:a]aresample=48000,aformat=channel_layouts=stereo${gainFilter(o.origGainDb)}[orig]`);
       mixIn.push("[orig]");
     }
     if (voice) {

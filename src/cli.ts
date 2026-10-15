@@ -220,10 +220,31 @@ withRenderOptions(
       .option("--vision <provider>", "stub | auto | gemini | agy", "auto")
       .option("--asr <engine>", "auto | cpp | faster | import — движок распознавания речи (import = из vedit asr-import, env VEDIT_ASR)", "auto")
       .option("--no-diarize", "не размечать говорящих")
-      .option("--speakers <n>", "сколько говорящих ожидать (по умолчанию определяется)", (v) => Number(v)),
+      .option("--speakers <n>", "сколько говорящих ожидать (по умолчанию определяется)", (v) => Number(v))
+      .option("--mode <m>", "auto | highlights | normal — highlights: нарезка спорта/экшена без речи (auto — по инструкции)", "auto")
+      .option("--target <s>", "highlights: длина ролика, с", (v) => Number(v))
+      .option("--no-editor", "highlights: без вызова Claude (титр и порядок по правилам)"),
   ),
-).action(async (video: string, opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; render: boolean; language?: string; vision: VisionChoice; asr: AsrChoice; diarize: boolean; speakers?: number } & PlannerCliOpts & RenderCliOpts) => {
+).action(async (video: string, opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; render: boolean; language?: string; vision: VisionChoice; asr: AsrChoice; diarize: boolean; speakers?: number; mode: string; target?: number; editor: boolean } & PlannerCliOpts & RenderCliOpts) => {
   try {
+    if (!["auto", "highlights", "normal"].includes(opts.mode)) throw new Error("--mode: ожидается auto | highlights | normal");
+    if (!opts.edl && opts.mode !== "normal") {
+      const { highlightsIntent, wantsHighlights } = await import("./highlights/intent.ts");
+      const intent = opts.mode === "highlights" ? "strong" : highlightsIntent(opts.prompt);
+      let ratio: number | null = null;
+      if (intent === "weak") {
+        console.log("▸ инструкция похожа на хайлайты — проверяю, есть ли в видео речь…");
+        const { speechRatioProbe } = await import("./highlights/index.ts");
+        const { ffprobe } = await import("./lib/ffmpeg.ts");
+        const os = await import("node:os");
+        ratio = await speechRatioProbe(video, Number((await ffprobe(video)).format.duration), path.join(os.tmpdir(), `vedit-probe-${process.pid}`));
+        console.log(`  речь ≈ ${Math.round(ratio * 100)} % звука`);
+      }
+      if (wantsHighlights(intent, ratio)) {
+        await runHighlightsCli(video, opts);
+        return;
+      }
+    }
     if (opts.edl) await readJson(path.resolve(opts.edl), EdlSchema); // validate the plan before spending time on ingest
     if (opts.prompt && opts.skipUnderstand) throw new PlanError("--skip-understand вместе с --prompt: планировать не по чему (нет фраз и сцен)", "nothing_to_plan");
     const planner = opts.prompt ? plannerOpts(opts) : null; // option errors surface before ingest/understand run
@@ -272,6 +293,79 @@ withRenderOptions(
   }
 });
 
+interface HighlightsCliOpts extends RenderCliOpts {
+  prompt?: string;
+  target?: number;
+  editor: boolean;
+  render: boolean;
+}
+
+function printHighlights(r: import("./highlights/index.ts").HighlightsReport) {
+  const e = r.events;
+  console.log(`  события: ${e.total}, бросков ${e.shots}, попаданий ${e.makes} (по кадрам у кольца ${e.makes_local}, модель видела ${e.makes_model}), подходили люди: ${e.social}`);
+  console.log(`  Gemini: ${r.gemini.requests} запрос(ов), ${r.gemini.input_tokens} вх. / ${r.gemini.output_tokens} вых. токенов, из кэша ${r.gemini.cached_chunks} чанк(ов)`);
+  console.log(`  титр «${r.title}», ${r.timeline.length} момент(ов), ${r.duration.toFixed(1)} с${r.music ? `, музыка «${r.music.title}» ${r.music.bpm ?? "?"} BPM` : ""}`);
+  for (const t of r.timeline) console.log(`    ${t.start.toFixed(1).padStart(5)}–${t.end.toFixed(1).padEnd(5)} ${t.role.padEnd(6)} ${t.id}${t.replay ? " +повтор" : ""}${t.callout ? ` [${t.callout}]` : ""}${t.beat_aligned ? " ♪" : ""} — ${t.description}`);
+  for (const n of r.notes) console.log(`  ⚠ ${n}`);
+}
+
+/** ingest (light) → events → highlights plan → cut → render with the sport_highlights design. */
+async function runHighlightsCli(video: string, opts: HighlightsCliOpts) {
+  const { ingestLight } = await import("./ingest/index.ts");
+  const job = await createJob(video, { prompt: opts.prompt, preset: "sport_highlights" });
+  console.log(`job ${job.id} (режим highlights)`);
+  const t0 = Date.now();
+  console.log("▸ ingest");
+  const media = await runStep(job.id, "ingest", () => ingestLight(job.id, video));
+  console.log(`  ${media.width}x${media.height} @ ${media.fps.toFixed(2)}fps, ${media.duration.toFixed(1)}s`);
+  await highlightsPipeline(job.id, media, opts);
+  console.log(`\nготово за ${((Date.now() - t0) / 1000).toFixed(1)}s — workspace/${job.id}/`);
+}
+
+async function highlightsPipeline(jobId: string, media: import("./schemas/index.ts").Media, opts: HighlightsCliOpts) {
+  const { planHighlights } = await import("./highlights/index.ts");
+  const { selectStructuredLlm } = await import("./lib/llm.ts");
+  let llm = null;
+  if (opts.editor) {
+    try {
+      llm = selectStructuredLlm();
+    } catch {
+      console.log("  (нет входа Claude — титр и порядок по правилам)");
+    }
+  }
+  console.log("▸ understand + plan: события (Gemini), уточнение бросков по кадрам, отбор, музыка");
+  const r = await runStep(jobId, "plan", () => planHighlights(jobId, media, { instruction: opts.prompt, target: opts.target, llm, music: opts.bgMusic, onLog: (l) => console.log(`    ${l}`) }));
+  printHighlights(r.report);
+  console.log("▸ cut");
+  const report = await runStep(jobId, "cut", () => cut(jobId, r.edl, media, { snap: false }));
+  printCutReport(report);
+  // the music was chosen at plan time (cuts sit on its beats): the render takes it from the EDL
+  if (opts.render) await runRender(jobId, { ...opts, design: opts.design ?? "sport_highlights", bgMusic: undefined }, r.edl);
+}
+
+withRenderOptions(
+  program
+    .command("highlights")
+    .description("хайлайты спорта/экшена: события → лучшие моменты → замедления, наезды на кольцо, музыка по битам")
+    .argument("<job_or_video>", "id задачи или путь к видео")
+    .option("-p, --prompt <text>", "инструкция (длина, формат, титр в «кавычках»)")
+    .option("--target <s>", "длина ролика, с", (v) => Number(v))
+    .option("--no-editor", "без вызова Claude")
+    .option("--no-render", "остановиться после черновой нарезки"),
+).action(async (target: string, opts: HighlightsCliOpts) => {
+  try {
+    if (await exists(path.resolve(target))) {
+      await runHighlightsCli(target, opts);
+      return;
+    }
+    const job = await loadJob(target);
+    const media = await readJson(path.join(jobDir(target), "media.json"), MediaSchema);
+    await highlightsPipeline(target, media, { ...opts, prompt: opts.prompt ?? job.prompt });
+  } catch (err) {
+    fail(err);
+  }
+});
+
 withRenderOptions(
   program
     .command("render")
@@ -313,10 +407,20 @@ program
   .option("--asr <engine>", "auto | cpp | faster | import — движок распознавания речи (import = из vedit asr-import, env VEDIT_ASR)", "auto")
   .option("--no-diarize", "не размечать говорящих")
   .option("--speakers <n>", "сколько говорящих ожидать (по умолчанию определяется)", (v) => Number(v))
-  .action(async (jobId: string, opts: { language?: string; threads?: number; method: "dtw" | "tokens"; vision: VisionChoice; asr: AsrChoice; diarize: boolean; speakers?: number }) => {
+  .option("--events", "только события спорта/экшена (Gemini по видео + уточнение бросков по кадрам) → events.json")
+  .action(async (jobId: string, opts: { language?: string; threads?: number; method: "dtw" | "tokens"; vision: VisionChoice; asr: AsrChoice; diarize: boolean; speakers?: number; events?: boolean }) => {
     try {
-      await loadJob(jobId);
+      const job = await loadJob(jobId);
       const media = await readJson(path.join(jobDir(jobId), "media.json"), MediaSchema);
+      if (opts.events) {
+        const { ensureEvents, localPass } = await import("./highlights/index.ts");
+        const log = (l: string) => console.log(`    ${l}`);
+        let ev = await runStep(jobId, "understand", () => ensureEvents(jobId, media, { instruction: job.prompt, onLog: log }));
+        ev = await localPass(jobId, ev, media, log);
+        for (const e of ev.events) console.log(`  ${e.id.padEnd(5)} ${e.key.toFixed(2).padStart(8)}s ${e.type.padEnd(16)} ${e.outcome.padEnd(5)} ${e.refined ? `[${e.refined.local_verdict}]` : ""} ${e.description}`);
+        console.log(`  Gemini: ${ev.usage.requests} запрос(ов), ${ev.usage.input_tokens}/${ev.usage.output_tokens} токенов, ${ev.wall_seconds.toFixed(0)} с`);
+        return;
+      }
       const r = await runStep(jobId, "understand", () => understand(jobId, media, { ...opts, numSpeakers: opts.speakers, onLog: (l) => console.log(`    ${l}`) }));
       printUnderstand(r);
     } catch (err) {

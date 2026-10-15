@@ -19,6 +19,8 @@ export interface ComposeAssets {
 }
 
 export const COMPOSE_VERSION = "hf-compose/1";
+/** vertical centre of "callout" titles (highlights accents), fraction of the height: above the zoomed hoop */
+export const CALLOUT_ANCHOR_Y = 0.3;
 
 const r3 = (x: number) => Math.round(x * 1000) / 1000;
 const fmt = (x: number) => String(r3(x));
@@ -114,6 +116,26 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
   if (split) tw.push(...split.tweens);
   if (!split) layout.titlesOut.forEach((t) => {
     const id = `ttl-${t.index}`;
+    if (t.style === "lower") {
+      // a line under a people moment (what is said / happens) where the speech itself cannot be captioned
+      const pad = anchorPad(D.captions.anchor_y, H);
+      ttlHtml.push(
+        `      <section id="${id}" class="clip ttl" data-start="${fmt(t.at)}" data-duration="${fmt(t.duration)}" data-track-index="2" style="padding:${pad.top}px ${safeX}px ${pad.bottom}px">\n        <span class="lower" id="${id}-box" style="font-size:${r3(D.captions.font_size * scale * 0.72)}px">${esc(t.lines.join(" "))}</span>\n      </section>`,
+      );
+      tw.push(`tl.fromTo("#${id}-box", { opacity: 0, y: ${r3(24 * scale)} }, { opacity: 1, y: 0, duration: 0.3, ease: "power2.out" }, ${fmt(t.at)});`);
+      if (t.duration > 0.8) tw.push(`tl.fromTo("#${id}-box", { opacity: 1 }, { opacity: 0, duration: 0.25, ease: "power1.in", immediateRender: false }, ${fmt(t.at + t.duration - 0.27)});`);
+      return;
+    }
+    if (t.style === "callout") {
+      // a small accent label over the action (highlights: "x3", "ЧИСТЫЙ"): pops in, fades out
+      const pad = anchorPad(CALLOUT_ANCHOR_Y, H);
+      ttlHtml.push(
+        `      <section id="${id}" class="clip ttl" data-start="${fmt(t.at)}" data-duration="${fmt(t.duration)}" data-track-index="2" style="padding:${pad.top}px ${safeX}px ${pad.bottom}px">\n        <span class="callout" id="${id}-box" style="font-size:${r3(Math.min(t.fontSize, D.titles.font_size * scale) * 0.6)}px">${esc(t.lines.join(" "))}</span>\n      </section>`,
+      );
+      tw.push(`tl.fromTo("#${id}-box", { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.28, ease: "back.out(2.2)" }, ${fmt(t.at)});`);
+      if (t.duration > 0.7) tw.push(`tl.fromTo("#${id}-box", { opacity: 1 }, { opacity: 0, duration: 0.2, ease: "power1.in", immediateRender: false }, ${fmt(t.at + t.duration - 0.22)});`);
+      return;
+    }
     const card = t.style === "card";
     const lines = t.lines.map((l, li) => `          <span class="ttl-line" id="${id}-line${li}">${esc(l)}</span>`).join("\n");
     ttlHtml.push(
@@ -214,6 +236,8 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
         text-shadow: none;
       }
       .ttl-line { display: block; white-space: nowrap; }
+      .lower { display: inline-block; max-width: 100%; padding: 0.28em 0.6em; border-radius: 0.4em; background: rgba(0,0,0,0.55); color: #fff; font-weight: 700; line-height: 1.2; text-align: center; white-space: normal; }
+      .callout { display: inline-block; padding: 0.12em 0.42em 0.08em; border-radius: 0.18em; background: ${C.highlight}; color: #111; font-weight: 900; letter-spacing: 0.02em; white-space: nowrap; box-shadow: 0 ${r3(6 * scale)}px ${r3(24 * scale)}px rgba(0,0,0,0.35); }
       .outro { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; padding: 0 ${safeX}px; }
       .outro-backdrop { position: absolute; inset: 0; display: block; background: ${O.backdrop}; }
       .outro-text { position: relative; display: block; text-align: center; font-weight: ${layout.font.weight}; line-height: 1.1; letter-spacing: -0.01em; color: ${C.title}; -webkit-text-stroke: ${r3(strokeVisible * 2)}px ${C.stroke}; paint-order: stroke fill; text-shadow: 0 ${r3(3 * scale)}px ${r3(14 * scale)}px rgba(0, 0, 0, 0.55); }

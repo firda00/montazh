@@ -190,6 +190,24 @@ export const MODULES: ModuleDef[] = [
     probe: async () => ({ active: "ffmpeg", ready: true, note: "" }),
   },
   {
+    id: "highlights",
+    stage: "understand",
+    title: "Хайлайты спорта/экшена",
+    what: "события по видео (Gemini, чанки ~8 мин через Files API) → проверка бросков по кадрам у кольца и по звуку → отбор → замедление 0.5× из 60 fps, наезд на кольцо, вспышка, повтор, музыка по битам",
+    selector: "vedit run … --mode highlights | auto по инструкции (баскет, футбол, броски, трюки…); vedit highlights <job>; VEDIT_EVENTS_MODEL",
+    backends: [
+      { id: "gemini-events", title: "Gemini API: видео со звуком 480p, 2 кадра/с, media_resolution low; кэш workspace/_cache/events", deps: "GEMINI_API_KEY; модели gemini-3.8-flash → 3.6-flash → 3.7-flash → 3.5-flash → flash-latest", license: "условия Gemini API (бесплатный уровень: данные могут использоваться Google)" },
+      { id: "local-refine", title: "Трек мяча у кольца (фон-медиана, коричневые пятна размера мяча) + онсет звука", deps: "ffmpeg (raw-кадры ROI, f32 PCM)", license: "свой код" },
+      { id: "beats", title: "Сетка битов музыки (автокорреляция онсетов)", deps: "ffmpeg", license: "свой код" },
+    ],
+    job: (j) => j.preset === "sport_highlights",
+    cost: (e) => e.provider === "gemini-events",
+    probe: async (env) => {
+      const key = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
+      return { active: key ? "gemini-events" : "—", ready: key, note: key ? "" : "нет GEMINI_API_KEY — режим highlights недоступен" };
+    },
+  },
+  {
     id: "translate",
     stage: "design",
     title: "Перевод субтитров",

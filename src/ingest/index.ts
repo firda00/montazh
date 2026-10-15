@@ -92,3 +92,32 @@ export async function ingest(jobId: string, sourcePath: string): Promise<Media> 
     },
   });
 }
+
+/**
+ * Light ingest for the highlights mode: no 30 fps re-encode of the whole file (an hour of footage would
+ * take longer than the edit), the original is used directly (normalized_path = source) — every clip is
+ * re-encoded by the cut anyway, and slow motion needs the original frame rate. Only for sources ffmpeg
+ * seeks reliably: H.264/HEVC video without rotation, with audio. Falls back to the full ingest otherwise.
+ */
+export async function ingestLight(jobId: string, sourcePath: string): Promise<Media> {
+  if (!(await exists(sourcePath))) throw new Error(`source video not found: ${sourcePath}`);
+  const probe = await ffprobe(sourcePath);
+  const v = probe.streams.find((s) => s.codec_type === "video");
+  const a = probe.streams.find((s) => s.codec_type === "audio");
+  const rotation = Math.abs(v?.side_data_list?.find((d) => d.rotation !== undefined)?.rotation ?? Number(v?.tags?.rotate ?? 0));
+  const duration = Number(probe.format.duration);
+  const ok = v && v.width && v.height && a && rotation === 0 && /^(h264|hevc)$/.test(v.codec_name ?? "") && Number.isFinite(duration) && Math.max(v.width, v.height) <= 3840;
+  if (!ok) return ingest(jobId, sourcePath);
+  const src = path.resolve(sourcePath);
+  return writeJson(path.join(jobDir(jobId), "media.json"), MediaSchema, {
+    source_path: src,
+    normalized_path: src,
+    audio_path: null,
+    duration,
+    fps: parseRate(v.avg_frame_rate) || parseRate(v.r_frame_rate) || TARGET_FPS,
+    width: v.width!,
+    height: v.height!,
+    has_audio: true,
+    source: { fps: parseRate(v.avg_frame_rate) || parseRate(v.r_frame_rate), width: v.width!, height: v.height!, video_codec: v.codec_name ?? null, audio_codec: a.codec_name ?? null, rotation },
+  });
+}

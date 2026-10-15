@@ -17,8 +17,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 export const MUSIC_LIBRARY = process.env.VEDIT_MUSIC_DIR || path.join(ROOT, "assets", "music");
 export const MUSIC_CACHE = path.join(WORKSPACE_ROOT, "_cache", "music");
 
-export const MOODS = ["upbeat", "chill", "dramatic", "inspiring", "tech", "funky", "emotional"] as const;
+export const MOODS = ["upbeat", "chill", "dramatic", "inspiring", "tech", "funky", "emotional", "sport"] as const;
 export type Mood = (typeof MOODS)[number];
+
+/** titles that betray the wrong energy for a mood (a "chill hip hop beat" is not a sports bed) */
+export const MOOD_EXCLUDE: Partial<Record<Mood, RegExp>> = { sport: /chill|calm|relax|lo-?fi|sleep|ambient|meditat|piano|soft|sad|romantic/i, upbeat: /sleep|meditat|sad/i };
 
 /** search terms per mood (English, what music on Jamendo/Freesound is tagged with) */
 export const MOOD_QUERIES: Record<Mood, string[]> = {
@@ -29,6 +32,7 @@ export const MOOD_QUERIES: Record<Mood, string[]> = {
   tech: ["electronic", "synthwave", "future"],
   funky: ["funk", "groove", "funky"],
   emotional: ["piano", "emotional", "ambient piano"],
+  sport: ["energetic hip hop", "trap beat", "hype hip hop", "sport energetic", "workout"],
 };
 
 export interface MusicTrack {
@@ -80,6 +84,8 @@ export interface OpenverseOptions {
   cacheDir?: string;
   /** minimum track length in seconds (shorter loops are looped by the mixer) */
   minSeconds?: number;
+  /** only tracks at least minSeconds long (a looped bed would break a beat-cut edit) */
+  strictLength?: boolean;
 }
 
 /** Ranks results: full songs from Jamendo first, then long loops; skips SFX-length clips. */
@@ -109,7 +115,7 @@ async function fromOpenverse(mood: Mood, seed: string, o: OpenverseOptions = {})
     } catch {
       continue;
     }
-    const ranked = rankResults(results, minSeconds);
+    const ranked = rankResults(results, minSeconds).filter((r) => !MOOD_EXCLUDE[mood]?.test(r.title) && (!o.strictLength || (r.duration ?? 0) / 1000 >= minSeconds));
     if (!ranked.length) continue;
     // stable choice among the top few, so the same topic gets the same track
     const pick = hashPick(ranked.slice(0, 5), seed);
