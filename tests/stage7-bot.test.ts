@@ -99,15 +99,15 @@ async function boot(tg: ReturnType<typeof fakeTelegram>, extra: Partial<BotOptio
   return { running, workspace, logs };
 }
 
-test("/start shows the main menu (persistent reply keyboard); /help replies with help", async () => {
+test("/start shows the main menu (inline buttons under the message); /help replies with help", async () => {
   const tg = fakeTelegram();
   const { running } = await boot(tg, { pipeline: async () => assert.fail("pipeline must not run") });
   tg.text(1, 1, "/start");
   await waitFor(() => tg.messages(1).length === 1, "menu");
   assert.equal(tg.messages(1)[0], MSG.menuText);
-  const kb = tg.calls.find((c) => c.method === "sendMessage")!.params.reply_markup as { keyboard: { text: string }[][]; is_persistent: boolean };
-  assert.deepEqual(kb.keyboard.flat().map((b) => b.text), Object.values(MSG.menu));
-  assert.equal(kb.is_persistent, true);
+  const kb = tg.calls.find((c) => c.method === "sendMessage")!.params.reply_markup as { inline_keyboard: { text: string; callback_data: string }[][] };
+  assert.deepEqual(kb.inline_keyboard.flat().map((b) => b.text), Object.values(MSG.menu));
+  assert.ok(kb.inline_keyboard.flat().every((b) => b.callback_data.startsWith("H:")));
   tg.text(1, 1, "/help");
   await waitFor(() => tg.messages(1).length === 2, "help");
   assert.equal(tg.messages(1)[1], MSG.help);

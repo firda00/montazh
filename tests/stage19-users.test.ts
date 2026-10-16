@@ -169,13 +169,17 @@ test("onboarding in Uzbek: language → intro + purpose → terms (with the text
   assert.equal(u.credits, 4);
   const welcome = [...tg.calls].reverse().find((c) => c.method === "sendMessage")!;
   assert.equal(welcome.params.text, STRINGS.uz.welcome(4, 3, 1, 15));
-  assert.deepEqual((welcome.params.reply_markup as { keyboard: { text: string }[][] }).keyboard.flat().map((b) => b.text), Object.values(STRINGS.uz.menu));
+  assert.deepEqual((welcome.params.reply_markup as { inline_keyboard: { text: string }[][] }).inline_keyboard.flat().map((b) => b.text), Object.values(STRINGS.uz.menu));
+  // a user registered after the switch never gets the "remove the old keyboard" message
+  assert.ok(!tg.calls.some((c) => (c.params.reply_markup as { remove_keyboard?: boolean } | undefined)?.remove_keyboard));
 
   await bot.handleUpdate(tg.text(50, "/start"));
   assert.equal(tg.texts(50).at(-1), STRINGS.uz.menuText);
-  // menu buttons work in Uzbek
-  await bot.handleUpdate(tg.text(50, STRINGS.uz.menu.balance));
+  // menu buttons work in Uzbek: the inline button and the old label typed as text
+  await bot.handleUpdate(tg.press(50, "H:balance", msgId));
   assert.match(tg.texts(50).at(-1)!, /💳 Balans[\s\S]*Kreditlar: 4[\s\S]*Bugun bepul: oddiy 0\/3, uzun 0\/1[\s\S]*Tez orada: to‘lov/);
+  await bot.handleUpdate(tg.text(50, STRINGS.uz.menu.balance));
+  assert.match(tg.texts(50).at(-1)!, /💳 Balans/);
   bot.close();
 });
 

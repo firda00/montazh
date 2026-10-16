@@ -391,6 +391,9 @@ export async function createBot(o: BotOptions): Promise<Bot> {
 
   await fs.mkdir(botDir, { recursive: true });
   const db = new BotDb(path.join(botDir, "vedit.db"));
+  // users registered before the menu moved to inline buttons still carry the persistent reply keyboard
+  const inlineMenuSince = db.getKv("kb.inline_since") ?? new Date().toISOString();
+  db.setKv("kb.inline_since", inlineMenuSince);
   const tasks = new Set<Promise<unknown>>();
   const track = (p: Promise<unknown>) => {
     tasks.add(p);
@@ -1020,9 +1023,22 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   }
 
   // ── menu & settings ──
+  /** the menu lives in inline buttons; the persistent reply keyboard of the first build is dropped once per user */
+  async function dropReplyKeyboard(uid: number, chatId: number) {
+    const key = `kb.removed.${uid}`;
+    const created = db.getUser(uid)?.created_at;
+    if (db.getKv(key) || !created || created >= inlineMenuSince) return;
+    await say(chatId, "👇", { remove_keyboard: true });
+    db.setKv(key, "1");
+  }
+
+  async function sayMenu(uid: number, chatId: number, text: string) {
+    await dropReplyKeyboard(uid, chatId);
+    await say(chatId, text, encodeKb(mainMenu(T(uid))));
+  }
+
   async function showMenu(uid: number, chatId: number) {
-    const L = T(uid);
-    await say(chatId, L.menuText, mainMenu(L));
+    await sayMenu(uid, chatId, T(uid).menuText);
   }
 
   function settingsView(uid: number) {
@@ -1066,7 +1082,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       case "balance":
         return balance(uid, chatId);
       case "help":
-        return void (await say(chatId, L.help, mainMenu(L)));
+        return sayMenu(uid, chatId, L.help);
     }
   }
 
@@ -1105,7 +1121,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const credits = quotasOn ? db.addCredits(uid, p.trialCredits) : db.getUser(uid)?.credits ?? 0;
     if (quotasOn && p.trialCredits) db.addUsage({ user: uid, kind: "credits:trial", units: -p.trialCredits, cost_usd: 0 });
     const L = T(uid);
-    await say(chatId, L.welcome(credits, p.standardPerDay, p.longPerDay, p.longMinutes), mainMenu(L));
+    await sayMenu(uid, chatId, L.welcome(credits, p.standardPerDay, p.longPerDay, p.longMinutes));
     log(`[${uid}] регистрация завершена`);
   }
 
@@ -1258,6 +1274,11 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       switch (p) {
         case "noop":
           break;
+        case "H": {
+          await answer();
+          if (a && a in L.menu) return onMenu(uid, chatId, a as MenuAction);
+          break;
+        }
         case "L": {
           if (!isLang(a)) break;
           db.updateUser(uid, { lang: a });

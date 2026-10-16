@@ -1,7 +1,6 @@
-// Keyboards: the persistent main menu (reply keyboard — always under the input field on a phone) and the
-// inline option cards. callback_data is a compact "<prefix>:<args>" string (≤ 64 bytes, Bot API limit);
+// Keyboards: the main menu and the option cards, all inline buttons under the bot's message. callback_data is a compact "<prefix>:<args>" string (≤ 64 bytes, Bot API limit);
 // anything longer goes through the short id map in the DB (`~<id>`, see BotDb.putCallback).
-import type { InlineButton, InlineKeyboard, ReplyKeyboard } from "./telegram-api.ts";
+import type { InlineButton, InlineKeyboard } from "./telegram-api.ts";
 import { voiceLabel, type Strings } from "./i18n.ts";
 import type { Lang } from "./db.ts";
 import { isCloud, isLocal, VOICES } from "../voice/catalog.ts";
@@ -37,12 +36,16 @@ export const PRESET_STYLE: Record<string, string> = { bold_pop: "pop", split_new
 /** voices offered on the make card (cloud voices first; avatar-only Chatterbox voices are not offered) */
 export const MAKE_VOICES = ["gemini_charon", "gemini_kore", "gemini_puck", "gemini_aoede", "dmitri", "denis"];
 
-export function mainMenu(L: Strings): ReplyKeyboard {
+/** the main menu as inline buttons under the message ("H:<action>"); the old reply keyboard is removed once per user */
+export function mainMenu(L: Strings): InlineKeyboard {
   const m = L.menu;
   return {
-    keyboard: [[{ text: m.montage }], [{ text: m.make }, { text: m.highlights }], [{ text: m.avatar }, { text: m.settings }], [{ text: m.balance }, { text: m.help }]],
-    resize_keyboard: true,
-    is_persistent: true,
+    inline_keyboard: [
+      [btn(m.montage, "H:montage")],
+      [btn(m.make, "H:make"), btn(m.highlights, "H:highlights")],
+      [btn(m.avatar, "H:avatar"), btn(m.settings, "H:settings")],
+      [btn(m.balance, "H:balance"), btn(m.help, "H:help")],
+    ],
   };
 }
 
