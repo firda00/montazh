@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { jobSignal } from "../../lib/abort.ts";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -131,7 +132,7 @@ export const defaultAgyRunner =
   (bin: string, timeoutMs: number): AgyRunner =>
   (args, stdin, cwd) =>
     new Promise((resolve, reject) => {
-      const child = spawn(bin, args, { cwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn(bin, args, { cwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], signal: jobSignal() });
       let stdout = "";
       let stderr = "";
       const timer = setTimeout(() => {

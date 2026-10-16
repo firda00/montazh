@@ -300,6 +300,9 @@ test("bot: photo + voice are kept for /avatar; /avatar sends avatar_job.zip; ava
     callMethod: fake.callMethod,
     download: fake.download,
     onLog: () => {},
+    onboarding: false,
+    quotas: false,
+    cleanupIntervalMs: 0,
     avatarExport: async (a) => {
       exports.push({ input: a.input, photo: a.photo, voice: a.voice, sourceLabel: a.sourceLabel });
       a.onJob(job.id);
@@ -317,7 +320,7 @@ test("bot: photo + voice are kept for /avatar; /avatar sends avatar_job.zip; ava
   await bot.handleUpdate(msg({ photo: [{ file_id: "ph-small", width: 90, height: 160 }, { file_id: "ph-big", width: 720, height: 1280 }] }));
   await bot.handleUpdate(msg({ voice: { file_id: "vo-1", duration: 7, mime_type: "audio/ogg" } }));
   assert.ok(fake.texts().includes(MSG.avatarPhotoSaved) && fake.texts().includes(MSG.avatarVoiceSaved));
-  assert.match(bot.state.chats["7"].avatar_photo!, /avatar_photo_ph-big\.jpg$/);
+  assert.match(bot.session(1).avatar_photo!, /avatar_photo_ph-big\.jpg$/);
 
   await bot.handleUpdate(msg({ text: "/avatar почему кофе дорожает" }));
   await bot.idle();
@@ -325,11 +328,11 @@ test("bot: photo + voice are kept for /avatar; /avatar sends avatar_job.zip; ava
   assert.equal(exports[0].input, "почему кофе дорожает");
   assert.match(exports[0].photo!, /ph-big/);
   assert.match(exports[0].voice!, /vo-1/);
-  assert.match(exports[0].sourceLabel, /_bot[\\/]7[\\/]avatar$/);
+  assert.match(exports[0].sourceLabel, /users[\\/]1[\\/]avatar$/);
   assert.ok(fake.calls.some((c) => c.method === "sendDocument"), "the bundle goes out as a document");
   assert.ok(fake.texts().some((t) => /Задание для аватара готово/.test(t) && /Run all/.test(t)));
   assert.ok(!fake.texts().some((t) => /^Готово: /.test(t)), "no 'Готово: 0 роликов' after an export");
-  assert.equal(bot.state.chats["7"].avatar_job, job.id);
+  assert.equal(bot.session(1).avatar_job, job.id);
 
   await bot.handleUpdate(msg({ document: { file_id: "doc-result", file_name: "avatar_result (1).zip", mime_type: "application/zip" }, caption: "как у aleko, 20 секунд" }));
   await bot.idle();
@@ -343,7 +346,7 @@ test("bot: photo + voice are kept for /avatar; /avatar sends avatar_job.zip; ava
   assert.equal(fake.texts().at(-1), MSG.avatarUsage);
   await bot.handleUpdate(msg({ text: "/avatar сброс" }));
   assert.equal(fake.texts().at(-1), MSG.avatarReset);
-  assert.equal(bot.state.chats["7"].avatar_photo, undefined);
+  assert.equal(bot.session(1).avatar_photo, undefined);
   await bot.idle();
 });
 
@@ -352,7 +355,7 @@ test("bot: a result zip without a known job asks for /avatar first", async () =>
   await writeZip(zip, [{ name: "meta.json", data: JSON.stringify({ version: 1, job: "20990101-ffffff", mode: "avatar", duration: 5, tts: {} }) }]);
   const fake = fakeApi(new Map([["doc-o", zip]]));
   let called = false;
-  const bot = await createBot({ token: "t", workspace: await fs.mkdtemp(path.join(os.tmpdir(), "vedit-avatar-bot2-")), callMethod: fake.callMethod, download: fake.download, onLog: () => {}, avatarImport: async (a) => ((called = true), { jobId: a.jobId, outputs: [] }) });
+  const bot = await createBot({ token: "t", workspace: await fs.mkdtemp(path.join(os.tmpdir(), "vedit-avatar-bot2-")), callMethod: fake.callMethod, download: fake.download, onLog: () => {}, onboarding: false, quotas: false, cleanupIntervalMs: 0, avatarImport: async (a) => ((called = true), { jobId: a.jobId, outputs: [] }) });
   await bot.handleUpdate(msg({ chat: { id: 9, type: "private" }, document: { file_id: "doc-o", file_name: "avatar_result.zip" } }));
   await bot.idle();
   assert.equal(called, false);

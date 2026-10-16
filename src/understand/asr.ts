@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { jobSignal } from "../lib/abort.ts";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -33,7 +34,7 @@ export type SidecarRunner = (python: string, args: string[], onLog?: (line: stri
 
 export const runSidecar: SidecarRunner = (python, args, onLog) =>
   new Promise((resolve, reject) => {
-    const child = spawn(python, ["-I", ASR_SCRIPT, ...args], { windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
+    const child = spawn(python, ["-I", ASR_SCRIPT, ...args], { windowsHide: true, signal: jobSignal(), env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } });
     let stderr = "";
     child.stderr.on("data", (d) => {
       const s = String(d);

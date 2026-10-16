@@ -1,9 +1,10 @@
-// Entrypoint: `npm run bot`. Reads TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOWED_USERS from env or .env.
+// Entrypoint: `npm run bot`. Reads TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS, TELEGRAM_ADMIN_IDS, VEDIT_* from env or .env.
 try {
   process.loadEnvFile(); // .env in cwd, optional — loaded before the imports below so VEDIT_WORKSPACE from .env applies
 } catch {}
 
 const { startBot } = await import("./index.ts");
+const { freePlanFromEnv, maxJobsFromEnv, retentionDaysFromEnv } = await import("./plans.ts");
 
 const stamp = () => new Date().toISOString().slice(11, 19);
 const log = (line: string) => console.log(`${stamp()} ${line}`);
@@ -14,22 +15,42 @@ if (!token) {
   process.exit(1);
 }
 
-const rawAllowed = process.env.TELEGRAM_ALLOWED_USERS?.trim() ?? "";
-const allowedUserIds = rawAllowed
-  .split(/[,\s]+/)
-  .filter(Boolean)
-  .map((s) => Number(s));
-if (allowedUserIds.some((n) => !Number.isSafeInteger(n))) {
-  console.error(`✖ TELEGRAM_ALLOWED_USERS: ожидаются числовые id через запятую, получено "${rawAllowed}"`);
+function idList(name: string): number[] {
+  const raw = process.env[name]?.trim() ?? "";
+  const ids = raw
+    .split(/[,\s]+/)
+    .filter(Boolean)
+    .map((s) => Number(s));
+  if (ids.some((n) => !Number.isSafeInteger(n))) {
+    console.error(`✖ ${name}: ожидаются числовые id через запятую, получено "${raw}"`);
+    process.exit(1);
+  }
+  return ids;
+}
+
+const allowedUserIds = idList("TELEGRAM_ALLOWED_USERS");
+const adminIds = idList("TELEGRAM_ADMIN_IDS");
+if (allowedUserIds.length) log(`закрытая бета: доступ только ${allowedUserIds.join(", ")}`);
+else log("открытая регистрация (TELEGRAM_ALLOWED_USERS не задан): лимиты бесплатного тарифа защищают от расходов");
+const admins = adminIds.length ? adminIds : allowedUserIds.slice(0, 1);
+if (admins.length) log(`админы: ${admins.join(", ")}${adminIds.length ? "" : " (первый из TELEGRAM_ALLOWED_USERS)"}`);
+else log("⚠ админов нет: задайте TELEGRAM_ADMIN_IDS, чтобы видеть ошибки задач и пользоваться /admin");
+
+let plan, maxJobs, retentionDays;
+try {
+  plan = freePlanFromEnv();
+  maxJobs = maxJobsFromEnv();
+  retentionDays = retentionDaysFromEnv();
+} catch (err) {
+  console.error(`✖ ${err instanceof Error ? err.message : err}`);
   process.exit(1);
 }
-if (allowedUserIds.length) log(`доступ: ${allowedUserIds.join(", ")}`);
-else log("⚠ TELEGRAM_ALLOWED_USERS не задан — бот отвечает всем, а каждый монтаж тратит деньги на планировщик");
+log(`бесплатно в день: ${plan.standardPerDay} обычн. + ${plan.longPerDay} длинн., пробных кредитов ${plan.trialCredits}; задач одновременно ${maxJobs}; хранение ${retentionDays} дн.`);
 
 const apiBase = process.env.TELEGRAM_API_BASE?.trim() || undefined;
 if (apiBase) log(`Bot API: ${apiBase} (локальный сервер — лимиты файлов 2000 МБ)`);
 
-const running = await startBot({ token, allowedUserIds, apiBase, onLog: log });
+const running = await startBot({ token, allowedUserIds, adminIds: admins, apiBase, maxJobs, retentionDays, onLog: log });
 
 let stopping = false;
 const shutdown = async () => {

@@ -105,7 +105,7 @@ test("bot: several videos then /viral → one run with all sources; the next vid
   const out = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "vedit-out-")), "output_reel_1.mp4");
   await fs.writeFile(out, "x");
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "vedit-bot-"));
-  const running = await startBot({ token: "T", workspace, callMethod: tg.callMethod, download: tg.download, onLog: () => {}, pollTimeout: 1, albumDelayMs: 50, pipeline: async (a) => (runs.push(a), { jobId: "j", outputs: [{ id: "reel_1", file: out }] }) });
+  const running = await startBot({ token: "T", workspace, callMethod: tg.callMethod, download: tg.download, onLog: () => {}, pollTimeout: 1, onboarding: false, quotas: false, cleanupIntervalMs: 0, albumDelayMs: 50, pipeline: async (a) => (runs.push(a), { jobId: "j", outputs: [{ id: "reel_1", file: out }] }) });
   tg.push({ video: { file_id: "A", file_size: 1000 } });
   tg.push({ video: { file_id: "B", file_size: 1000 } });
   await waitFor(() => tg.messages().some((m) => m === MSG.batchSaved(2)), "batch of 2");
@@ -128,7 +128,7 @@ test("bot: an album with a caption runs once with every video of the album", asy
   const out = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "vedit-out-")), "output_reel_1.mp4");
   await fs.writeFile(out, "x");
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "vedit-bot-"));
-  const running = await startBot({ token: "T", workspace, callMethod: tg.callMethod, download: tg.download, onLog: () => {}, pollTimeout: 1, albumDelayMs: 80, pipeline: async (a) => (runs.push(a), { jobId: "j", outputs: [{ id: "reel_1", file: out }] }) });
+  const running = await startBot({ token: "T", workspace, callMethod: tg.callMethod, download: tg.download, onLog: () => {}, pollTimeout: 1, onboarding: false, quotas: false, cleanupIntervalMs: 0, albumDelayMs: 80, pipeline: async (a) => (runs.push(a), { jobId: "j", outputs: [{ id: "reel_1", file: out }] }) });
   tg.push({ media_group_id: "G1", caption: "лучшее в один рилс", video: { file_id: "X1", file_size: 1000 } });
   tg.push({ media_group_id: "G1", video: { file_id: "X2", file_size: 1000 } });
   tg.push({ media_group_id: "G1", video: { file_id: "X3", file_size: 1000 } });

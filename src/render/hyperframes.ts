@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { exists } from "../lib/workspace.ts";
+import { withCurrent } from "../lib/abort.ts";
 import type { DesignJob } from "../design/export.ts";
 import type { BuildResult, OverlayRenderer, RenderQuality, RenderResult } from "../design/renderer.ts";
 import { buildLayout, loadFontMetrics } from "../design/layout.ts";
@@ -70,7 +71,8 @@ export class HyperFramesRenderer implements OverlayRenderer {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), timeoutMs);
     const onAbort = () => ac.abort();
-    o.signal?.addEventListener("abort", onAbort, { once: true });
+    const callerSignal = withCurrent(o.signal);
+    callerSignal?.addEventListener("abort", onAbort, { once: true });
     const t0 = Date.now();
     let lastPct = -1;
     const log: string[] = [];
@@ -97,7 +99,7 @@ export class HyperFramesRenderer implements OverlayRenderer {
       } catch (err) {
         // an abort (timeout or caller) rejects the spawn promise: keep the log and say why
         await fs.writeFile(path.join(projectDir, "render.log"), log.join("\n"));
-        if (ac.signal.aborted) throw new Error(`hyperframes render прерван (${o.signal?.aborted ? "отмена" : `таймаут ${Math.round(timeoutMs / 1000)}s`}) после ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+        if (ac.signal.aborted) throw new Error(`hyperframes render прерван (${callerSignal?.aborted ? "отмена" : `таймаут ${Math.round(timeoutMs / 1000)}s`}) после ${((Date.now() - t0) / 1000).toFixed(0)}s`);
         throw err;
       }
       const seconds = (Date.now() - t0) / 1000;
@@ -108,7 +110,7 @@ export class HyperFramesRenderer implements OverlayRenderer {
       return { file: outFile, seconds, log: log.join("\n") };
     } finally {
       clearTimeout(timer);
-      o.signal?.removeEventListener("abort", onAbort);
+      callerSignal?.removeEventListener("abort", onAbort);
     }
   }
 }

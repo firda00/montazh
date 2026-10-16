@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { jobSignal } from "../lib/abort.ts";
 import { hoopAt, type HoopSample, type SportEvent } from "./events.ts";
 import { ballBlobs, classifyShot, medianBackground, netCore, roiForHoop, refineShot, type RimGeom, type RoiBox } from "./refine.ts";
 
@@ -29,7 +30,7 @@ export interface ScanCandidate {
 async function streamWindows(source: string, start: number, end: number, roi: RoiBox, fps: number, win: number, overlap: number, onWindow: (frames: Buffer[], t0: number) => void): Promise<void> {
   const size = roi.w * roi.h * 3;
   const args = ["-hide_banner", "-loglevel", "error", "-nostdin", "-ss", start.toFixed(3), "-to", end.toFixed(3), "-i", source, "-an", "-vf", `crop=${roi.w}:${roi.h}:${roi.x}:${roi.y},fps=${fps}`, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"];
-  const child = spawn(process.env.FFMPEG_PATH || "ffmpeg", args, { windowsHide: true });
+  const child = spawn(process.env.FFMPEG_PATH || "ffmpeg", args, { windowsHide: true, signal: jobSignal() });
   let pending: Buffer = Buffer.alloc(0);
   let frames: Buffer[] = [];
   let first = 0; // index (in frames since start) of frames[0]

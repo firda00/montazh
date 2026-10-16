@@ -1,518 +1,125 @@
-// Telegram bot — the first user interface (SPEC §6, stage 7): video → instruction → MP4s.
-// Pipeline functions are called directly (no CLI subprocess); every update is isolated in try/catch.
+// Telegram bot — multi-user product (stage 19) on top of the stage-7 bot: registration, buttons-first UX in
+// ru/uz/en, per-user settings in SQLite, quotas and credits, a fair global job queue with real cancel,
+// progress cards edited in place, admin panel, retention cleanup. Pipelines live in ./pipelines.ts; every
+// update is isolated in try/catch, so one bad update never stops the bot.
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { createJob, exists, jobDir, loadJob, readJson, runStep, writeJson, WORKSPACE_ROOT } from "../lib/workspace.ts";
-import { PlanError } from "../plan/backend/types.ts";
-import { MediaSchema, TranscriptSchema, type Edl, type Transcript } from "../schemas/index.ts";
-import { makeBotApi, TelegramError, type BotApi, type CallMethod, type DownloadFn, type Limits, type TgMessage, type TgUpdate } from "./telegram-api.ts";
-import { autoVoice, GEMINI_LICENSE_NOTE, getVoice, isCloud, isLocal, NO_VOICE, piperVoiceFor, sampleVoiceFor, voicesListText, type VoiceDef } from "../voice/catalog.ts";
-import { geminiApiKey } from "../voice/gemini.ts";
-import { cloudApiKey } from "../voice/cloudtts.ts";
-import { TTS_KEYS_HELP } from "../voice/piper.ts";
-
-/** a Google TTS key (Cloud TTS or Gemini API) is configured */
-const hasGoogleTtsKey = () => !!(cloudApiKey() || geminiApiKey());
+import { exists, jobDir, loadJob, readJson, WORKSPACE_ROOT } from "../lib/workspace.ts";
+import { withJobSignal } from "../lib/abort.ts";
 import { detectAspect, isAspect, type Aspect } from "../lib/aspect.ts";
+import { PlanError } from "../plan/backend/types.ts";
+import { CostSchema } from "../schemas/index.ts";
+import { getVoice, isCloud, NO_VOICE, piperVoiceFor, sampleVoiceFor, type VoiceDef } from "../voice/catalog.ts";
+import { makeBotApi, TelegramError, type BotApi, type CallMethod, type DownloadFn, type InlineKeyboard, type Limits, type ReplyMarkup, type TgCallbackQuery, type TgMessage, type TgUpdate, type TgUser } from "./telegram-api.ts";
+import { BotDb, isLang, type JobKind, type JobRow, type Lang, type UserRow } from "./db.ts";
+import { hasGoogleTtsKey, menuAction, STRINGS, t, voiceLabel, type MenuAction, type SendMode, type Strings } from "./i18n.ts";
+import { adminHandlers } from "./admin.ts";
+import { JobQueue, type JobOutcome } from "./queue.ts";
+import { runRetention, type RetentionReport } from "./retention.ts";
+import { dayStart, freePlanFromEnv, maxJobsFromEnv, retentionDaysFromEnv, tzOffsetFromEnv, type JobClass, type PlanLimits } from "./plans.ts";
+import {
+  cancelKb,
+  langKb,
+  mainMenu,
+  makeKb,
+  montageKb,
+  PRESET_STYLE,
+  purposeKb,
+  resultKb,
+  retryKb,
+  settingsKb,
+  STYLE_PRESET,
+  termsKb,
+  voicesKb,
+  byteLength,
+  CALLBACK_LIMIT,
+  type MakeDraft,
+  type MontageDraft,
+  type MontageMode,
+} from "./keyboards.ts";
+import {
+  CancelledError,
+  excerpt,
+  HINTS,
+  runAvatarExport,
+  runAvatarImport,
+  runFullPipeline,
+  runMakePipeline,
+  runRevisePipeline,
+  type AvatarExportFn,
+  type AvatarImportFn,
+  type MakeFn,
+  type PipelineFn,
+  type PipelineOutput,
+  type PipelineResult,
+  type ReviseFn,
+} from "./pipelines.ts";
 
-// same hints as src/cli.ts (cli.ts runs commander on import, so the table is duplicated here)
-export const HINTS: Partial<Record<PlanError["code"], string>> = {
-  no_backend: "варианты: ANTHROPIC_API_KEY в .env (бэкенд api) · `claude /login` (бэкенд agent по подписке) · готовый план: vedit cut <job> --edl <file>",
-  auth: "проверьте ключ/вход: ANTHROPIC_API_KEY в .env или `claude /login`",
-  refusal: "модель отказалась; переформулируйте инструкцию или выберите другой фрагмент",
-  budget: "поднимите лимит: --budget <usd> (по умолчанию 1.50) или упростите инструкцию",
-  invalid: "если модель вернула черновик, он сохранён как edl.draft.json — исправьте вручную и запустите vedit cut <job> --edl <file>; иначе уточните инструкцию",
-  loop: "лимит запросов исчерпан; попробуйте --effort high или более конкретную инструкцию",
-  nothing_to_plan: "запустите понимание видео: vedit understand <job> (или уберите --skip-understand)",
-  missing_inputs: "сначала vedit run <video> или vedit ingest + vedit understand",
-  model: "проверьте --model (по умолчанию claude-opus-5-5) и доступ организации к модели",
-};
+export * from "./pipelines.ts";
+export { STRINGS, t, menuAction } from "./i18n.ts";
+export type { SendMode } from "./i18n.ts";
 
-export const MSG = {
-  help: [
-    "Я монтирую короткие ролики из вашего видео.",
-    "",
-    "1. Пришлите видео (как видео или файлом, до 20 МБ).",
-    "2. Напишите задачу, например: «3 рилса по 30 секунд, динамично, субтитры на узбекском».",
-    "3. Получите готовые MP4 — по одному сообщению на каждый выход.",
-    "",
-    "Команды:",
-    "/status — состояние последней задачи",
-    "/revise <что изменить> — правка последнего монтажа (перережу и перерендерю только затронутое)",
-    "/make <тема> — ролик по теме из ничего: тренды, сценарий, настоящие фото, моушн-графика, музыка. Вертикальный 9:16; для YouTube — /make 16:9 тема (или «… для ютуба»)",
-    "Несколько видео подряд (или альбомом) → /viral — соберу один самый вирусный ролик из всех; /clear — новая подборка",
-    "/style pop | split | calm — стиль монтажа (split: сверху сгенерированные картинки с карточками, снизу спикер)",
-    "/voice — голоса для озвучки: /voice gemini_charon — выбрать (пришлю пробу), /voice off — без голоса; голос озвучит /make и /avatar",
-    "/send file | video | both — как присылать ролики: файлом в исходном качестве (по умолчанию), видео с плеером (Telegram пережмёт) или и так и так",
-    "/avatar <текст или тема> — говорящий аватар (бесплатно, через Google Colab): пришлите заранее фото (лицо анфас) и голосовое 5–10 с — аватар будет с вашим лицом и голосом; без них — вымышленный ведущий. Готовый avatar_result.zip пришлите сюда — смонтирую рилс",
-    "/cancel — отменить текущую работу (после текущего шага)",
-    "/start — эта справка",
-  ].join("\n"),
-  needVideo: "Сначала пришлите видео (как видео или файлом), потом напишите задачу.",
-  batchSaved: (n: number) => `Видео ${n} в подборке. Пришлите ещё или напишите задачу — например /viral (соберу один самый вирусный ролик из всех). /clear — начать подборку заново.`,
-  cleared: "Подборка очищена. Пришлите новые видео.",
-  viral: "Собери один самый вирусный ролик 30–45 секунд из всех видео: самый сильный хук в первые 2 секунды, только лучшие моменты (эмоция, сильная мысль, неожиданный поворот, смешное), динамичный темп, каждый клип — законченная фраза, финал с законченной мыслью. Субтитры на языке речи.",
-  busy: "ещё работаю над предыдущим — дождитесь результата или отправьте /cancel",
-  videoSaved: "Видео получено. Теперь напишите задачу: что смонтировать (например, «2 рилса по 20 секунд с субтитрами»).",
-  notVideo: "Это не похоже на видео. Пришлите ролик как видео или файлом с типом video/*.",
-  noJob: "Пока нет задач. Пришлите видео и напишите задачу.",
-  reviseUsage: "Напишите, что изменить: /revise в reel_1 убери приветствие",
-  makeUsage: "Напишите тему: /make почему кофе дорожает в 2026",
-  styleUsage: (cur: string) => `Сейчас: ${cur}. Варианты: /style pop — динамичные субтитры; /style split — сверху картинки и карточки, снизу спикер (как у новостных техно-блогеров); /style calm — спокойный.`,
-  makeStart: "Делаю ролик по теме: тренды → сценарий → фото и графика → рендер. Это 3–6 минут.",
-  reviseNoJob: "Нечего править: сначала смонтируйте видео (пришлите видео и задачу).",
-  nothingToCancel: "Сейчас ничего не выполняется.",
-  cancelling: "Отменяю — остановлюсь после текущего шага.",
-  cancelled: "Отменено.",
-  start: "Принято, начинаю монтаж. Это займёт несколько минут.",
-  reviseStart: "Принято, правлю монтаж.",
-  unknownCommand: "Не знаю такой команды. /start — справка.",
-  avatarUsage: "Напишите текст или тему: /avatar почему кофе дорожает (тема — монолог напишу сам) или /avatar текст: Привет! Сегодня расскажу… Фото и голосовое для аватара можно прислать заранее; /avatar сброс — забыть их.",
-  avatarStart: (photo: boolean, voice: boolean, voiceId?: string) =>
-    `Готовлю задание для аватара: ${photo ? "ваше фото" : "вымышленный ведущий (сгенерирую портрет)"}, ${voice ? "ваш голос (клон)" : voiceId ? `голос ${voiceId}` : "стандартный голос"}. Это 1–3 минуты.`,
-  voiceList: (current?: string, hasKey = hasGoogleTtsKey()) =>
-    [
-      `Голоса для озвучки (${current === "off" ? "сейчас без голоса" : current ? `сейчас: ${current}` : `сейчас: авто — ${autoVoice("ru", hasKey).id}`}):`,
-      voicesListText(current),
-      "",
-      "/voice <id> — выбрать (пришлю пробу), /voice off — без голоса.",
-      `gemini_* и chirp_* — живые голоса Google (облако; нужен ключ GOOGLE_CLOUD_API_KEY или GEMINI_API_KEY${hasKey ? " — есть" : " — пока нет, вместо них звучит Piper"}); они озвучивают и /make, и /avatar. ${GEMINI_LICENSE_NOTE}`,
-      "Piper-голоса (denis, dmitri, ljspeech, john, cori) — локально, без ключа; chatterbox_* — только в /avatar (синтез в Colab).",
-      "Без выбора /make озвучивается автоматически: Gemini, если есть ключ, иначе Piper.",
-      "Ваше голосовое сообщение для /avatar важнее выбранного голоса.",
-    ].join("\n"),
-  voiceSet: (v: VoiceDef, hasKey = hasGoogleTtsKey()) =>
-    `Голос: ${v.id} — ${v.name}. Лицензия: ${v.license}.
-${
-      isCloud(v) && !hasKey
-        ? `Ключа Google пока нет — до его появления /make и /avatar озвучит Piper ${piperVoiceFor(v)?.id}.
-${TTS_KEYS_HELP}`
-        : isLocal(v)
-          ? "Им будут озвучены /make и /avatar."
-          : "Им будет говорить /avatar (Colab); для /make возьму локальный " + (piperVoiceFor(v)?.id ?? "голос по языку") + "."
-    }`,
-  voiceOff: "Озвучка выключена: /make снова без голоса, /avatar — стандартный голос Chatterbox (или ваше голосовое).",
-  voiceUnknown: (id: string) => `Не знаю голос «${id}». /voice — список.`,
-  sendUsage: (cur: string) => `Сейчас: ${cur}. /send file — файлом в исходном качестве (по умолчанию); /send video — видео с плеером (Telegram сжимает); /send both — и то и другое.`,
-  sendSet: (mode: SendMode) => (mode === "file" ? "Ролики буду присылать файлом — без пережатия, можно сразу выкладывать." : mode === "video" ? "Ролики буду присылать как видео (с плеером; Telegram их сжимает)." : "Ролики буду присылать и видео (посмотреть), и файлом (для публикации)."),
-  avatarPhotoSaved: "Фото сохранено для аватара. Теперь /avatar <текст или тема>.",
-  avatarVoiceSaved: "Голос сохранён: аватар будет говорить им (нужно 5–10 с чистой речи на языке текста). Теперь /avatar <текст или тема>.",
-  avatarReset: "Фото и голос для аватара забыты.",
-  avatarNoJob: "Не нашёл задачу для этого архива: сначала /avatar <текст>, затем пришлите avatar_result.zip из Colab.",
-  avatarImportStart: (jobId: string) => `Принял avatar_result.zip (задача ${jobId}). Монтирую рилс: аватар снизу, картинки сверху, субтитры, музыка.`,
-  avatarInstructions: (jobId: string, lines: string[], warnings: string[]) =>
-    [
-      `Задание для аватара готово (задача ${jobId}) — файл avatar_job.zip выше.`,
-      "",
-      "Как получить видео (бесплатно, Google Colab):",
-      "1. Откройте ноутбук colab_vedit_avatar.ipynb (из папки tools/avatar проекта) в colab.research.google.com → File → Upload notebook.",
-      "2. Runtime → Change runtime type → T4 GPU, затем Runtime → Run all.",
-      "3. В ячейке «Загрузка» выберите avatar_job.zip.",
-      "4. Первый запуск ~10 минут (установка и модели), потом 2–5 минут.",
-      "5. Скачается avatar_result.zip — пришлите его сюда документом, я смонтирую рилс.",
-      ...(lines.length ? ["", "Текст:", ...lines.slice(0, 8).map((l, i) => `${i + 1}. ${l}`), ...(lines.length > 8 ? [`… ещё ${lines.length - 8}`] : [])] : []),
-      ...warnings.map((w) => `⚠ ${w}`),
-    ].join("\n"),
-};
+/** the instruction behind /viral and the «Один вирусный ролик» button (goes to the planner, always Russian) */
+export const VIRAL_INSTRUCTION =
+  "Собери один самый вирусный ролик 30–45 секунд из всех видео: самый сильный хук в первые 2 секунды, только лучшие моменты (эмоция, сильная мысль, неожиданный поворот, смешное), динамичный темп, каждый клип — законченная фраза, финал с законченной мыслью. Субтитры на языке речи.";
 
-function tooLarge(sizeBytes: number, limits: Limits) {
-  const mb = (n: number) => `${Math.round(n / 1024 / 1024)} МБ`;
-  return [
-    `Файл слишком большой: ${mb(sizeBytes)}, а облачный Bot API отдаёт ботам файлы только до ${mb(limits.downloadBytes)}.`,
-    "Варианты: сожмите видео или обрежьте лишнее; либо запустите локальный сервер Bot API (github.com/tdlib/telegram-bot-api, флаг --local) и укажите TELEGRAM_API_BASE=http://localhost:8081 — тогда лимит 2000 МБ.",
-  ].join("\n");
-}
+/** Russian UI strings (the default language) + the /viral instruction — kept for the stage 7–16 tests and callers */
+export const MSG = { ...STRINGS.ru, viral: VIRAL_INSTRUCTION };
 
-// ── pipeline contract (the real one is runFullPipeline/runRevisePipeline; tests inject fakes) ──
+// ── per-user state ─────────────────────────────────────────────────────────────
 
-export interface PipelineOutput {
-  id: string;
-  file: string;
-  duration?: number;
-  aspect?: string;
-}
-export interface PipelineResult {
-  jobId: string;
-  outputs: PipelineOutput[];
-  /** files sent as documents before the videos (e.g. avatar_job.zip) */
-  documents?: { file: string; caption?: string }[];
-  /** replaces the closing "Готово: N ролик(ов)…" message */
-  message?: string;
-  /** a short name for the files sent (make topic / title); default: the job id */
-  title?: string;
-  failed?: { id: string; error: string }[];
-  reasoning?: string;
-  notes?: string[];
-}
-export interface PipelineArgs {
-  source: string;
-  /** several videos: joined into one source before the pipeline */
-  sources?: string[];
-  instruction: string;
-  preset: string;
-  progress: (text: string) => Promise<void>;
-  /** called as soon as the job id is known, so /status and /revise can find it even if a later step fails */
-  onJob: (jobId: string) => void;
-  signal: AbortSignal;
-  log: (line: string) => void;
-}
-export interface ReviseArgs {
-  jobId: string;
-  edit: string;
-  progress: (text: string) => Promise<void>;
-  signal: AbortSignal;
-  log: (line: string) => void;
-}
-export type PipelineFn = (args: PipelineArgs) => Promise<PipelineResult>;
-export type ReviseFn = (args: ReviseArgs) => Promise<PipelineResult>;
-export interface MakeArgs {
-  topic: string;
-  /** catalogue voice for the voiceover (/voice) */
-  voice?: string;
-  /** output frame: "/make 16:9 тема", or detected from the words ("для ютуба" → 16:9, "шортс" → 9:16) */
-  aspect?: Aspect;
-  progress: (text: string) => Promise<void>;
-  onJob: (jobId: string) => void;
-  signal: AbortSignal;
-  log: (line: string) => void;
-}
-export type MakeFn = (args: MakeArgs) => Promise<PipelineResult>;
-
-/** "/make 16:9 тема" → { aspect: "16:9", topic: "тема" }; without a leading ratio the words decide (default 9:16). */
-export function parseMakeArgs(arg: string): { topic: string; aspect: Aspect } {
-  const m = /^\s*(9:16|16:9|1:1)\s+([\s\S]*)$/.exec(arg);
-  const topic = (m ? m[2] : arg).trim();
-  return { topic, aspect: m && isAspect(m[1]) ? m[1] : (detectAspect(topic) ?? "9:16") };
-}
-
-export interface AvatarExportArgs {
-  /** "/avatar" argument: a topic or the text itself */
-  input: string;
-  photo?: string;
-  /** the user's voice note (cloned); wins over voiceId */
-  voice?: string;
-  /** catalogue voice chosen with /voice */
-  voiceId?: string;
-  /** job source label, so the job counts as a bot job */
-  sourceLabel: string;
-  progress: (text: string) => Promise<void>;
-  onJob: (jobId: string) => void;
-  signal: AbortSignal;
-  log: (line: string) => void;
-}
-export type AvatarExportFn = (args: AvatarExportArgs) => Promise<PipelineResult>;
-export interface AvatarImportArgs {
-  jobId: string;
-  /** avatar_result.zip on disk */
-  result: string;
-  instruction?: string;
-  preset: string;
-  progress: (text: string) => Promise<void>;
-  signal: AbortSignal;
-  log: (line: string) => void;
-}
-export type AvatarImportFn = (args: AvatarImportArgs) => Promise<PipelineResult>;
-
-/** /avatar: text or topic (+ photo, + voice) → avatar_job.zip and instructions for the Colab notebook. */
-export const runAvatarExport: AvatarExportFn = async ({ input, photo, voice, voiceId, sourceLabel, progress, onJob, log }) => {
-  const { exportAvatarJob } = await import("../avatar/export.ts");
-  const r = await exportAvatarJob({
-    input,
-    photo,
-    voice,
-    voiceId: voice ? undefined : voiceId,
-    sourceLabel,
-    onEvent: (l) => {
-      if (/^job /.test(l)) onJob(l.slice(4).trim());
-      else if (/^▸/.test(l)) void progress(l);
-      else log(`  ${l.trim()}`);
-    },
-  });
-  return {
-    jobId: r.jobId,
-    outputs: [],
-    documents: [{ file: r.bundle, caption: `avatar_job.zip · задача ${r.jobId} · ≈${r.state.estimated_seconds.toFixed(0)} с речи` }],
-    message: MSG.avatarInstructions(r.jobId, r.state.lines, r.warnings),
-  };
-};
-
-/** avatar_result.zip → import into its job → montage (split_news by default) → reels. */
-export const runAvatarImport: AvatarImportFn = async ({ jobId, result, instruction, preset, progress, signal, log }) => {
-  const { importAvatarResult, runAvatarMontage } = await import("../avatar/import.ts");
-  const imp = await importAvatarResult(jobId, result);
-  for (const w of imp.warnings) log(`  ⚠ ${w}`);
-  checkCancel(signal);
-  const m = await runAvatarMontage(jobId, { prompt: instruction, design: preset, progress, checkpoint: () => checkCancel(signal), onEvent: (l) => log(`  ${l.trim()}`) });
-  return { jobId, outputs: m.outputs, failed: m.failed, reasoning: m.reasoning, notes: [...imp.warnings, ...m.notes].slice(0, 4) };
-};
-
-/** /make: topic → video from nothing (trends → script → motion graphics → render). */
-export const runMakePipeline: MakeFn = async ({ topic, voice, aspect, progress, onJob, signal, log }) => {
-  const { make, creditsText } = await import("../make/index.ts");
-  const r = await make(topic, {
-    signal,
-    voice,
-    aspect,
-    onEvent: (l) => {
-      if (/^job /.test(l)) onJob(l.slice(4).trim());
-      else if (/^▸/.test(l)) void progress(l);
-      else log(`  ${l.trim()}`);
-    },
-  });
-  const notes = r.warnings.slice(0, 3);
-  const credits = creditsText(r);
-  return { jobId: r.jobId, title: topic, outputs: [{ id: "make", file: r.output, duration: r.duration, aspect: r.aspect }], reasoning: `${r.title}\n${r.script.beats.map((b) => `· ${b.text}`).join("\n")}${r.script.hashtags.length ? `\n#${r.script.hashtags.join(" #")}` : ""}${credits ? `\n${credits}` : ""}`, notes };
-};
-
-class CancelledError extends Error {
-  constructor() {
-    super("отменено");
-    this.name = "CancelledError";
-  }
-}
-function checkCancel(signal: AbortSignal) {
-  if (signal.aborted) throw new CancelledError();
-}
-
-function planSummary(edl: Edl, report: { usd: number; estimate: boolean; backend: string }) {
-  const lines = [`▸ план готов: ${edl.outputs.length} выход(ов)`];
-  for (const o of edl.outputs) {
-    const dur = o.clips.reduce((s, c) => s + (c.src_end - c.src_start) / (c.speed ?? 1), 0);
-    const caps = o.captions.enabled ? `, субтитры${o.captions.language ? ` ${o.captions.language}` : ""}` : "";
-    lines.push(`• ${o.id}: ${o.aspect}, ≈${dur.toFixed(0)} с, ${o.clips.length} клип(ов)${caps}`);
-  }
-  if (edl.reasoning) lines.push(`«${excerpt(edl.reasoning, 400)}»`);
-  lines.push(`стоимость плана: ${report.estimate ? "≈" : ""}$${report.usd.toFixed(3)} (${report.backend})`);
-  return lines.join("\n");
-}
-
-async function loadTranscript(jobId: string): Promise<Transcript | undefined> {
-  const file = path.join(jobDir(jobId), "transcript.json");
-  return (await exists(file)) ? readJson(file, TranscriptSchema) : undefined;
-}
-
-/** Renders `ids` through HyperFrames, reporting "▸ рендер <id> (i/n)…" before each output. */
-async function renderIds(jobId: string, ids: string[], edl: Edl, progress: (t: string) => Promise<void>, log: (l: string) => void) {
-  const { HyperFramesRenderer } = await import("../render/hyperframes.ts");
-  const { renderOutputs } = await import("../render/index.ts");
-  const renderer = new HyperFramesRenderer();
-  await renderer.prepare();
-  let i = 0;
-  const pending: Promise<void>[] = [];
-  const r = await runStep(jobId, "render", () =>
-    renderOutputs(jobId, {
-      renderer,
-      quality: "looks",
-      only: ids,
-      edl,
-      onEvent: (line) => {
-        log(`  ${line}`);
-        const m = /^▸ design (\S+)/.exec(line);
-        if (m) pending.push(progress(`▸ рендер ${m[1]} (${++i}/${ids.length})…`));
-      },
-    }),
-  );
-  await Promise.all(pending);
-  const outputs: PipelineOutput[] = [];
-  const failed: { id: string; error: string }[] = [];
-  for (const o of r.outputs) {
-    if (o.status === "ok" && o.output) outputs.push({ id: o.id, file: o.output, duration: o.duration, aspect: edl.outputs.find((e) => e.id === o.id)?.aspect });
-    else failed.push({ id: o.id, error: o.error ?? o.status });
-  }
-  return { outputs, failed };
-}
-
-/** createJob → ingest → understand → plan → cut → render (HyperFrames), with progress messages. */
-export const runFullPipeline: PipelineFn = async ({ source, sources, instruction, preset, progress, onJob, signal, log }) => {
-  const { ingest } = await import("../ingest/index.ts");
-  const { understand } = await import("../understand/index.ts");
-  const { plan } = await import("../plan/index.ts");
-  const { cut } = await import("../cut/index.ts");
-
-  const many = (sources ?? []).length > 1;
-  // sports / action footage ("как мы играем в баскет", "броски", "трюки"): highlights mode, no speech plan
-  const { highlightsIntent, wantsHighlights } = await import("../highlights/intent.ts");
-  const intent = many ? null : highlightsIntent(instruction);
-  if (intent === "strong") return runHighlightsBot({ source, instruction, progress, onJob, signal, log });
-  const job = await createJob(many ? `combined:${sources!.length} videos` : source, { prompt: instruction, preset });
-  onJob(job.id);
-  log(`job ${job.id}`);
-
-  let input = source;
-  if (many) {
-    const { combineSources, SourcesSchema } = await import("../ingest/combine.ts");
-    await progress(`▸ склеиваю ${sources!.length} видео в один материал…`);
-    input = path.join(jobDir(job.id), "combined.mp4");
-    const map = await combineSources(sources!, input);
-    await writeJson(path.join(jobDir(job.id), "sources.json"), SourcesSchema, map);
-    log(`  combined: ${map.sources.map((s) => `${s.id} ${s.start}-${s.end}s`).join(", ")}${map.sources.some((s) => s.cropped) ? " (часть обрезана под общий формат)" : ""}`);
-  }
-  checkCancel(signal);
-
-  await progress("▸ подготовка видео…");
-  const media = await runStep(job.id, "ingest", () => ingest(job.id, input));
-  checkCancel(signal);
-
-  await progress(`▸ анализ речи… (${media.duration.toFixed(0)} с видео)`);
-  const u = await runStep(job.id, "understand", () => understand(job.id, media, { onLog: (l) => log(`    ${l}`) }));
-  checkCancel(signal);
-  // "лучшие моменты" of a video that is mostly not speech → highlights on the same job
-  if (intent === "weak") {
-    const spoken = u.transcript.segments.reduce((s, seg) => s + seg.words.reduce((a, w) => a + Math.max(0, w.end - w.start), 0), 0);
-    if (wantsHighlights(intent, spoken / Math.max(1, media.duration))) return runHighlightsBot({ source, instruction, progress, onJob, signal, log, jobId: job.id, media });
-  }
-
-  await progress("▸ план…");
-  const p = await runStep(job.id, "plan", () => plan(job.id, { instruction, preset, onEvent: (l) => log(`  ${l.trim()}`) }));
-  const edl = p.edl!;
-  await progress(planSummary(edl, p.report));
-  checkCancel(signal);
-
-  await progress("▸ нарезка…");
-  const cutReport = await runStep(job.id, "cut", () => cut(job.id, edl, media, { transcript: u.transcript, snap: true, scenes: u.scenes }));
-  const failed = cutReport.outputs.filter((o) => o.status !== "ok").map((o) => ({ id: o.id, error: o.error ?? "ошибка нарезки" }));
-  const okIds = cutReport.outputs.filter((o) => o.status === "ok").map((o) => o.id);
-  checkCancel(signal);
-
-  const rendered = okIds.length ? await renderIds(job.id, okIds, edl, progress, log) : { outputs: [], failed: [] };
-  const credits = await photoCredits(job.id, rendered.outputs);
-  return { jobId: job.id, outputs: rendered.outputs, failed: [...failed, ...rendered.failed], reasoning: `${edl.reasoning}${credits ? `
-${credits}` : ""}`, notes: p.report.warnings.slice(0, 3) };
-};
-
-/** Highlights for sports footage: events (Gemini) → best moments → slow motion, punch-ins, music on the beat. */
-async function runHighlightsBot(a: Pick<PipelineArgs, "source" | "instruction" | "progress" | "onJob" | "signal" | "log"> & { jobId?: string; media?: import("../schemas/index.ts").Media }): Promise<PipelineResult> {
-  const { ingestLight } = await import("../ingest/index.ts");
-  const { planHighlights } = await import("../highlights/index.ts");
-  const { cut } = await import("../cut/index.ts");
-  const { selectStructuredLlm } = await import("../lib/llm.ts");
-  const { updateJobPreset } = await import("../highlights/job.ts");
-  let jobId = a.jobId;
-  let media = a.media;
-  if (!jobId || !media) {
-    const job = await createJob(a.source, { prompt: a.instruction, preset: "sport_highlights" });
-    jobId = job.id;
-    a.onJob(jobId);
-    a.log(`job ${jobId} (highlights)`);
-    await a.progress("▸ подготовка видео…");
-    media = await runStep(jobId, "ingest", () => ingestLight(jobId!, a.source));
-  } else await updateJobPreset(jobId, "sport_highlights");
-  checkCancel(a.signal);
-  await a.progress(`▸ ищу броски и лучшие моменты… (${Math.round(media.duration / 60)} мин видео)`);
-  let llm = null;
-  try {
-    llm = selectStructuredLlm();
-  } catch {}
-  // "по отдельности", "на каждого игрока": one reel per person, all sent
-  const { perPersonIntent } = await import("../highlights/intent.ts");
-  if (perPersonIntent(a.instruction)) {
-    const { planPerPerson } = await import("../highlights/perperson.ts");
-    await a.progress("▸ разбираю, кто бросал: отдельный ролик на каждого игрока…");
-    const pp = await runStep(jobId, "plan", () => planPerPerson(jobId!, media!, { instruction: a.instruction, llm, onLog: (l) => a.log(`  ${l}`) }));
-    await a.progress(`▸ роликов: ${pp.report.reels.length} — ${pp.report.reels.map((x) => `«${x.title}» (${x.makes_in_reel} попаданий, ${x.duration.toFixed(0)} с)`).join("; ")}`);
-    checkCancel(a.signal);
-    const cr = await runStep(jobId, "cut", () => cut(jobId!, pp.edl, media!, { snap: false }));
-    const failedPP = cr.outputs.filter((o) => o.status !== "ok").map((o) => ({ id: o.id, error: o.error ?? "ошибка нарезки" }));
-    const okPP = cr.outputs.filter((o) => o.status === "ok").map((o) => o.id);
-    const rendered = okPP.length ? await renderIds(jobId, okPP, pp.edl, a.progress, a.log) : { outputs: [], failed: [] };
-    const credits = [...new Set(pp.report.reels.map((x) => x.music_attribution).filter(Boolean))].join("\n");
-    return { jobId, outputs: rendered.outputs, failed: [...failedPP, ...rendered.failed], reasoning: `${pp.edl.reasoning}${credits ? `\n${credits}` : ""}`, notes: pp.report.notes.slice(0, 3) };
-  }
-  const r = await runStep(jobId, "plan", () => planHighlights(jobId!, media!, { instruction: a.instruction, llm, onLog: (l) => a.log(`  ${l}`) }));
-  const e = r.report.events;
-  await a.progress(`▸ попаданий ${e.makes} из ${e.shots} бросков; в ролике ${r.report.timeline.length} момент(ов), ${r.report.duration.toFixed(0)} с${r.report.music ? `, музыка «${r.report.music.title}»` : ""}`);
-  checkCancel(a.signal);
-  await a.progress("▸ нарезка: замедления и наезды…");
-  const cr = await runStep(jobId, "cut", () => cut(jobId!, r.edl, media!, { snap: false }));
-  const failed = cr.outputs.filter((o) => o.status !== "ok").map((o) => ({ id: o.id, error: o.error ?? "ошибка нарезки" }));
-  checkCancel(a.signal);
-  const ok = cr.outputs.filter((o) => o.status === "ok").map((o) => o.id);
-  const rendered = ok.length ? await renderIds(jobId, ok, r.edl, a.progress, a.log) : { outputs: [], failed: [] };
-  const credit = r.report.music?.attribution ? `\n${r.report.music.attribution}` : "";
-  return { jobId, outputs: rendered.outputs, failed: [...failed, ...rendered.failed], reasoning: `${r.edl.reasoning}${credit}`, notes: r.report.notes.slice(0, 3) };
-}
-
-/** attribution of real photos on split panels (empty when there are none) */
-async function photoCredits(jobId: string, outputs: { id: string }[]): Promise<string> {
-  try {
-    const { panelCreditsText } = await import("../design/export.ts");
-    return await panelCreditsText(jobId, outputs.map((o) => o.id));
-  } catch {
-    return "";
-  }
-}
-
-/** revise(job) → cut affected → render outputs whose design/render changed (same rule as `vedit revise`). */
-export const runRevisePipeline: ReviseFn = async ({ jobId, edit, progress, signal, log }) => {
-  const { revise } = await import("../plan/revise.ts");
-  const { cut, loadScenes } = await import("../cut/index.ts");
-  await loadJob(jobId);
-
-  await progress("▸ правка плана…");
-  const r = await runStep(jobId, "revise", () => revise(jobId, { edit, onEvent: (l) => log(`  ${l.trim()}`) }));
-  const d = r.report.diff;
-  await progress(
-    [
-      `▸ план обновлён: изменено ${d.changed.map((c) => `${c.id} (${c.fields.join(", ")})`).join(", ") || "—"}; добавлено ${d.added.join(", ") || "—"}; удалено ${d.removed.join(", ") || "—"}`,
-      ...r.report.warnings.slice(0, 3).map((w) => `⚠ ${w}`),
-    ].join("\n"),
-  );
-  checkCancel(signal);
-
-  const failed: { id: string; error: string }[] = [];
-  if (r.affected.length) {
-    await progress(`▸ нарезка (${r.affected.join(", ")})…`);
-    const media = await readJson(path.join(jobDir(jobId), "media.json"), MediaSchema);
-    const transcript = await loadTranscript(jobId);
-    const scenes = await loadScenes(jobId);
-    const rep = await runStep(jobId, "cut", () => cut(jobId, r.edl, media, { only: r.affected, transcript, snap: true, scenes }));
-    failed.push(...rep.outputs.filter((o) => o.status !== "ok").map((o) => ({ id: o.id, error: o.error ?? "ошибка нарезки" })));
-  }
-  checkCancel(signal);
-  const toRender = [...d.added, ...d.changed.map((c) => c.id)].filter(
-    (id, i, arr) => arr.indexOf(id) === i && (d.stages[id] ?? []).some((s) => s === "design" || s === "render") && !failed.some((f) => f.id === id),
-  );
-  if (!toRender.length) {
-    await progress("▸ перерендер не нужен: оформление и нарезка не менялись");
-    return { jobId, outputs: [], failed, reasoning: r.edl.reasoning };
-  }
-  const rendered = await renderIds(jobId, toRender, r.edl, progress, log);
-  const credits = await photoCredits(jobId, rendered.outputs);
-  return { jobId, outputs: rendered.outputs, failed: [...failed, ...rendered.failed], reasoning: `${r.edl.reasoning}${credits ? `
-${credits}` : ""}` };
-};
-
-// ── state ──────────────────────────────────────────────────────────────────────
-
-export const ChatStateSchema = z.object({
+export const SessionSchema = z.object({
+  /** the last uploaded video and the batch for the next run (several → one combined source) */
   source: z.string().optional(),
-  /** videos collected for the next run (several → one combined source) */
   sources: z.array(z.string()).default([]),
   /** a run used the batch: the next video starts a new one */
   batch_closed: z.boolean().default(false),
-  /** design preset chosen with /style (bold_pop, split_news, calm) */
-  style: z.string().optional(),
+  /** seconds per uploaded file (Telegram metadata or ffprobe) — long-job detection */
+  durations: z.record(z.string(), z.number()).default({}),
+  /** the pipeline job of the last run (for /revise and /status) */
   jobId: z.string().optional(),
   prompt: z.string().optional(),
-  /** /avatar: the last photo and voice sample sent to the chat, and the job of the last avatar_job.zip */
   avatar_photo: z.string().optional(),
   avatar_voice: z.string().optional(),
   avatar_job: z.string().optional(),
-  /** /voice: catalogue voice for /make voiceovers and /avatar */
+  /** what the next text means: topic | avatar | edit:<botJob> | admin_find | admin_broadcast */
+  awaiting: z.string().optional(),
+  /** the mode chosen in the menu before uploading (🏀 → hl) */
+  intent: z.enum(["reels", "viral", "hl", "pp"]).optional(),
+  draft: z.object({ mode: z.enum(["reels", "viral", "hl", "pp"]), count: z.number(), seconds: z.number(), aspect: z.string(), style: z.string() }).optional(),
+  make: z.object({ topic: z.string(), aspect: z.string(), voice: z.string() }).optional(),
+  broadcast: z.string().optional(),
+});
+export type Session = z.infer<typeof SessionSchema>;
+
+// stage 7–18 state.json (one entry per chat) — read once and migrated into the DB
+export const ChatStateSchema = z.object({
+  source: z.string().optional(),
+  sources: z.array(z.string()).default([]),
+  batch_closed: z.boolean().default(false),
+  style: z.string().optional(),
+  jobId: z.string().optional(),
+  prompt: z.string().optional(),
+  avatar_photo: z.string().optional(),
+  avatar_voice: z.string().optional(),
+  avatar_job: z.string().optional(),
   voice: z.string().optional(),
-  /** /send: how finished reels are delivered (default file — no Telegram recompression) */
   send: z.enum(["file", "video", "both"]).optional(),
   updated_at: z.string().optional(),
 });
-export type SendMode = "file" | "video" | "both";
-export const SEND_MODES: Record<string, SendMode> = { file: "file", document: "file", doc: "file", файл: "file", файлом: "file", video: "video", видео: "video", both: "both", оба: "both", все: "both" };
 export const BotStateSchema = z.object({
   version: z.literal(1).default(1),
   offset: z.number().int().optional(),
   chats: z.record(z.string(), ChatStateSchema).default({}),
 });
 export type ChatState = z.infer<typeof ChatStateSchema>;
+export type BotState = z.infer<typeof BotStateSchema>;
+
+export const SEND_MODES: Record<string, SendMode> = { file: "file", document: "file", doc: "file", файл: "file", файлом: "file", fayl: "file", video: "video", видео: "video", both: "both", оба: "both", все: "both", ikkalasi: "both" };
 
 /** /style names → presets */
 export const STYLES: Record<string, string> = { pop: "bold_pop", bold: "bold_pop", bold_pop: "bold_pop", split: "split_news", news: "split_news", split_news: "split_news", calm: "calm" };
@@ -522,60 +129,18 @@ export function styleFromText(text: string): string | undefined {
   if (/(сплит|split|как у aleko|как aleko|новостн\w* сплит|карточк\w* сверху)/i.test(text)) return "split_news";
   return undefined;
 }
-export type BotState = z.infer<typeof BotStateSchema>;
 
-interface Running {
-  kind: "run" | "revise" | "make" | "avatar";
-  stage: string;
-  startedAt: number;
-  ac: AbortController;
+/** "/make 16:9 тема" → { aspect: "16:9", topic: "тема" }; without a leading ratio the words decide (default 9:16). */
+export function parseMakeArgs(arg: string): { topic: string; aspect: Aspect } {
+  const m = /^\s*(9:16|16:9|1:1)\s+([\s\S]*)$/.exec(arg);
+  const topic = (m ? m[2] : arg).trim();
+  return { topic, aspect: m && isAspect(m[1]) ? m[1] : (detectAspect(topic) ?? "9:16") };
 }
 
-// ── bot ────────────────────────────────────────────────────────────────────────
+/** the frame was asked for (a leading ratio or format words) — otherwise the user's ⚙️ format applies */
+export const makeAspectExplicit = (arg: string) => /^\s*(9:16|16:9|1:1)\s/.test(arg) || !!detectAspect(arg);
 
-export interface BotOptions {
-  token: string;
-  /** when set, updates from other user ids are ignored */
-  allowedUserIds?: number[];
-  /** directory holding `_bot/` (downloads + state.json); default WORKSPACE_ROOT. Jobs always go to VEDIT_WORKSPACE. */
-  workspace?: string;
-  onLog?: (line: string) => void;
-  preset?: string;
-  /** Bot API transport: a ready BotApi, or pieces to build one (tests inject fakes here) */
-  api?: BotApi;
-  callMethod?: CallMethod;
-  download?: DownloadFn;
-  apiBase?: string;
-  limits?: Partial<Limits>;
-  pipeline?: PipelineFn;
-  revise?: ReviseFn;
-  make?: MakeFn;
-  avatarExport?: AvatarExportFn;
-  avatarImport?: AvatarImportFn;
-  /** /voice <id>: a short OGG/Opus sample of a Piper voice (tests inject a fake) */
-  voiceSample?: (voiceId: string, dest: string) => Promise<string>;
-  /** a copy of an output that fits the upload limit (default: ffmpeg re-encode to the size budget) */
-  shrinkVideo?: (file: string, limitBytes: number) => Promise<string>;
-  /** long-polling timeout, seconds (default 30) */
-  pollTimeout?: number;
-  /** how long to wait for the rest of an album before acting (ms, default 4000) */
-  albumDelayMs?: number;
-  /** pause after a failed getUpdates, ms (default 3000) */
-  retryDelayMs?: number;
-}
-
-export interface Bot {
-  readonly api: BotApi;
-  readonly state: BotState;
-  readonly botDir: string;
-  handleUpdate(update: TgUpdate): Promise<void>;
-  /** resolves when no pipeline is running */
-  idle(): Promise<void>;
-  isBusy(chatId: number): boolean;
-  /** writes state.json (serialized with every other state write) */
-  save(): Promise<void>;
-}
-
+/** technical error text (admins, logs): first line + the planner hint */
 export function errorText(err: unknown): string {
   if (err instanceof CancelledError) return MSG.cancelled;
   const first = (err instanceof Error ? err.message : String(err)).split("\n")[0].trim();
@@ -586,20 +151,15 @@ export function errorText(err: unknown): string {
   return `✖ ${first}`;
 }
 
-const excerpt = (s: string, n: number) => {
-  const flat = s.replace(/\s+/g, " ").trim();
-  return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat;
-};
-
 export function videoCaption(o: PipelineOutput, reasoning?: string) {
   const head = [o.id, o.duration !== undefined ? `${o.duration.toFixed(1)} с` : null, o.aspect ?? null].filter(Boolean).join(" · ");
   return reasoning ? `${head}\n«${excerpt(reasoning, 300)}»` : head;
 }
 
 function isVideoMessage(m: TgMessage) {
-  if (m.video) return { fileId: m.video.file_id, size: m.video.file_size };
+  if (m.video) return { fileId: m.video.file_id, size: m.video.file_size, duration: m.video.duration };
   const d = m.document;
-  if (d && (d.mime_type?.startsWith("video/") || /\.(mp4|mov|m4v|mkv|webm|avi)$/i.test(d.file_name ?? ""))) return { fileId: d.file_id, size: d.file_size };
+  if (d && (d.mime_type?.startsWith("video/") || /\.(mp4|mov|m4v|mkv|webm|avi)$/i.test(d.file_name ?? ""))) return { fileId: d.file_id, size: d.file_size, duration: undefined };
   return null;
 }
 
@@ -630,13 +190,182 @@ async function defaultVoiceSample(voiceId: string, dest: string): Promise<string
   return voiceSample(voiceId, dest);
 }
 
+async function defaultProbeDuration(file: string): Promise<number | undefined> {
+  try {
+    const { ffprobe } = await import("../lib/ffmpeg.ts");
+    const d = Number((await ffprobe(file)).format.duration ?? NaN);
+    return Number.isFinite(d) ? d : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** the Colab notebook's output: avatar_result.zip (browsers may add " (1)" or "-2" to repeated downloads) */
 export function isAvatarResult(fileName?: string): boolean {
   return /^avatar_result[^/\\]*\.zip$/i.test(fileName ?? "");
 }
 
+const ru3 = (n: number, one: string, few: string, many: string) => {
+  const a = n % 10;
+  const b = n % 100;
+  return a === 1 && b !== 11 ? one : a >= 2 && a <= 4 && (b < 12 || b > 14) ? few : many;
+};
+
+/** the button card → an instruction for the planner (Russian: the planner and the highlights intent read it) */
+export function draftInstruction(d: MontageDraft): string {
+  const fmt = `формат ${d.aspect}`;
+  switch (d.mode) {
+    case "reels":
+      return `${d.count} ${ru3(d.count, "рилс", "рилса", "рилсов")} по ${d.seconds} секунд из самых сильных моментов, ${fmt}, субтитры на языке речи`;
+    case "viral":
+      return VIRAL_INSTRUCTION.replace("30–45 секунд", `около ${d.seconds} секунд`).replace("Субтитры на языке речи.", `${fmt[0].toUpperCase()}${fmt.slice(1)}. Субтитры на языке речи.`);
+    case "hl":
+      return `хайлайты игры: лучшие броски и ключевые моменты, ${d.seconds} секунд, музыка, ${fmt}`;
+    case "pp":
+      return `хайлайты игры по отдельности на каждого игрока: броски каждого, ${fmt}`;
+  }
+}
+
+const DOCS_DIR = fileURLToPath(new URL("../../docs/legal/", import.meta.url));
+
+// ── progress card ──────────────────────────────────────────────────────────────
+
+type StageKey = "start" | "prepare" | "understand" | "plan" | "cut" | "render" | "audio" | "script" | "design" | "send";
+interface Card {
+  chatId: number;
+  msgId?: number;
+  stage: StageKey;
+  pct: number;
+  renderPct: number;
+  detail?: string;
+  lastText?: string;
+  lastAt: number;
+  timer?: ReturnType<typeof setTimeout>;
+  chain: Promise<void>;
+}
+
+/** a pipeline progress line → stage and overall percent (monotonic: never goes back) */
+export function parseStage(text: string, prev: { stage: StageKey; pct: number }): { stage: StageKey; pct: number; renderPct?: number } {
+  const s = text.split("\n")[0];
+  const r = /рендер (\S+) \((\d+)\/(\d+)\)(?: (\d{1,3})%)?/.exec(s);
+  let next: { stage: StageKey; pct: number; renderPct?: number } | undefined;
+  if (r) {
+    const i = Number(r[2]);
+    const n = Math.max(1, Number(r[3]));
+    const p = r[4] ? Number(r[4]) : 0;
+    const renderPct = Math.round((100 * (i - 1 + p / 100)) / n);
+    next = { stage: "render", pct: 60 + Math.round(0.35 * renderPct), renderPct };
+  } else if (/склеива|подготовк/.test(s)) next = { stage: "prepare", pct: 8 };
+  else if (/анализ речи|ищу броски|понима/.test(s)) next = { stage: "understand", pct: 20 };
+  else if (/план готов|попаданий|роликов:|план обновл/.test(s)) next = { stage: "plan", pct: 50 };
+  else if (/▸ план|правка плана|разбираю, кто бросал/.test(s)) next = { stage: "plan", pct: 40 };
+  else if (/нарезк/.test(s)) next = { stage: "cut", pct: 58 };
+  else if (/тренды/.test(s)) next = { stage: "script", pct: 10 };
+  else if (/сценари|монолог/.test(s)) next = { stage: "script", pct: 25 };
+  else if (/озвучк/.test(s)) next = { stage: "audio", pct: 35 };
+  else if (/арт-директор|композиция|фото|картинк|портрет/.test(s)) next = { stage: "design", pct: 50 };
+  else if (/^▸ рендер/.test(s)) next = { stage: "render", pct: 70, renderPct: 0 };
+  else if (/звук|сведени|музык/.test(s)) next = { stage: "audio", pct: 92 };
+  if (!next) return prev;
+  return { ...next, pct: Math.max(prev.pct, next.pct) };
+}
+
+const bar = (pct: number) => {
+  const full = Math.round(pct / 10);
+  return "▓".repeat(full) + "░".repeat(10 - full);
+};
+const mmss = (ms: number) => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
+
+// ── bot ────────────────────────────────────────────────────────────────────────
+
+export interface BotOptions {
+  token: string;
+  /** closed beta: only these user ids are served (others are ignored); unset → open registration */
+  allowedUserIds?: number[];
+  /** admins (TELEGRAM_ADMIN_IDS); default: the first allowed user id */
+  adminIds?: number[];
+  /** directory holding `_bot/` (vedit.db, voice samples) and `users/<tg_id>/` (uploads); default WORKSPACE_ROOT. Jobs always go to VEDIT_WORKSPACE. */
+  workspace?: string;
+  onLog?: (line: string) => void;
+  preset?: string;
+  /** Bot API transport: a ready BotApi, or pieces to build one (tests inject fakes here) */
+  api?: BotApi;
+  callMethod?: CallMethod;
+  download?: DownloadFn;
+  apiBase?: string;
+  limits?: Partial<Limits>;
+  pipeline?: PipelineFn;
+  revise?: ReviseFn;
+  make?: MakeFn;
+  avatarExport?: AvatarExportFn;
+  avatarImport?: AvatarImportFn;
+  /** /voice <id>: a short OGG/Opus sample of a Piper voice (tests inject a fake) */
+  voiceSample?: (voiceId: string, dest: string) => Promise<string>;
+  /** a copy of an output that fits the upload limit (default: ffmpeg re-encode to the size budget) */
+  shrinkVideo?: (file: string, limitBytes: number) => Promise<string>;
+  /** duration of an uploaded file without Telegram metadata, s (default ffprobe) */
+  probeDuration?: (file: string) => Promise<number | undefined>;
+  /** long-polling timeout, seconds (default 30) */
+  pollTimeout?: number;
+  /** how long to wait for the rest of an album before acting (ms, default 4000) */
+  albumDelayMs?: number;
+  /** pause after a failed getUpdates, ms (default 3000) */
+  retryDelayMs?: number;
+  /** registration (language → purpose → terms) before anything else; false: users are registered on first contact in Russian (private deployments, stage 7–18 tests) */
+  onboarding?: boolean;
+  /** daily limits and credits; false: unlimited */
+  quotas?: boolean;
+  /** pipelines running at once (default VEDIT_MAX_JOBS: 1 on < 12 GB RAM, else 2) */
+  maxJobs?: number;
+  /** free-plan overrides (on top of env; the admin's live changes in the DB win over both) */
+  plan?: Partial<PlanLimits>;
+  /** uploads and finished jobs older than this are deleted (default VEDIT_RETENTION_DAYS, 7) */
+  retentionDays?: number;
+  /** how often the retention cleanup runs, ms (default daily; 0 = never — call bot.retention()) */
+  cleanupIntervalMs?: number;
+  /** minimum pause between edits of one progress card, ms (default 1500) */
+  statusEditMs?: number;
+  /** pause between broadcast messages, ms (default 50 → 20 msg/s) */
+  broadcastDelayMs?: number;
+  /** legal texts (terms|privacy).<lang>.md (default docs/legal) */
+  docsDir?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface Bot {
+  readonly api: BotApi;
+  readonly db: BotDb;
+  readonly queue: JobQueue;
+  readonly botDir: string;
+  readonly usersDir: string;
+  /** getUpdates offset (persisted in the DB) */
+  offset: number;
+  handleUpdate(update: TgUpdate): Promise<void>;
+  /** resolves when no job is running or waiting and every background send is done */
+  idle(): Promise<void>;
+  /** the user has a job running or waiting */
+  isBusy(userId: number): boolean;
+  session(userId: number): Session;
+  settings(userId: number): Record<string, string>;
+  user(userId: number): UserRow | undefined;
+  /** deletes old uploads and job folders now */
+  retention(now?: number): Promise<RetentionReport>;
+  /** kept for the stage-7 API: everything is already in the DB */
+  save(): Promise<void>;
+  /** stops timers and closes the DB (running jobs are not waited for) */
+  close(): void;
+}
+
+const newBotJobId = () => `j${Date.now().toString(36).slice(-5)}${randomBytes(2).toString("hex")}`;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const errMsg = (err: unknown) => (err instanceof Error ? err.message : String(err)).split("\n")[0];
+
 export async function createBot(o: BotOptions): Promise<Bot> {
   const log = o.onLog ?? ((l: string) => console.log(l));
+  const env = o.env ?? process.env;
   const api = o.api ?? makeBotApi(o.token, { callMethod: o.callMethod, download: o.download, apiBase: o.apiBase, limits: o.limits });
   const pipelineFn = o.pipeline ?? runFullPipeline;
   const reviseFn = o.revise ?? runRevisePipeline;
@@ -645,58 +374,325 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   const avatarImportFn = o.avatarImport ?? runAvatarImport;
   const voiceSampleFn = o.voiceSample ?? defaultVoiceSample;
   const shrinkFn = o.shrinkVideo ?? shrinkForTelegram;
+  const probeDuration = o.probeDuration ?? defaultProbeDuration;
   const preset = o.preset ?? "bold_pop";
-  const botDir = path.join(path.resolve(o.workspace ?? WORKSPACE_ROOT), "_bot");
-  const stateFile = path.join(botDir, "state.json");
+  const root = path.resolve(o.workspace ?? WORKSPACE_ROOT);
+  const botDir = path.join(root, "_bot");
+  const usersDir = path.join(root, "users");
   const allowed = o.allowedUserIds?.length ? new Set(o.allowedUserIds) : null;
+  const envAdmins = new Set(o.adminIds?.length ? o.adminIds : o.allowedUserIds?.length ? [o.allowedUserIds[0]] : []);
+  const onboardingOn = o.onboarding ?? true;
+  const quotasOn = o.quotas ?? true;
+  const basePlan: PlanLimits = { ...freePlanFromEnv(env), ...o.plan };
+  const tz = tzOffsetFromEnv(env);
+  const retentionDays = o.retentionDays ?? retentionDaysFromEnv(env);
+  const statusEditMs = o.statusEditMs ?? 1500;
+  const docsDir = o.docsDir ?? DOCS_DIR;
 
-  let state: BotState = { version: 1, chats: {} };
-  if (await exists(stateFile)) {
+  await fs.mkdir(botDir, { recursive: true });
+  const db = new BotDb(path.join(botDir, "vedit.db"));
+  const tasks = new Set<Promise<unknown>>();
+  const track = (p: Promise<unknown>) => {
+    tasks.add(p);
+    void p.finally(() => tasks.delete(p));
+  };
+
+  // ── users, sessions, settings ──
+  const isAdmin = (uid: number) => envAdmins.has(uid) || db.getUser(uid)?.role === "admin";
+  const langOf = (uid: number): Lang => db.getUser(uid)?.lang ?? "ru";
+  const T = (uid: number): Strings => t(langOf(uid));
+  const plan = (): PlanLimits => db.planLimits(basePlan);
+  const today = () => dayStart(Date.now(), tz);
+
+  const sessions = new Map<number, Session>();
+  const sess = (uid: number): Session => {
+    let s = sessions.get(uid);
+    if (!s) {
+      const raw = db.getSession<unknown>(uid);
+      const parsed = SessionSchema.safeParse(raw ?? {});
+      s = parsed.success ? parsed.data : SessionSchema.parse({});
+      sessions.set(uid, s);
+    }
+    return s;
+  };
+  const patchSess = (uid: number, patch: Partial<Session>) => {
+    const s = sess(uid);
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) delete (s as Record<string, unknown>)[k];
+      else (s as Record<string, unknown>)[k] = v;
+    }
+    db.setSession(uid, s);
+  };
+  const settingsOf = (uid: number) => db.getSettings(uid);
+  const aspectOf = (uid: number) => settingsOf(uid).aspect ?? "9:16";
+  const styleOf = (uid: number) => settingsOf(uid).style ?? preset;
+  const sendOf = (uid: number): SendMode => (settingsOf(uid).send as SendMode | undefined) ?? "file";
+  const voiceOf = (uid: number) => settingsOf(uid).voice;
+
+  // ── migration of the stage 7–18 state.json (chat → user: private chats have chat id = user id) ──
+  const stateFile = path.join(botDir, "state.json");
+  if (existsSync(stateFile)) {
     try {
-      state = await readJson(stateFile, BotStateSchema);
+      const old = await readJson(stateFile, BotStateSchema);
+      db.transaction(() => {
+        if (old.offset !== undefined && db.getKv("offset") === undefined) db.setKv("offset", String(old.offset));
+        for (const [chatId, c] of Object.entries(old.chats)) {
+          const uid = Number(chatId);
+          if (!Number.isSafeInteger(uid) || uid <= 0) continue;
+          if (!db.getUser(uid)) db.touchUser(uid, {}, { lang: "ru", onboarding: onboardingOn ? "terms" : "done", ...(onboardingOn ? {} : { accepted_terms_at: new Date().toISOString() }) });
+          if (c.style) db.setSetting(uid, "style", c.style);
+          if (c.voice) db.setSetting(uid, "voice", c.voice);
+          if (c.send) db.setSetting(uid, "send", c.send);
+          const s = SessionSchema.parse({ source: c.source, sources: c.sources, batch_closed: c.batch_closed, jobId: c.jobId, prompt: c.prompt, avatar_photo: c.avatar_photo, avatar_voice: c.avatar_voice, avatar_job: c.avatar_job });
+          db.setSession(uid, s);
+        }
+      });
+      await fs.rename(stateFile, `${stateFile}.migrated`);
+      log(`state.json перенесён в базу: ${Object.keys(old.chats).length} чат(ов)`);
     } catch (err) {
-      log(`⚠ state.json не прочитан, начинаю с пустого: ${err instanceof Error ? err.message.split("\n")[0] : err}`);
+      log(`⚠ state.json не перенесён: ${errMsg(err)}`);
     }
   }
 
-  // writeJson uses one tmp name per process — serialize writes so two chats never race on it
-  let saving: Promise<unknown> = Promise.resolve();
-  const saveState = () => {
-    saving = saving.then(() => writeJson(stateFile, BotStateSchema, state)).catch((err) => log(`⚠ state.json не записан: ${err instanceof Error ? err.message : err}`));
-    return saving;
-  };
-  const chat = (id: number): ChatState => (state.chats[String(id)] ??= { sources: [], batch_closed: false });
-  /** the preset for a run: /style, or a style named in the instruction, or the bot default */
-  const presetFor = (chatId: number, instruction: string) => styleFromText(instruction) ?? chat(chatId).style ?? preset;
-  const updateChat = async (id: number, patch: Partial<ChatState>) => {
-    Object.assign(chat(id), patch, { updated_at: new Date().toISOString() });
-    await saveState();
-  };
-
-  const running = new Map<number, Running>();
-  const albums = new Map<string, { caption?: string; timer?: ReturnType<typeof setTimeout> }>();
-  const albumDelayMs = o.albumDelayMs ?? 4000;
-  const tasks = new Set<Promise<void>>();
-
-  const say = async (chatId: number, text: string) => {
+  const say = async (chatId: number, text: string, markup?: ReplyMarkup): Promise<number | undefined> => {
     try {
-      await api.sendMessage(chatId, text);
+      return (await api.sendMessage(chatId, text, markup ? { reply_markup: markup } : undefined)).message_id;
     } catch (err) {
       log(`⚠ sendMessage(${chatId}) не удался: ${err instanceof Error ? err.message : err}`);
+      return undefined;
+    }
+  };
+  const edit = async (chatId: number, msgId: number, text: string, markup?: InlineKeyboard) => {
+    try {
+      await api.editMessageText(chatId, msgId, text, markup);
+    } catch (err) {
+      log(`⚠ editMessageText(${chatId}/${msgId}): ${err instanceof Error ? err.message : err}`);
+    }
+  };
+  const editMarkup = async (chatId: number, msgId: number, markup?: InlineKeyboard) => {
+    try {
+      await api.editMessageReplyMarkup(chatId, msgId, markup);
+    } catch (err) {
+      log(`⚠ editMessageReplyMarkup(${chatId}/${msgId}): ${err instanceof Error ? err.message : err}`);
     }
   };
   const action = (chatId: number, a: Parameters<BotApi["sendChatAction"]>[1]) => api.sendChatAction(chatId, a).catch(() => {});
+  /** callback_data ≤ 64 bytes: longer payloads go through the DB id map */
+  const cbEncode = (data: string) => (byteLength(data) <= CALLBACK_LIMIT ? data : `~${db.putCallback(data)}`);
+  const encodeKb = (kb: InlineKeyboard): InlineKeyboard => ({ inline_keyboard: kb.inline_keyboard.map((row) => row.map((b) => (b.callback_data ? { ...b, callback_data: cbEncode(b.callback_data) } : b))) });
 
-  async function deliver(chatId: number, result: PipelineResult) {
+  // ── progress cards ──
+  const cards = new Map<string, Card>();
+
+  function cardText(job: JobRow, c: Card): { text: string; kb?: InlineKeyboard } {
+    const lang = langOf(job.user);
+    const L = t(lang);
+    const lines = [`${L.kind[job.kind] ?? job.kind} · ${job.id}`];
+    const started = job.started_at ? Date.parse(job.started_at) : Date.now();
+    if (job.status === "queued") {
+      lines.push(L.stage.queued(Math.max(1, queue.position(job.id))));
+    } else if (job.status === "running") {
+      if (lang === "ru" && c.detail) lines.push(c.detail.length > 900 ? `${c.detail.slice(0, 899)}…` : c.detail);
+      const label = c.stage === "render" ? L.stage.render(c.renderPct) : L.stage[c.stage];
+      lines.push(`${bar(c.pct)} ${c.pct}% · ${label}`);
+      lines.push(`⏱ ${mmss(Date.now() - started)}`);
+    } else if (job.status === "done") lines.push(`${L.stage.done} · ⏱ ${mmss((job.finished_at ? Date.parse(job.finished_at) : Date.now()) - started)}`);
+    else if (job.status === "cancelled") lines.push(L.stage.cancelled);
+    else lines.push(L.stage.failed);
+    if (job.paid_credits && (job.status === "queued" || job.status === "running")) lines.push(L.paidNote(job.paid_credits, db.getUser(job.user)?.credits ?? 0));
+    const active = job.status === "queued" || job.status === "running";
+    return { text: lines.join("\n"), kb: active ? encodeKb(cancelKb(L, job.id)) : undefined };
+  }
+
+  /** re-renders a job's card; throttled to one edit per statusEditMs unless `now` */
+  function pushCard(jobId: string, now = false): Promise<void> {
+    const c = cards.get(jobId);
+    if (!c?.msgId) return Promise.resolve();
+    const doEdit = () => {
+      c.timer = undefined;
+      const job = db.getJob(jobId);
+      if (!job) return;
+      const { text, kb } = cardText(job, c);
+      if (text === c.lastText) return;
+      c.lastText = text;
+      c.lastAt = Date.now();
+      c.chain = c.chain.then(() => edit(c.chatId, c.msgId!, text, kb));
+      track(c.chain);
+    };
+    if (now || statusEditMs <= 0) {
+      if (c.timer) clearTimeout(c.timer);
+      doEdit();
+      return c.chain;
+    }
+    if (c.timer) return c.chain;
+    const wait = c.lastAt + statusEditMs - Date.now();
+    if (wait <= 0) doEdit();
+    else {
+      c.timer = setTimeout(doEdit, wait);
+      c.timer.unref?.();
+    }
+    return c.chain;
+  }
+
+  const queue = new JobQueue({
+    maxJobs: o.maxJobs ?? maxJobsFromEnv(env),
+    run: (id, signal) => runJob(id, signal),
+    onChange: () => {
+      for (const j of db.jobsByStatus("queued")) pushCard(j.id);
+    },
+    log,
+  });
+
+  // ── quotas ──
+  function freeLeft(uid: number, cls: JobClass) {
+    const p = plan();
+    const limit = cls === "long" ? p.longPerDay : p.standardPerDay;
+    return { used: db.countFreeJobs(uid, cls, today()), limit };
+  }
+
+  /** creates a job (quota/credits checked, card sent) and puts it in the queue */
+  async function submit(uid: number, chatId: number, kind: JobKind, payload: Record<string, unknown>, cls: JobClass): Promise<JobRow | undefined> {
+    const L = T(uid);
+    if (!queue.canEnqueue(uid)) {
+      await say(chatId, L.busy);
+      return undefined;
+    }
+    let paid = 0;
+    if (quotasOn && !isAdmin(uid) && cls !== "light") {
+      const { used, limit } = freeLeft(uid, cls);
+      if (used >= limit) {
+        const p = plan();
+        const cost = cls === "long" ? p.creditsLong : p.creditsStandard;
+        const have = db.getUser(uid)?.credits ?? 0;
+        if (have < cost) {
+          await say(chatId, L.quotaExceeded(cls === "long", cost, have));
+          return undefined;
+        }
+        paid = cost;
+      }
+    }
+    const id = newBotJobId();
+    const job = db.transaction(() => {
+      if (paid) db.addCredits(uid, -paid);
+      return db.insertJob({ id, user: uid, chat_id: chatId, kind, class: cls, payload: JSON.stringify(payload), paid_credits: paid });
+    });
+    if (paid) db.addUsage({ user: uid, kind: `credits:${kind}`, units: paid, cost_usd: 0, job_id: id });
+    const card: Card = { chatId, stage: "start", pct: 0, renderPct: 0, lastAt: 0, chain: Promise.resolve() };
+    cards.set(id, card);
+    const first = cardText({ ...job, status: "queued" }, card);
+    card.msgId = await say(chatId, first.text.replace(/\n⏳.*$/m, "\n⏳"), first.kb);
+    card.lastAt = Date.now();
+    if (card.msgId) db.updateJob(id, { status_msg_id: card.msgId });
+    log(`[${uid}] задача ${id}: ${kind} (${cls}${paid ? `, ${paid} кр.` : ""})`);
+    queue.enqueue(id, uid);
+    await pushCard(id, true);
+    return job;
+  }
+
+  // ── running a job ──
+  async function runJob(jobId: string, signal: AbortSignal): Promise<JobOutcome> {
+    const job = db.getJob(jobId);
+    if (!job) return "failed";
+    const uid = job.user;
+    const chatId = job.chat_id;
+    const card = cards.get(jobId) ?? { chatId, msgId: job.status_msg_id ?? undefined, stage: "start" as StageKey, pct: 0, renderPct: 0, lastAt: 0, chain: Promise.resolve() };
+    cards.set(jobId, card);
+    db.updateJob(jobId, { status: "running", started_at: new Date().toISOString(), stage: "start", percent: 0 });
+    void pushCard(jobId, true);
+    const payload = JSON.parse(job.payload) as Record<string, unknown>;
+    const ulog = (l: string) => log(`[${uid}] ${l}`);
+    const progress = async (text: string) => {
+      const next = parseStage(text, card);
+      card.stage = next.stage;
+      card.pct = next.pct;
+      if (next.renderPct !== undefined) card.renderPct = next.renderPct;
+      card.detail = text.trim();
+      db.updateJob(jobId, { stage: card.stage, percent: card.pct });
+      ulog(text.split("\n")[0]);
+      await pushCard(jobId);
+    };
+    const onJob = (veditJob: string) => {
+      db.updateJob(jobId, { vedit_job: veditJob });
+      if (job.kind === "avatar") patchSess(uid, { jobId: veditJob, avatar_job: veditJob });
+      else patchSess(uid, { jobId: veditJob });
+    };
+    const finish = async (status: "done" | "failed" | "cancelled", patch: Partial<JobRow> = {}) => {
+      if (status !== "done" && job.paid_credits) db.addCredits(uid, job.paid_credits); // refund
+      db.updateJob(jobId, { status, finished_at: new Date().toISOString(), ...patch });
+      await pushCard(jobId, true);
+      cards.delete(jobId);
+    };
+    try {
+      const result = await withJobSignal(signal, () => execute(job.kind, payload, { progress, onJob, signal, log: ulog, uid }));
+      if (signal.aborted) throw new CancelledError();
+      card.stage = "send";
+      card.pct = Math.max(card.pct, 97);
+      await pushCard(jobId, true);
+      await deliver(uid, chatId, jobId, result);
+      const cost = await jobCost(result.jobId);
+      db.addUsage({ user: uid, kind: job.kind, units: job.paid_credits, cost_usd: cost, job_id: jobId });
+      await finish("done", { vedit_job: result.jobId, cost_usd: cost, percent: 100, stage: "done" });
+      log(`[${uid}] ${job.kind} ok: ${result.jobId}, ${result.outputs.length} файл(ов), $${cost.toFixed(3)}`);
+      return "done";
+    } catch (err) {
+      if (signal.aborted || err instanceof CancelledError) {
+        log(`[${uid}] ${job.kind} отменена (${jobId})`);
+        await finish("cancelled");
+        return "cancelled";
+      }
+      log(`[${uid}] ${job.kind} ошибка: ${err instanceof Error ? (err.stack ?? err.message) : err}`);
+      await finish("failed", { error: errMsg(err).slice(0, 500) });
+      const L = T(uid);
+      // the user sees a friendly text (admins see the technical one); other admins get the details
+      await say(chatId, isAdmin(uid) ? errorText(err) : L.failed, encodeKb(retryKb(L, jobId)));
+      for (const a of new Set([...envAdmins, ...db.adminIds()])) if (a !== uid) await say(a, t(langOf(a)).adminJobFailed(uid, jobId, job.kind, errorText(err)));
+      return "failed";
+    }
+  }
+
+  interface ExecCtx {
+    progress: (text: string) => Promise<void>;
+    onJob: (jobId: string) => void;
+    signal: AbortSignal;
+    log: (l: string) => void;
+    uid: number;
+  }
+  async function execute(kind: JobKind, p: Record<string, unknown>, x: ExecCtx): Promise<PipelineResult> {
+    const s = (k: string) => (typeof p[k] === "string" ? (p[k] as string) : undefined);
+    switch (kind) {
+      case "run":
+        return pipelineFn({ source: s("source")!, sources: Array.isArray(p.sources) ? (p.sources as string[]) : undefined, instruction: s("instruction")!, preset: s("preset") ?? preset, progress: x.progress, onJob: x.onJob, signal: x.signal, log: x.log });
+      case "make":
+        return makeFn({ topic: s("topic")!, voice: s("voice"), aspect: (s("aspect") as Aspect | undefined) ?? "9:16", fromJob: s("fromJob"), progress: x.progress, onJob: x.onJob, signal: x.signal, log: x.log });
+      case "revise":
+        return reviseFn({ jobId: s("jobId")!, edit: s("edit")!, progress: x.progress, signal: x.signal, log: x.log });
+      case "avatar":
+        return avatarExportFn({ input: s("input")!, photo: s("photo"), voice: s("voice"), voiceId: s("voiceId"), sourceLabel: s("sourceLabel")!, progress: x.progress, onJob: x.onJob, signal: x.signal, log: x.log });
+      case "avatar_import":
+        x.onJob(s("jobId")!);
+        return avatarImportFn({ jobId: s("jobId")!, result: s("result")!, instruction: s("instruction"), preset: s("preset") ?? "split_news", progress: x.progress, signal: x.signal, log: x.log });
+    }
+  }
+
+  async function jobCost(veditJob: string): Promise<number> {
+    try {
+      return (await readJson(path.join(jobDir(veditJob), "cost.json"), CostSchema)).total_usd;
+    } catch {
+      return 0;
+    }
+  }
+
+  async function deliver(uid: number, chatId: number, jobId: string, result: PipelineResult) {
+    const L = T(uid);
     for (const doc of result.documents ?? []) {
       await action(chatId, "upload_document");
       try {
         await api.sendDocument(chatId, doc.file, doc.caption);
       } catch (err) {
-        await say(chatId, `Не удалось отправить ${path.basename(doc.file)} (${err instanceof TelegramError ? err.description : String(err)}). Он лежит на сервере: ${doc.file}`);
+        await say(chatId, `✖ ${path.basename(doc.file)}: ${err instanceof TelegramError ? err.description : String(err)}`);
       }
     }
-    const mode: SendMode = chat(chatId).send ?? "file";
+    const mode = sendOf(uid);
     const notes: string[] = [];
     for (const out of result.outputs) {
       const caption = videoCaption(out, result.reasoning);
@@ -715,8 +711,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
           file = await shrinkFn(out.file, api.limits.uploadBytes);
           notes.push(`${out.id}: оригинал ${mb(size)} больше лимита отправки ботом (${mb(api.limits.uploadBytes)}) — отправил сжатую копию; оригинал на сервере: ${out.file}`);
         } catch (err) {
-          log(`⚠ сжатие ${out.id}: ${err instanceof Error ? err.message.split("\n")[0] : err}`);
-          await say(chatId, `${caption}\nФайл ${mb(size)} больше лимита отправки ботом (${mb(api.limits.uploadBytes)}) — он лежит на сервере: ${out.file}`);
+          log(`⚠ сжатие ${out.id}: ${errMsg(err)}`);
+          await say(chatId, isAdmin(uid) ? `${caption}\nФайл ${mb(size)} больше лимита отправки ботом (${mb(api.limits.uploadBytes)}) — он лежит на сервере: ${out.file}` : `${caption}\n✖ ${L.tooBigToSend}`);
           continue;
         }
       }
@@ -730,9 +726,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         await api.sendVideo(chatId, file, { caption, duration: out.duration });
       };
       const [first, second] = mode === "video" ? [asVideo, asDocument] : [asDocument, asVideo];
-      if (mode === "both") {
-        await asVideo().catch((err) => log(`⚠ sendVideo ${out.id}: ${err instanceof Error ? err.message : err}`));
-      }
+      if (mode === "both") await asVideo().catch((err) => log(`⚠ sendVideo ${out.id}: ${err instanceof Error ? err.message : err}`));
       try {
         await first();
       } catch (err) {
@@ -740,132 +734,171 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         try {
           await second();
         } catch (err2) {
-          await say(chatId, `${caption}\nНе удалось отправить файл (${err2 instanceof TelegramError ? err2.description : String(err2)}). Он лежит на сервере: ${file}`);
+          await say(chatId, isAdmin(uid) ? `${caption}\nНе удалось отправить файл (${err2 instanceof TelegramError ? err2.description : String(err2)}). Он лежит на сервере: ${file}` : `${caption}\n✖ ${L.tooBigToSend}`);
         }
       }
     }
+    // technical details (errors, warnings, server paths) go to admins only
+    const tech = isAdmin(uid);
     const lines: string[] = [];
-    for (const f of result.failed ?? []) lines.push(`✖ ${f.id}: ${f.error.split("\n")[0]}`);
-    for (const n of [...notes, ...(result.notes ?? [])]) lines.push(`⚠ ${n}`);
+    for (const f of result.failed ?? []) lines.push(tech ? `✖ ${f.id}: ${f.error.split("\n")[0]}` : `✖ ${f.id}`);
+    if (tech) for (const n of [...notes, ...(result.notes ?? [])]) lines.push(`⚠ ${n}`);
+    if (result.avatar) {
+      await say(chatId, [L.avatarInstructions(result.jobId, result.avatar.lines, result.avatar.warnings), ...lines].join("\n"));
+      return;
+    }
     if (result.message) {
       await say(chatId, [result.message, ...lines].join("\n"));
       return;
     }
-    const head = result.outputs.length ? `Готово: ${result.outputs.length} ролик(ов), задача ${result.jobId}.` : `Новых роликов нет (задача ${result.jobId}).`;
-    await say(chatId, [head, ...lines, result.outputs.length ? "Правка: /revise <что изменить>" : ""].filter(Boolean).join("\n"));
+    const head = result.outputs.length ? L.done(result.outputs.length, result.jobId) : L.noNew(result.jobId);
+    const text = [head, ...lines, result.outputs.length ? `${L.reviseHint}\n${L.rateAsk}` : ""].filter(Boolean).join("\n");
+    const msgId = await say(chatId, text, result.outputs.length ? encodeKb(resultKb(L, jobId)) : undefined);
+    if (msgId) db.updateJob(jobId, { result_msg_id: msgId });
+    // the format of the result, for «📐 Другой формат»
+    const aspect = result.outputs.find((x) => x.aspect)?.aspect;
+    if (aspect) {
+      const j = db.getJob(jobId);
+      if (j) db.updateJob(jobId, { payload: JSON.stringify({ ...JSON.parse(j.payload), resultAspect: aspect }) });
+    }
   }
 
-  function launch(chatId: number, kind: Running["kind"], work: (r: Running) => Promise<PipelineResult>) {
-    const r: Running = { kind, stage: "старт", startedAt: Date.now(), ac: new AbortController() };
-    running.set(chatId, r);
-    const task = (async () => {
-      try {
-        const result = await work(r);
-        if (r.ac.signal.aborted) throw new CancelledError();
-        r.stage = "отправка";
-        await deliver(chatId, result);
-        log(`[${chatId}] ${kind} ok: ${result.jobId}, ${result.outputs.length} файл(ов)`);
-      } catch (err) {
-        log(`[${chatId}] ${kind} ошибка: ${err instanceof Error ? (err.stack ?? err.message) : err}`);
-        await say(chatId, errorText(err));
-      } finally {
-        running.delete(chatId);
-      }
-    })();
-    tasks.add(task);
-    void task.finally(() => tasks.delete(task));
+  // ── starting work ──
+  function isLongRun(seconds: number, highlights: boolean) {
+    if (highlights) return true;
+    return seconds > plan().longMinutes * 60;
   }
 
-  const progressFor = (chatId: number, r: Running) => async (text: string) => {
-    r.stage = text.split("\n")[0].replace(/^▸\s*/, "").replace(/…$/, "");
-    log(`[${chatId}] ${text.split("\n")[0]}`);
+  async function startRun(uid: number, chatId: number, instruction: string, opts: { preset?: string; highlights?: boolean; single?: boolean } = {}): Promise<JobRow | undefined> {
+    const s = sess(uid);
+    if (!s.source || !(await exists(s.source))) {
+      await say(chatId, T(uid).needVideo);
+      return undefined;
+    }
+    const source = s.source;
+    const batch: string[] = [];
+    for (const f of s.sources ?? []) if (await exists(f)) batch.push(f);
+    const sources = !opts.single && batch.length > 1 ? batch : undefined;
+    const seconds = (sources ?? [source]).reduce((sum, f) => sum + (s.durations[f] ?? 0), 0);
+    const { highlightsIntent } = await import("../highlights/intent.ts");
+    const highlights = opts.highlights ?? (!sources && highlightsIntent(instruction) === "strong");
+    patchSess(uid, { prompt: instruction, batch_closed: true, awaiting: undefined });
+    const runPreset = opts.preset ?? styleFromText(instruction) ?? styleOf(uid);
+    if (runPreset !== preset) log(`[${uid}] стиль: ${runPreset}`);
+    return submit(uid, chatId, "run", { source, sources, instruction, preset: runPreset }, isLongRun(seconds, highlights) ? "long" : "standard");
+  }
+
+  async function startMake(uid: number, chatId: number, topic: string, aspect: string, voiceChoice?: string, fromJob?: string): Promise<JobRow | undefined> {
+    if (!topic) return void (await say(chatId, T(uid).makeUsage));
+    patchSess(uid, { prompt: topic, awaiting: undefined, make: undefined });
+    // no choice → "auto" (Gemini with a key, else Piper); "off" → silent
+    const chosen = voiceChoice ?? voiceOf(uid);
+    const voice = chosen === "off" ? undefined : chosen && chosen !== "auto" ? chosen : "auto";
+    return submit(uid, chatId, "make", { topic, voice, aspect, fromJob }, "standard");
+  }
+
+  async function startRevise(uid: number, chatId: number, editText: string, veditJob?: string) {
+    const L = T(uid);
+    const jobId = veditJob ?? sess(uid).jobId;
+    if (!editText) return void (await say(chatId, L.reviseUsage));
+    if (!jobId) return void (await say(chatId, L.reviseNoJob));
+    patchSess(uid, { awaiting: undefined });
+    await submit(uid, chatId, "revise", { jobId, edit: editText }, "standard");
+  }
+
+  async function startAvatar(uid: number, chatId: number, input: string) {
+    const L = T(uid);
+    if (!input) return void (await say(chatId, L.avatarUsage));
+    if (/^(сброс|reset|clear)$/i.test(input)) {
+      patchSess(uid, { avatar_photo: undefined, avatar_voice: undefined });
+      return void (await say(chatId, L.avatarReset));
+    }
+    const s = sess(uid);
+    const photo = s.avatar_photo && (await exists(s.avatar_photo)) ? s.avatar_photo : undefined;
+    const voice = s.avatar_voice && (await exists(s.avatar_voice)) ? s.avatar_voice : undefined;
+    const chosen = voiceOf(uid);
+    // the user's own voice note wins over the catalogue voice
+    const voiceId = voice || chosen === "off" ? undefined : chosen;
+    patchSess(uid, { prompt: input, awaiting: undefined });
+    await say(chatId, L.avatarStart(!!photo, !!voice, voiceId));
+    await submit(uid, chatId, "avatar", { input, photo, voice, voiceId, sourceLabel: path.join(usersDir, String(uid), "avatar") }, "light");
+  }
+
+  // ── uploads ──
+  const uploadLimit = (uid: number) => (isAdmin(uid) ? api.limits.downloadBytes : Math.min(api.limits.downloadBytes, plan().uploadMb * 1024 * 1024));
+  async function tooLargeReply(uid: number, chatId: number, size: number) {
+    const L = T(uid);
+    const mb = (n: number) => Math.round(n / 1024 / 1024);
+    await say(chatId, [L.tooLarge(mb(size), mb(uploadLimit(uid))), isAdmin(uid) ? L.tooLargeAdmin : ""].filter(Boolean).join("\n"));
+  }
+  const uploadDir = (uid: number) => path.join(usersDir, String(uid), "uploads");
+
+  function draftFor(uid: number, n: number): MontageDraft {
+    const s = sess(uid);
+    const mode: MontageMode = s.intent ?? (n > 1 ? "viral" : "reels");
+    return { mode, count: 3, seconds: mode === "reels" ? 30 : 60, aspect: aspectOf(uid), style: PRESET_STYLE[styleOf(uid)] ?? "pop" };
+  }
+
+  async function montageCard(uid: number, chatId: number, n: number) {
+    const L = T(uid);
+    const d = draftFor(uid, n);
+    patchSess(uid, { draft: d });
+    await say(chatId, n > 1 ? L.batchSaved(n) : L.videoSaved, encodeKb(montageKb(L, d)));
+  }
+
+  const albums = new Map<string, { caption?: string; timer?: ReturnType<typeof setTimeout> }>();
+  const albumDelayMs = o.albumDelayMs ?? 4000;
+
+  async function onVideo(uid: number, m: TgMessage, v: { fileId: string; size?: number; duration?: number }) {
+    const chatId = m.chat.id;
+    if (v.size !== undefined && v.size > uploadLimit(uid)) return tooLargeReply(uid, chatId, v.size);
     await action(chatId, "typing");
-    await say(chatId, text);
-  };
-
-  async function startRun(chatId: number, instruction: string) {
-    const c = chat(chatId);
-    if (!c.source || !(await exists(c.source))) {
-      await say(chatId, MSG.needVideo);
+    const file = await api.getFile(v.fileId);
+    if (file.file_size !== undefined && file.file_size > uploadLimit(uid)) return tooLargeReply(uid, chatId, file.file_size);
+    const dest = path.join(uploadDir(uid), `${safeName(v.fileId)}.mp4`);
+    if (!(await exists(dest))) await api.download(file, dest);
+    const s = sess(uid);
+    const batch = s.batch_closed ? [dest] : [...(s.sources ?? []).filter((f) => f !== dest), dest];
+    // tiny files cannot be long videos: skip ffprobe for them
+    const seconds = v.duration ?? ((file.file_size ?? v.size ?? 0) >= 1024 * 1024 ? await probeDuration(dest) : undefined);
+    patchSess(uid, { source: dest, sources: batch, batch_closed: false, durations: { ...(s.batch_closed ? {} : s.durations), ...(seconds ? { [dest]: seconds } : {}) } });
+    log(`[${uid}] видео сохранено: ${dest} (в подборке ${batch.length})`);
+    const caption = m.caption?.trim();
+    const group = m.media_group_id;
+    if (group) {
+      // an album arrives as separate messages: act once, after the last one
+      const g = albums.get(group) ?? { caption: undefined as string | undefined, timer: undefined as ReturnType<typeof setTimeout> | undefined };
+      if (caption) g.caption = caption;
+      if (g.timer) clearTimeout(g.timer);
+      let release!: () => void;
+      const done = new Promise<void>((r) => (release = r));
+      track(done);
+      g.timer = setTimeout(() => {
+        albums.delete(group);
+        const task = (async () => {
+          if (g.caption && !g.caption.startsWith("/")) await startRun(uid, chatId, g.caption);
+          else if (g.caption && /^\/viral\b/i.test(g.caption)) await startRun(uid, chatId, VIRAL_INSTRUCTION);
+          else await montageCard(uid, chatId, sess(uid).sources.length);
+        })().catch((err) => log(`[${uid}] альбом: ${errMsg(err)}`));
+        track(task);
+        void task.finally(release);
+      }, albumDelayMs);
+      albums.set(group, g);
       return;
     }
-    const source = c.source;
-    const batch = [];
-    for (const f of c.sources ?? []) if (await exists(f)) batch.push(f);
-    const sources = batch.length > 1 ? batch : undefined;
-    await updateChat(chatId, { prompt: instruction, batch_closed: true });
-    await say(chatId, sources ? `${MSG.start}\nВидео в подборке: ${sources.length} — склею и выберу лучшее из всех.` : MSG.start);
-    const runPreset = presetFor(chatId, instruction);
-    if (runPreset !== preset) log(`[${chatId}] стиль: ${runPreset}`);
-    launch(chatId, "run", (r) =>
-      pipelineFn({
-        source,
-        sources,
-        instruction,
-        preset: runPreset,
-        progress: progressFor(chatId, r),
-        onJob: (jobId) => void updateChat(chatId, { jobId }),
-        signal: r.ac.signal,
-        log: (l) => log(`[${chatId}] ${l}`),
-      }),
-    );
+    if (caption && !caption.startsWith("/")) return startRun(uid, chatId, caption); // video + instruction in one message
+    if (caption && /^\/viral\b/i.test(caption)) return startRun(uid, chatId, VIRAL_INSTRUCTION);
+    return montageCard(uid, chatId, batch.length);
   }
 
-  async function startMake(chatId: number, arg: string) {
-    const { topic, aspect } = parseMakeArgs(arg);
-    if (!topic) return say(chatId, MSG.makeUsage);
-    await updateChat(chatId, { prompt: topic });
-    await say(chatId, `${MSG.makeStart}${aspect !== "9:16" ? ` Кадр ${aspect}.` : ""}`);
-    // no /voice choice → "auto" (Gemini with a key, else Piper); /voice off → silent
-    const chosen = chat(chatId).voice;
-    const voice = chosen === "off" ? undefined : (chosen ?? "auto");
-    launch(chatId, "make", (r) => makeFn({ topic, voice, aspect, progress: progressFor(chatId, r), onJob: (jobId) => void updateChat(chatId, { jobId }), signal: r.ac.signal, log: (l) => log(`[${chatId}] ${l}`) }));
-  }
-
-  async function startRevise(chatId: number, edit: string) {
-    const jobId = chat(chatId).jobId;
-    if (!edit) return say(chatId, MSG.reviseUsage);
-    if (!jobId) return say(chatId, MSG.reviseNoJob);
-    await say(chatId, MSG.reviseStart);
-    launch(chatId, "revise", (r) => reviseFn({ jobId, edit, progress: progressFor(chatId, r), signal: r.ac.signal, log: (l) => log(`[${chatId}] ${l}`) }));
-  }
-
-  async function startAvatar(chatId: number, input: string) {
-    if (!input) return say(chatId, MSG.avatarUsage);
-    if (/^(сброс|reset|clear)$/i.test(input)) {
-      await updateChat(chatId, { avatar_photo: undefined, avatar_voice: undefined });
-      return say(chatId, MSG.avatarReset);
-    }
-    const c = chat(chatId);
-    const photo = c.avatar_photo && (await exists(c.avatar_photo)) ? c.avatar_photo : undefined;
-    const voice = c.avatar_voice && (await exists(c.avatar_voice)) ? c.avatar_voice : undefined;
-    // the user's own voice note wins over the catalogue voice
-    const voiceId = voice || c.voice === "off" ? undefined : c.voice;
-    await updateChat(chatId, { prompt: input });
-    await say(chatId, MSG.avatarStart(!!photo, !!voice, voiceId));
-    launch(chatId, "avatar", (r) =>
-      avatarExportFn({
-        input,
-        photo,
-        voice,
-        voiceId,
-        sourceLabel: path.join(botDir, String(chatId), "avatar"),
-        progress: progressFor(chatId, r),
-        onJob: (jobId) => void updateChat(chatId, { jobId, avatar_job: jobId }),
-        signal: r.ac.signal,
-        log: (l) => log(`[${chatId}] ${l}`),
-      }),
-    );
-  }
-
-  /** avatar_result*.zip: find its job (meta.json inside, else the chat's last avatar job) and run the montage. */
-  async function onAvatarResult(m: TgMessage, d: { file_id: string; file_size?: number; file_name?: string }) {
+  /** avatar_result*.zip: find its job (meta.json inside, else the user's last avatar job) and run the montage. */
+  async function onAvatarResult(uid: number, m: TgMessage, d: { file_id: string; file_size?: number; file_name?: string }) {
     const chatId = m.chat.id;
-    if (running.has(chatId)) return say(chatId, MSG.busy);
-    if (d.file_size !== undefined && d.file_size > api.limits.downloadBytes) return say(chatId, tooLarge(d.file_size, api.limits));
+    const L = T(uid);
+    if (d.file_size !== undefined && d.file_size > uploadLimit(uid)) return tooLargeReply(uid, chatId, d.file_size);
     const file = await api.getFile(d.file_id);
-    if (file.file_size !== undefined && file.file_size > api.limits.downloadBytes) return say(chatId, tooLarge(file.file_size, api.limits));
-    const dest = path.join(botDir, String(chatId), `${safeName(d.file_id)}.zip`);
+    if (file.file_size !== undefined && file.file_size > uploadLimit(uid)) return tooLargeReply(uid, chatId, file.file_size);
+    const dest = path.join(uploadDir(uid), `${safeName(d.file_id)}.zip`);
     if (!(await exists(dest))) await api.download(file, dest);
     let jobId: string | undefined;
     try {
@@ -874,155 +907,241 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       const fromZip = meta ? (JSON.parse(meta.toString("utf8")) as { job?: string }).job : undefined;
       if (fromZip && /^[\w-]+$/.test(fromZip) && (await exists(path.join(jobDir(fromZip), "job.json")))) jobId = fromZip;
     } catch (err) {
-      return say(chatId, `✖ архив не читается: ${err instanceof Error ? err.message.split("\n")[0] : err}`);
+      return void (await say(chatId, `✖ архив не читается: ${errMsg(err)}`));
     }
-    const c = chat(chatId);
-    if (!jobId && c.avatar_job && (await exists(path.join(jobDir(c.avatar_job), "job.json")))) jobId = c.avatar_job;
-    if (!jobId) return say(chatId, MSG.avatarNoJob);
+    const s = sess(uid);
+    if (!jobId && s.avatar_job && (await exists(path.join(jobDir(s.avatar_job), "job.json")))) jobId = s.avatar_job;
+    if (!jobId) return void (await say(chatId, L.avatarNoJob));
     const instruction = m.caption?.trim() || undefined;
-    const runPreset = (instruction ? styleFromText(instruction) : undefined) ?? c.style ?? "split_news";
-    await updateChat(chatId, { jobId, avatar_job: jobId, ...(instruction ? { prompt: instruction } : {}) });
-    await say(chatId, MSG.avatarImportStart(jobId));
-    const id = jobId;
-    launch(chatId, "avatar", (r) => avatarImportFn({ jobId: id, result: dest, instruction, preset: runPreset, progress: progressFor(chatId, r), signal: r.ac.signal, log: (l) => log(`[${chatId}] ${l}`) }));
+    const runPreset = (instruction ? styleFromText(instruction) : undefined) ?? settingsOf(uid).style ?? "split_news";
+    patchSess(uid, { jobId, avatar_job: jobId, ...(instruction ? { prompt: instruction } : {}) });
+    await say(chatId, L.avatarImportStart(jobId));
+    await submit(uid, chatId, "avatar_import", { jobId, result: dest, instruction, preset: runPreset }, "standard");
   }
 
   /** a photo (or an image file) / a voice note (or an audio file) for the next /avatar */
-  async function onAvatarMedia(m: TgMessage, kind: "photo" | "voice", f: { file_id: string; file_size?: number }, ext: string) {
+  async function onAvatarMedia(uid: number, m: TgMessage, kind: "photo" | "voice", f: { file_id: string; file_size?: number }, ext: string) {
     const chatId = m.chat.id;
-    if (f.file_size !== undefined && f.file_size > api.limits.downloadBytes) return say(chatId, tooLarge(f.file_size, api.limits));
+    const L = T(uid);
+    if (f.file_size !== undefined && f.file_size > uploadLimit(uid)) return tooLargeReply(uid, chatId, f.file_size);
     const file = await api.getFile(f.file_id);
-    const dest = path.join(botDir, String(chatId), `avatar_${kind}_${safeName(f.file_id).slice(-24)}${ext}`);
+    const dest = path.join(usersDir, String(uid), "avatar", `avatar_${kind}_${safeName(f.file_id).slice(-24)}${ext}`);
     if (!(await exists(dest))) await api.download(file, dest);
-    await updateChat(chatId, kind === "photo" ? { avatar_photo: dest } : { avatar_voice: dest });
-    log(`[${chatId}] ${kind} для аватара: ${dest}`);
+    patchSess(uid, kind === "photo" ? { avatar_photo: dest } : { avatar_voice: dest });
+    log(`[${uid}] ${kind} для аватара: ${dest}`);
     const caption = m.caption?.trim();
     const cmd = caption ? /^\/avatar(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(caption) : null;
-    if (cmd) {
-      if (running.has(chatId)) return say(chatId, MSG.busy);
-      return startAvatar(chatId, (cmd[1] ?? "").trim());
-    }
-    return say(chatId, kind === "photo" ? MSG.avatarPhotoSaved : MSG.avatarVoiceSaved);
+    if (cmd) return startAvatar(uid, chatId, (cmd[1] ?? "").trim());
+    await say(chatId, kind === "photo" ? L.avatarPhotoSaved : L.avatarVoiceSaved);
   }
 
-  /** /voice [id|off]: list, choose (with a sample for local voices) or turn off the voiceover */
-  async function voiceCommand(chatId: number, arg: string) {
-    const c = chat(chatId);
-    if (!arg) return say(chatId, MSG.voiceList(c.voice));
-    if (NO_VOICE.test(arg)) {
-      await updateChat(chatId, { voice: "off" });
-      return say(chatId, MSG.voiceOff);
-    }
-    const v = getVoice(arg);
-    if (!v) return say(chatId, MSG.voiceUnknown(arg));
-    await updateChat(chatId, { voice: v.id });
-    await say(chatId, MSG.voiceSet(v));
+  // ── voices ──
+  async function sendSample(uid: number, chatId: number, v: VoiceDef, quiet = false) {
+    const L = T(uid);
     // Gemini voices without a key: the sample comes from their Piper fallback (that is what will actually speak)
     const src = isCloud(v) && !hasGoogleTtsKey() ? piperVoiceFor(v) : sampleVoiceFor(v);
-    if (!src) return;
-    // the sample is synthesised in the background (first use downloads the voice, ~60 MB)
+    if (!src) return void (quiet ? undefined : await say(chatId, L.noSample));
     const task = (async () => {
       try {
         await action(chatId, "upload_voice");
         const dest = path.join(botDir, "_voices", `${src.id}.ogg`);
         const file = (await exists(dest)) ? dest : await voiceSampleFn(src.id, dest);
-        await api.sendVoice(chatId, file, `проба: ${src.id}${src.id !== v.id ? ` (тембр для ${v.id})` : ""}`);
+        await api.sendVoice(chatId, file, L.sampleCaption(src.id, v.id));
       } catch (err) {
-        log(`[${chatId}] проба голоса ${v.id}: ${err instanceof Error ? err.message : err}`);
-        await say(chatId, `Пробу голоса прислать не получилось (${err instanceof Error ? err.message.split("\n")[0] : err}), но голос выбран.`);
+        log(`[${uid}] проба голоса ${v.id}: ${err instanceof Error ? err.message : err}`);
+        await say(chatId, L.sampleFailed(errMsg(err)));
       }
     })();
-    tasks.add(task);
-    void task.finally(() => tasks.delete(task));
+    track(task);
   }
 
-  async function status(chatId: number) {
-    const c = chat(chatId);
-    const r = running.get(chatId);
+  /** /voice [id|off]: list, choose (with a sample) or turn off the voiceover */
+  async function voiceCommand(uid: number, chatId: number, arg: string) {
+    const L = T(uid);
+    if (!arg) return void (await say(chatId, L.voiceList(voiceOf(uid)), encodeKb(voicesKb(L, langOf(uid), voiceOf(uid)))));
+    if (NO_VOICE.test(arg)) {
+      db.setSetting(uid, "voice", "off");
+      return void (await say(chatId, L.voiceOff));
+    }
+    const v = getVoice(arg);
+    if (!v) return void (await say(chatId, L.voiceUnknown(arg)));
+    db.setSetting(uid, "voice", v.id);
+    await say(chatId, L.voiceSet(v));
+    await sendSample(uid, chatId, v, true);
+  }
+
+  // ── /status ──
+  async function status(uid: number, chatId: number) {
+    const L = T(uid);
+    const s = sess(uid);
     const lines: string[] = [];
-    if (r) lines.push(`Сейчас: ${r.kind === "run" ? "монтаж" : r.kind === "make" ? "ролик по теме" : r.kind === "avatar" ? "аватар" : "правка"}, шаг «${r.stage}», ${((Date.now() - r.startedAt) / 1000).toFixed(0)} с${r.ac.signal.aborted ? " (отменяется)" : ""}`);
-    if (c.source) lines.push(`Видео: ${path.basename(c.source)}`);
-    if (c.prompt) lines.push(`Задача: ${excerpt(c.prompt, 200)}`);
-    if (c.jobId) {
+    const mine = queue.jobsOf(uid);
+    for (const id of mine.running) {
+      const j = db.getJob(id);
+      const c = cards.get(id);
+      if (j) lines.push(L.statusNow(L.kind[j.kind] ?? j.kind, c ? (c.stage === "render" ? L.stage.render(c.renderPct) : L.stage[c.stage]) : "…", Math.round((Date.now() - Date.parse(j.started_at ?? j.created_at)) / 1000), queue.isAborted(id)));
+    }
+    for (const id of mine.waiting) {
+      const j = db.getJob(id);
+      if (j) lines.push(L.statusQueued(L.kind[j.kind] ?? j.kind, queue.position(id)));
+    }
+    if (s.source) lines.push(L.statusVideo(path.basename(s.source)));
+    if (s.prompt) lines.push(L.statusTask(excerpt(s.prompt, 200)));
+    if (s.jobId) {
       try {
-        const job = await loadJob(c.jobId);
-        lines.push(`job ${job.id} (создана ${job.created_at.slice(0, 16).replace("T", " ")})`);
-        for (const [step, s] of Object.entries(job.steps)) {
-          const took = s.started_at && s.finished_at ? ` ${((+new Date(s.finished_at) - +new Date(s.started_at)) / 1000).toFixed(0)} с` : "";
-          lines.push(`  ${step}: ${s.status}${took}${s.error ? ` — ${s.error.split("\n")[0].slice(0, 200)}` : ""}`);
+        const job = await loadJob(s.jobId);
+        lines.push(`job ${job.id} (${job.created_at.slice(0, 16).replace("T", " ")})`);
+        for (const [step, st] of Object.entries(job.steps)) {
+          const took = st.started_at && st.finished_at ? ` ${((+new Date(st.finished_at) - +new Date(st.started_at)) / 1000).toFixed(0)} с` : "";
+          lines.push(`  ${step}: ${st.status}${took}${st.error ? ` — ${st.error.split("\n")[0].slice(0, 200)}` : ""}`);
         }
         const outs = (await fs.readdir(jobDir(job.id)).catch(() => [] as string[])).filter((f) => /^output_.+\.mp4$/.test(f));
-        if (outs.length) lines.push(`готовые файлы: ${outs.join(", ")}`);
+        if (outs.length) lines.push(`MP4: ${outs.join(", ")}`);
       } catch {
-        lines.push(`job ${c.jobId}: не найдена в workspace`);
+        lines.push(L.statusJobMissing(s.jobId));
       }
     }
-    await say(chatId, lines.length ? lines.join("\n") : MSG.noJob);
+    await say(chatId, lines.length ? lines.join("\n") : L.noJob);
   }
 
-  async function onVideo(m: TgMessage, v: { fileId: string; size?: number }) {
-    const chatId = m.chat.id;
-    if (v.size !== undefined && v.size > api.limits.downloadBytes) {
-      await say(chatId, tooLarge(v.size, api.limits));
-      return;
+  /** cancels a job; returns what happened */
+  async function cancelJob(jobId: string): Promise<"queued" | "running" | null> {
+    const r = queue.cancel(jobId);
+    if (r === "queued") {
+      const job = db.getJob(jobId);
+      if (job) {
+        if (job.paid_credits) db.addCredits(job.user, job.paid_credits);
+        db.updateJob(jobId, { status: "cancelled", finished_at: new Date().toISOString() });
+        await pushCard(jobId, true);
+        cards.delete(jobId);
+      }
     }
-    await action(chatId, "typing");
-    const file = await api.getFile(v.fileId);
-    if (file.file_size !== undefined && file.file_size > api.limits.downloadBytes) {
-      await say(chatId, tooLarge(file.file_size, api.limits));
-      return;
-    }
-    const dest = path.join(botDir, String(chatId), `${safeName(v.fileId)}.mp4`);
-    if (!(await exists(dest))) await api.download(file, dest);
-    const c = chat(chatId);
-    const batch = c.batch_closed ? [dest] : [...(c.sources ?? []).filter((f) => f !== dest), dest];
-    await updateChat(chatId, { source: dest, sources: batch, batch_closed: false });
-    log(`[${chatId}] видео сохранено: ${dest} (в подборке ${batch.length})`);
-    const caption = m.caption?.trim();
-    const group = m.media_group_id;
-    if (group) {
-      // an album arrives as separate messages: act once, after the last one
-      const g = albums.get(group) ?? { caption: undefined as string | undefined, timer: undefined as ReturnType<typeof setTimeout> | undefined };
-      if (caption) g.caption = caption;
-      if (g.timer) clearTimeout(g.timer);
-      g.timer = setTimeout(() => {
-        albums.delete(group);
-        const task = (async () => {
-          if (g.caption && !g.caption.startsWith("/")) {
-            if (running.has(chatId)) await say(chatId, MSG.busy);
-            else await startRun(chatId, g.caption);
-          } else if (g.caption && /^\/viral\b/i.test(g.caption)) {
-            if (running.has(chatId)) await say(chatId, MSG.busy);
-            else await startRun(chatId, MSG.viral);
-          } else await say(chatId, MSG.batchSaved(chat(chatId).sources.length));
-        })();
-        tasks.add(task);
-        void task.finally(() => tasks.delete(task));
-      }, albumDelayMs);
-      albums.set(group, g);
-      return;
-    }
-    if (caption && !caption.startsWith("/")) {
-      // video sent with a caption = video + instruction in one message
-      if (running.has(chatId)) await say(chatId, MSG.busy);
-      else await startRun(chatId, caption);
-    } else if (caption && /^\/viral\b/i.test(caption)) {
-      if (running.has(chatId)) await say(chatId, MSG.busy);
-      else await startRun(chatId, MSG.viral);
-    } else if (running.has(chatId)) await say(chatId, `Видео сохранено. ${MSG.busy}`);
-    else await say(chatId, batch.length > 1 ? MSG.batchSaved(batch.length) : MSG.videoSaved);
+    return r;
   }
 
-  async function handleMessage(m: TgMessage) {
+  // ── menu & settings ──
+  async function showMenu(uid: number, chatId: number) {
+    const L = T(uid);
+    await say(chatId, L.menuText, mainMenu(L));
+  }
+
+  function settingsView(uid: number) {
+    const L = T(uid);
+    const st = settingsOf(uid);
+    const v = st.voice;
+    const voiceName = v === "off" ? L.voiceNone : v ? (getVoice(v) ? voiceLabel(getVoice(v)!, langOf(uid)) : v) : L.voiceAuto;
+    const u = db.getUser(uid);
+    const view = { aspect: st.aspect ?? "9:16", style: L.styleNames[st.style ?? preset] ?? st.style ?? preset, voice: voiceName, send: sendOf(uid), lang: langOf(uid), news: (u?.news ?? 1) === 1 };
+    return { text: L.settings(view), kb: encodeKb(settingsKb(L, { aspect: view.aspect, style: st.style ?? preset, send: view.send, lang: view.lang, news: view.news })) };
+  }
+
+  async function balance(uid: number, chatId: number) {
+    const L = T(uid);
+    const p = plan();
+    const u = db.getUser(uid);
+    await say(chatId, L.balance({ plan: u?.plan ?? "free", credits: u?.credits ?? 0, usedStd: freeLeft(uid, "standard").used, std: p.standardPerDay, usedLong: freeLeft(uid, "long").used, long: p.longPerDay, cs: p.creditsStandard, cl: p.creditsLong, longMinutes: p.longMinutes, admin: isAdmin(uid) || !quotasOn }));
+  }
+
+  async function onMenu(uid: number, chatId: number, a: MenuAction) {
+    const L = T(uid);
+    const mb = Math.round(uploadLimit(uid) / 1024 / 1024);
+    patchSess(uid, { awaiting: undefined });
+    switch (a) {
+      case "montage":
+        patchSess(uid, { intent: undefined, sources: [], batch_closed: false });
+        return void (await say(chatId, L.montageAsk(mb)));
+      case "highlights":
+        patchSess(uid, { intent: "hl", sources: [], batch_closed: false });
+        return void (await say(chatId, L.highlightsAsk(mb)));
+      case "make":
+        patchSess(uid, { awaiting: "topic" });
+        return void (await say(chatId, L.makeAskTopic));
+      case "avatar":
+        patchSess(uid, { awaiting: "avatar" });
+        return void (await say(chatId, L.avatarMenu, encodeKb({ inline_keyboard: [[{ text: L.btnAvatarReset, callback_data: "AV:reset" }]] })));
+      case "settings": {
+        const v = settingsView(uid);
+        return void (await say(chatId, v.text, v.kb));
+      }
+      case "balance":
+        return balance(uid, chatId);
+      case "help":
+        return void (await say(chatId, L.help, mainMenu(L)));
+    }
+  }
+
+  async function makeCardFor(uid: number, chatId: number, rawTopic: string) {
+    const L = T(uid);
+    const parsed = parseMakeArgs(rawTopic);
+    if (!parsed.topic) return void (await say(chatId, L.makeUsage));
+    const d: MakeDraft = { topic: parsed.topic, aspect: makeAspectExplicit(rawTopic) ? parsed.aspect : aspectOf(uid), voice: voiceOf(uid) ?? "auto" };
+    patchSess(uid, { make: d, awaiting: undefined });
+    await say(chatId, L.makeCard(d.topic), encodeKb(makeKb(L, langOf(uid), d)));
+  }
+
+  // ── onboarding ──
+  async function sendDoc(uid: number, chatId: number, which: "terms" | "privacy") {
+    const lang = langOf(uid);
+    const file = path.join(docsDir, `${which}.${lang}.md`);
+    let text: string;
+    try {
+      text = (await fs.readFile(file, "utf8")).replace(/^#+\s*/gm, "").trim();
+    } catch {
+      text = T(uid).docMissing;
+    }
+    for (let i = 0; i < text.length; i += 4000) await say(chatId, text.slice(i, i + 4000));
+  }
+
+  async function onboardingPrompt(user: UserRow, chatId: number) {
+    const L = t(user.lang);
+    if (user.onboarding === "lang") await say(chatId, L.langPrompt, langKb());
+    else if (user.onboarding === "purpose") await say(chatId, `${L.intro}\n\n${L.askPurpose}`, purposeKb(L));
+    else if (user.onboarding === "terms") await say(chatId, L.terms(retentionDays), termsKb(L));
+  }
+
+  async function finishOnboarding(uid: number, chatId: number) {
+    const p = plan();
+    db.updateUser(uid, { onboarding: "done", accepted_terms_at: new Date().toISOString() });
+    const credits = quotasOn ? db.addCredits(uid, p.trialCredits) : db.getUser(uid)?.credits ?? 0;
+    if (quotasOn && p.trialCredits) db.addUsage({ user: uid, kind: "credits:trial", units: -p.trialCredits, cost_usd: 0 });
+    const L = T(uid);
+    await say(chatId, L.welcome(credits, p.standardPerDay, p.longPerDay, p.longMinutes), mainMenu(L));
+    log(`[${uid}] регистрация завершена`);
+  }
+
+  const admin = adminHandlers({
+    db,
+    api,
+    envAdmins,
+    isAdmin,
+    T,
+    say: (chatId, text, markup) => say(chatId, text, markup ? encodeKb(markup) : undefined),
+    edit: (chatId, msgId, text, markup) => edit(chatId, msgId, text, markup ? encodeKb(markup) : undefined),
+    getAwaiting: (uid) => sess(uid).awaiting,
+    setAwaiting: (uid, v) => patchSess(uid, { awaiting: v }),
+    getBroadcast: (uid) => sess(uid).broadcast,
+    setBroadcast: (uid, v) => patchSess(uid, { broadcast: v }),
+    plan,
+    queueCounts: () => ({ ...queue.counts(), max: queue.maxJobs }),
+    dayStart: today,
+    track,
+    broadcastDelayMs: o.broadcastDelayMs ?? 50,
+    log,
+  });
+
+  // ── messages ──
+  async function handleMessage(user: UserRow, m: TgMessage) {
+    const uid = user.tg_id;
     const chatId = m.chat.id;
+    const L = t(user.lang);
     const video = isVideoMessage(m);
-    if (video) return onVideo(m, video);
-    if (m.document && isAvatarResult(m.document.file_name)) return onAvatarResult(m, m.document);
-    if (m.photo?.length) return onAvatarMedia(m, "photo", m.photo[m.photo.length - 1], ".jpg");
-    if (m.document?.mime_type?.startsWith("image/")) return onAvatarMedia(m, "photo", m.document, path.extname(m.document.file_name ?? "") || ".jpg");
-    if (m.voice) return onAvatarMedia(m, "voice", m.voice, ".ogg");
-    if (m.audio) return onAvatarMedia(m, "voice", m.audio, path.extname(m.audio.file_name ?? "") || ".mp3");
-    if (m.document) return say(chatId, MSG.notVideo);
+    if (video) return onVideo(uid, m, video);
+    if (m.document && isAvatarResult(m.document.file_name)) return onAvatarResult(uid, m, m.document);
+    if (m.photo?.length) return onAvatarMedia(uid, m, "photo", m.photo[m.photo.length - 1], ".jpg");
+    if (m.document?.mime_type?.startsWith("image/")) return onAvatarMedia(uid, m, "photo", m.document, path.extname(m.document.file_name ?? "") || ".jpg");
+    if (m.voice) return onAvatarMedia(uid, m, "voice", m.voice, ".ogg");
+    if (m.audio) return onAvatarMedia(uid, m, "voice", m.audio, path.extname(m.audio.file_name ?? "") || ".mp3");
+    if (m.document) return void (await say(chatId, L.notVideo));
     const text = m.text?.trim();
     if (!text) return;
 
@@ -1030,86 +1149,441 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     if (cmd) {
       const name = cmd[1].toLowerCase();
       const arg = (cmd[2] ?? "").trim();
+      if (name !== "cancel" && name !== "status") patchSess(uid, { awaiting: undefined });
       switch (name) {
         case "start":
+        case "menu":
+          return showMenu(uid, chatId);
         case "help":
-          return say(chatId, MSG.help);
+          return void (await say(chatId, L.help));
         case "status":
-          return status(chatId);
+          return status(uid, chatId);
         case "cancel": {
-          const r = running.get(chatId);
-          if (!r) return say(chatId, MSG.nothingToCancel);
-          r.ac.abort();
-          return say(chatId, MSG.cancelling);
+          const mine = queue.jobsOf(uid);
+          const ids = [...mine.running, ...mine.waiting];
+          if (!ids.length) return void (await say(chatId, L.nothingToCancel));
+          await say(chatId, L.cancelling);
+          for (const id of ids) await cancelJob(id);
+          return;
         }
         case "revise":
-          if (running.has(chatId)) return say(chatId, MSG.busy);
-          return startRevise(chatId, arg);
-        case "make":
-          if (running.has(chatId)) return say(chatId, MSG.busy);
-          return startMake(chatId, arg);
+          return startRevise(uid, chatId, arg);
+        case "make": {
+          const p = parseMakeArgs(arg);
+          return startMake(uid, chatId, p.topic, makeAspectExplicit(arg) ? p.aspect : aspectOf(uid));
+        }
         case "avatar":
-          if (running.has(chatId) && !/^(сброс|reset|clear)$/i.test(arg)) return say(chatId, MSG.busy);
-          return startAvatar(chatId, arg);
+          return startAvatar(uid, chatId, arg);
         case "viral":
-          if (running.has(chatId)) return say(chatId, MSG.busy);
-          return startRun(chatId, arg ? `${MSG.viral} Дополнительно: ${arg}` : MSG.viral);
+          return startRun(uid, chatId, arg ? `${VIRAL_INSTRUCTION} Дополнительно: ${arg}` : VIRAL_INSTRUCTION);
         case "style": {
           const want = STYLES[arg.trim().toLowerCase()];
-          if (!want) return say(chatId, MSG.styleUsage(chat(chatId).style ?? preset));
-          await updateChat(chatId, { style: want });
-          return say(chatId, `Стиль: ${want}. Следующий монтаж будет в нём.`);
+          if (!want) return void (await say(chatId, L.styleUsage(styleOf(uid))));
+          db.setSetting(uid, "style", want);
+          return void (await say(chatId, L.styleSet(want)));
         }
         case "clear":
-          await updateChat(chatId, { sources: [], batch_closed: false });
-          return say(chatId, MSG.cleared);
+          patchSess(uid, { sources: [], batch_closed: false, durations: {} });
+          return void (await say(chatId, L.cleared));
         case "voice":
         case "voices":
-          return voiceCommand(chatId, arg);
+          return voiceCommand(uid, chatId, arg);
         case "send": {
           const want = SEND_MODES[arg.trim().toLowerCase()];
-          if (!want) return say(chatId, MSG.sendUsage(chat(chatId).send ?? "file"));
-          await updateChat(chatId, { send: want });
-          return say(chatId, MSG.sendSet(want));
+          if (!want) return void (await say(chatId, L.sendUsage(sendOf(uid))));
+          db.setSetting(uid, "send", want);
+          return void (await say(chatId, L.sendSet(want)));
         }
+        case "settings":
+          return onMenu(uid, chatId, "settings");
+        case "balance":
+          return onMenu(uid, chatId, "balance");
+        case "admin":
+          if (!isAdmin(uid)) return void (await say(chatId, L.unknownCommand));
+          return admin.menu(uid, chatId);
         default:
-          return say(chatId, MSG.unknownCommand);
+          return void (await say(chatId, L.unknownCommand));
       }
     }
-    if (running.has(chatId)) return say(chatId, MSG.busy);
-    return startRun(chatId, text);
+    const menu = menuAction(text);
+    if (menu) return onMenu(uid, chatId, menu);
+
+    const awaiting = sess(uid).awaiting;
+    if (awaiting?.startsWith("admin_")) {
+      if (isAdmin(uid) && (await admin.text(uid, chatId, text))) return;
+      patchSess(uid, { awaiting: undefined });
+    }
+    if (awaiting === "topic") return makeCardFor(uid, chatId, text);
+    if (awaiting === "avatar") return startAvatar(uid, chatId, text);
+    if (awaiting?.startsWith("edit:")) return applyEdit(uid, chatId, awaiting.slice(5), text);
+    return startRun(uid, chatId, text);
+  }
+
+  /** «✏️ Поправить» → text: revise the montage (or re-make the topic with the note) */
+  async function applyEdit(uid: number, chatId: number, botJob: string, text: string) {
+    patchSess(uid, { awaiting: undefined });
+    const job = db.getJob(botJob);
+    if (!job || job.user !== uid) return void (await say(chatId, T(uid).jobGone));
+    const p = JSON.parse(job.payload) as Record<string, string>;
+    if (job.kind === "make") return startMake(uid, chatId, `${p.topic}. Учти правку: ${text}`, p.aspect ?? aspectOf(uid), p.voice ?? "off");
+    if (!job.vedit_job) return void (await say(chatId, T(uid).jobGone));
+    return startRevise(uid, chatId, text, job.vedit_job);
+  }
+
+  // ── callbacks ──
+  async function handleCallback(q: TgCallbackQuery) {
+    const uid = q.from.id;
+    const chatId = q.message?.chat.id ?? uid;
+    const msgId = q.message?.message_id;
+    let toast: string | undefined;
+    let answered = false;
+    const answer = async (text?: string) => {
+      if (answered) return;
+      answered = true;
+      await api.answerCallbackQuery(q.id, text).catch(() => {});
+    };
+    try {
+      if (allowed && !allowed.has(uid)) return void log(`[${chatId}] кнопка пропущена: ${uid} не в TELEGRAM_ALLOWED_USERS`);
+      const user = touch(q.from);
+      const L = t(user.lang);
+      if (user.status === "banned" && !isAdmin(uid)) return void (await answer(L.banned));
+      let data = q.data ?? "";
+      if (data.startsWith("~")) data = db.getCallback(Number(data.slice(1))) ?? "";
+      const [p, a, b, c] = data.split(":");
+      // registration buttons work before "done"; everything else needs it
+      if (onboardingOn && user.onboarding !== "done" && !["L", "P", "T"].includes(p)) {
+        await answer(L.needStart);
+        return onboardingPrompt(user, chatId);
+      }
+      switch (p) {
+        case "noop":
+          break;
+        case "L": {
+          if (!isLang(a)) break;
+          db.updateUser(uid, { lang: a });
+          const L2 = t(a);
+          if (user.onboarding === "lang") {
+            db.updateUser(uid, { onboarding: "purpose" });
+            if (msgId) await edit(chatId, msgId, `${L2.intro}\n\n${L2.askPurpose}`, purposeKb(L2));
+          }
+          toast = L2.langName;
+          break;
+        }
+        case "P": {
+          if (user.onboarding !== "purpose" && user.onboarding !== "done") break;
+          db.updateUser(uid, { purpose: a, ...(user.onboarding === "purpose" ? { onboarding: "terms" } : {}) });
+          if (user.onboarding === "purpose" && msgId) await edit(chatId, msgId, L.terms(retentionDays), termsKb(L));
+          break;
+        }
+        case "T": {
+          if (a === "terms" || a === "privacy") {
+            await answer();
+            await sendDoc(uid, chatId, a);
+            break;
+          }
+          if (a === "ok" && user.onboarding !== "done") {
+            if (msgId) await edit(chatId, msgId, `${L.terms(retentionDays)}\n\n${L.btnAccept}`);
+            await answer();
+            await finishOnboarding(uid, chatId);
+          }
+          break;
+        }
+        case "M":
+          toast = await montageCallback(uid, chatId, msgId, a, b === undefined ? undefined : [b, c].filter(Boolean).join(":"));
+          break;
+        case "K":
+          toast = await makeCallback(uid, chatId, msgId, a, [b, c].filter(Boolean).join(":"));
+          break;
+        case "S":
+          toast = await settingsCallback(uid, chatId, msgId, a, [b, c].filter(Boolean).join(":"));
+          break;
+        case "V": {
+          const id = a;
+          if (id === "auto") db.setSetting(uid, "voice", undefined);
+          else if (id === "off") db.setSetting(uid, "voice", "off");
+          else if (getVoice(id)) db.setSetting(uid, "voice", getVoice(id)!.id);
+          if (msgId) await editMarkup(chatId, msgId, encodeKb(voicesKb(L, user.lang, voiceOf(uid))));
+          const v = getVoice(id);
+          toast = L.voiceChosen(id === "auto" ? L.voiceAuto : id === "off" ? L.voiceNone : v ? voiceLabel(v, user.lang) : id);
+          if (v) {
+            await answer(toast);
+            await sendSample(uid, chatId, v);
+          }
+          break;
+        }
+        case "VP": {
+          const v = getVoice(a);
+          await answer();
+          if (v) await sendSample(uid, chatId, v);
+          break;
+        }
+        case "AV":
+          if (a === "reset") {
+            patchSess(uid, { avatar_photo: undefined, avatar_voice: undefined });
+            toast = L.avatarReset;
+          }
+          break;
+        case "X": {
+          const job = db.getJob(a);
+          if (!job) break;
+          if (job.user !== uid && !isAdmin(uid)) {
+            toast = L.notYours;
+            break;
+          }
+          const r = await cancelJob(a);
+          toast = r === "queued" ? L.cancelled : r === "running" ? L.cancelling : L.nothingToCancel;
+          break;
+        }
+        case "R":
+        case "A":
+        case "F":
+          toast = await repeatJob(uid, chatId, p, a);
+          break;
+        case "E": {
+          const job = db.getJob(a);
+          if (!job || job.user !== uid) {
+            toast = L.jobGone;
+            break;
+          }
+          patchSess(uid, { awaiting: `edit:${a}` });
+          await answer();
+          await say(chatId, L.askEdit);
+          break;
+        }
+        case "r": {
+          const job = db.getJob(a);
+          const n = Number(b);
+          if (!job || job.user !== uid || job.status !== "done" || !(n >= 1 && n <= 5)) break;
+          db.updateJob(a, { rating: n });
+          if (msgId) await editMarkup(chatId, msgId, encodeKb(resultKb(L, a, n)));
+          toast = L.rated(n);
+          break;
+        }
+        case "a":
+          if (!isAdmin(uid)) {
+            toast = L.unknownCommand;
+            break;
+          }
+          await answer();
+          toast = await admin.callback(uid, chatId, msgId, data);
+          if (toast) await say(chatId, toast);
+          toast = undefined;
+          break;
+      }
+    } catch (err) {
+      log(`[${chatId}] ошибка кнопки ${q.data}: ${err instanceof Error ? (err.stack ?? err.message) : err}`);
+    } finally {
+      await answer(toast);
+    }
+  }
+
+  async function montageCallback(uid: number, chatId: number, msgId: number | undefined, op: string, val?: string): Promise<string | undefined> {
+    const L = T(uid);
+    const s = sess(uid);
+    const d: MontageDraft = s.draft ?? draftFor(uid, s.sources.length);
+    if (op === "go") {
+      const hl = d.mode === "hl" || d.mode === "pp";
+      const job = await startRun(uid, chatId, draftInstruction(d), { preset: hl ? undefined : STYLE_PRESET[d.style], highlights: hl, single: hl });
+      // the card keeps its buttons when the job was not accepted (limit, full queue) — the user can retry
+      if (job) {
+        patchSess(uid, { draft: undefined, intent: undefined });
+        if (msgId) await editMarkup(chatId, msgId, undefined);
+      }
+      return undefined;
+    }
+    if (op === "m" && (val === "reels" || val === "viral" || val === "hl" || val === "pp")) {
+      d.mode = val;
+      if (val !== "reels" && d.seconds === 30) d.seconds = 60;
+    } else if (op === "n") d.count = Number(val) || d.count;
+    else if (op === "s") d.seconds = Number(val) || d.seconds;
+    else if (op === "a" && (val === "9:16" || val === "16:9")) d.aspect = val;
+    else if (op === "y" && val && STYLE_PRESET[val]) d.style = val;
+    patchSess(uid, { draft: d });
+    if (msgId) await editMarkup(chatId, msgId, encodeKb(montageKb(L, d)));
+    return undefined;
+  }
+
+  async function makeCallback(uid: number, chatId: number, msgId: number | undefined, op: string, val: string): Promise<string | undefined> {
+    const L = T(uid);
+    const d = sess(uid).make;
+    if (!d) return L.jobGone;
+    if (op === "go") {
+      const job = await startMake(uid, chatId, d.topic, d.aspect, d.voice);
+      if (job && msgId) await editMarkup(chatId, msgId, undefined);
+      else if (!job) patchSess(uid, { make: d });
+      return undefined;
+    }
+    if (op === "p") {
+      const v = getVoice(val);
+      if (v) await sendSample(uid, chatId, v);
+      return undefined;
+    }
+    if (op === "a" && isAspect(val)) d.aspect = val;
+    else if (op === "v" && (val === "auto" || val === "off" || getVoice(val))) d.voice = val;
+    patchSess(uid, { make: d });
+    if (msgId) await editMarkup(chatId, msgId, encodeKb(makeKb(L, langOf(uid), d)));
+    return undefined;
+  }
+
+  async function settingsCallback(uid: number, chatId: number, msgId: number | undefined, op: string, val: string): Promise<string | undefined> {
+    if (op === "v") {
+      const L = T(uid);
+      if (msgId) await edit(chatId, msgId, L.voicePick, encodeKb(voicesKb(L, langOf(uid), voiceOf(uid))));
+      return undefined;
+    }
+    if (op === "a" && isAspect(val)) db.setSetting(uid, "aspect", val);
+    else if (op === "y" && STYLE_PRESET[val]) db.setSetting(uid, "style", STYLE_PRESET[val]);
+    else if (op === "s" && (val === "file" || val === "video" || val === "both")) db.setSetting(uid, "send", val);
+    else if (op === "l" && isLang(val)) db.updateUser(uid, { lang: val });
+    else if (op === "n") db.updateUser(uid, { news: (db.getUser(uid)?.news ?? 1) ? 0 : 1 });
+    const v = settingsView(uid);
+    if (msgId) await edit(chatId, msgId, v.text, v.kb);
+    // a new language also changes the main menu labels
+    if (op === "l") await showMenu(uid, chatId);
+    return T(uid).saved;
+  }
+
+  /** 🔁 retry (R), 🔁 another take (A), 📐 other format (F) of a finished job */
+  async function repeatJob(uid: number, chatId: number, op: string, botJob: string): Promise<string | undefined> {
+    const L = T(uid);
+    const job = db.getJob(botJob);
+    if (!job || (job.user !== uid && !isAdmin(uid))) return L.jobGone;
+    const p = JSON.parse(job.payload) as Record<string, unknown>;
+    const str = (k: string) => (typeof p[k] === "string" ? (p[k] as string) : undefined);
+    if (op === "R") {
+      if (job.kind === "run" && str("source") && !(await exists(str("source")!))) return L.needVideo;
+      const { resultAspect: _ra, ...clean } = p;
+      await submit(uid, chatId, job.kind, clean, job.class);
+      return undefined;
+    }
+    if (op === "A") {
+      const note = "Сделай другой вариант: другие моменты и другой хук, чем в прошлый раз.";
+      if (job.kind === "run") {
+        if (!(await exists(str("source") ?? ""))) return L.needVideo;
+        await submit(uid, chatId, "run", { ...p, instruction: `${str("instruction")} ${note}`, resultAspect: undefined }, job.class);
+      } else if (job.kind === "make") await submit(uid, chatId, "make", { topic: str("topic"), voice: str("voice"), aspect: str("aspect") }, "standard");
+      else if (job.vedit_job) await startRevise(uid, chatId, note, job.vedit_job);
+      return undefined;
+    }
+    // F: the other frame (9:16 ↔ 16:9)
+    const cur = str("resultAspect") ?? str("aspect") ?? aspectOf(uid);
+    const other = cur === "16:9" ? "9:16" : "16:9";
+    if (job.kind === "make") {
+      await submit(uid, chatId, "make", { topic: str("topic"), voice: str("voice"), aspect: other, fromJob: job.vedit_job ?? undefined }, "standard");
+      return undefined;
+    }
+    if (!job.vedit_job) return L.jobGone;
+    await startRevise(uid, chatId, `Переделай все выходы в формате ${other}: тот же монтаж, только кадр ${other}.`, job.vedit_job);
+    return undefined;
+  }
+
+  // ── updates ──
+  function touch(from: TgUser): UserRow {
+    const uid = from.id;
+    // the operators (TELEGRAM_ADMIN_IDS) skip registration: they run the service
+    const registered = !onboardingOn || envAdmins.has(uid);
+    const init: Partial<UserRow> = { ...(envAdmins.has(uid) ? { role: "admin" } : {}), ...(registered ? { onboarding: "done", accepted_terms_at: new Date().toISOString() } : {}) };
+    const u = db.touchUser(uid, from, init);
+    if (envAdmins.has(uid) && (u.role !== "admin" || u.onboarding !== "done")) {
+      db.updateUser(uid, { role: "admin", onboarding: "done" });
+      return { ...u, role: "admin", onboarding: "done" };
+    }
+    return u;
   }
 
   async function handleUpdate(update: TgUpdate) {
+    if (update.callback_query) return handleCallback(update.callback_query);
     const m = update.message;
     if (!m) return;
     try {
-      const from = m.from?.id;
-      if (allowed && (from === undefined || !allowed.has(from))) {
-        log(`[${m.chat.id}] пропущено: пользователь ${from ?? "?"} не в TELEGRAM_ALLOWED_USERS`);
+      const from = m.from;
+      // the bot works in private chats only: in a group every message would become a task
+      if (m.chat.type !== "private") return void log(`[${m.chat.id}] пропущено: чат типа ${m.chat.type}`);
+      if (!from || (allowed && !allowed.has(from.id))) {
+        log(`[${m.chat.id}] пропущено: пользователь ${from?.id ?? "?"} не в TELEGRAM_ALLOWED_USERS`);
         return;
       }
-      await handleMessage(m);
+      const user = touch(from);
+      if (user.status === "banned" && !isAdmin(from.id)) return void (await say(m.chat.id, t(user.lang).banned));
+      if (onboardingOn && user.onboarding !== "done") return void (await onboardingPrompt(user, m.chat.id));
+      await handleMessage(user, m);
     } catch (err) {
       log(`[${m.chat.id}] ошибка обработки update ${update.update_id}: ${err instanceof Error ? (err.stack ?? err.message) : err}`);
-      await say(m.chat.id, errorText(err));
+      const uid = m.from?.id ?? 0;
+      await say(m.chat.id, isAdmin(uid) ? errorText(err) : `✖ ${T(uid).failed}`);
     }
+  }
+
+  // ── restart recovery: jobs that were running are failed (refunded, user told); waiting ones go back in the queue ──
+  for (const job of db.jobsByStatus("running")) {
+    if (job.paid_credits) db.addCredits(job.user, job.paid_credits);
+    db.updateJob(job.id, { status: "failed", error: "бот перезапущен", finished_at: new Date().toISOString() });
+    const L = T(job.user);
+    track(
+      (async () => {
+        if (job.status_msg_id) await edit(job.chat_id, job.status_msg_id, `${L.kind[job.kind] ?? job.kind} · ${job.id}\n${L.stage.failed}`);
+        await say(job.chat_id, L.restarted, encodeKb(retryKb(L, job.id)));
+      })(),
+    );
+  }
+  for (const job of db.jobsByStatus("queued")) {
+    cards.set(job.id, { chatId: job.chat_id, msgId: job.status_msg_id ?? undefined, stage: "start", pct: 0, renderPct: 0, lastAt: 0, chain: Promise.resolve() });
+    queue.enqueue(job.id, job.user);
+    log(`задача ${job.id} снова в очереди после перезапуска`);
+  }
+
+  // ── retention ──
+  const retention = (now?: number) => runRetention({ db, usersDir, jobsRoot: WORKSPACE_ROOT, days: retentionDays, now });
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  const cleanupEvery = o.cleanupIntervalMs ?? 86_400_000;
+  if (cleanupEvery > 0) {
+    const tick = () =>
+      void retention()
+        .then((r) => (r.files || r.jobs ? log(`очистка: файлов ${r.files} (${(r.bytes / 1024 / 1024).toFixed(0)} МБ), задач ${r.jobs}${r.errors.length ? `, ошибок ${r.errors.length}` : ""}`) : undefined))
+        .catch((err) => log(`⚠ очистка: ${errMsg(err)}`));
+    const first = setTimeout(tick, Math.min(60_000, cleanupEvery));
+    first.unref?.();
+    const every = setInterval(tick, cleanupEvery);
+    every.unref?.();
+    timers.push(first, every);
   }
 
   return {
     api,
-    get state() {
-      return state;
-    },
+    db,
+    queue,
     botDir,
-    handleUpdate,
-    isBusy: (chatId) => running.has(chatId),
-    save: async () => {
-      await saveState();
+    usersDir,
+    get offset() {
+      return Number(db.getKv("offset") ?? 0);
     },
+    set offset(v: number) {
+      db.setKv("offset", String(v));
+    },
+    handleUpdate,
+    isBusy: (uid) => {
+      const j = queue.jobsOf(uid);
+      return j.running.length + j.waiting.length > 0;
+    },
+    session: (uid) => sess(uid),
+    settings: (uid) => settingsOf(uid),
+    user: (uid) => db.getUser(uid),
+    retention,
+    save: async () => {},
     async idle() {
-      while (tasks.size) await Promise.allSettled([...tasks]);
-      await saving;
+      for (;;) {
+        await Promise.allSettled([...tasks]);
+        await queue.idle();
+        await Promise.allSettled([...cards.values()].map((c) => c.chain));
+        const c = queue.counts();
+        if (!tasks.size && !c.running && !c.waiting && ![...cards.values()].some((x) => x.timer)) break;
+        await sleep(5);
+      }
+    },
+    close() {
+      for (const tm of timers) clearTimeout(tm);
+      for (const c of cards.values()) if (c.timer) clearTimeout(c.timer);
+      db.close();
     },
   };
 }
@@ -1122,6 +1596,25 @@ export interface RunningBot {
   done: Promise<void>;
 }
 
+/** the Telegram command menu, per language */
+async function setCommands(api: BotApi, log: (l: string) => void) {
+  const sets: Record<Lang, [string, string][]> = {
+    ru: [["start", "Меню"], ["make", "Ролик по теме"], ["viral", "Один вирусный ролик из видео"], ["settings", "Настройки"], ["balance", "Баланс и лимиты"], ["status", "Что сейчас делается"], ["cancel", "Отменить"], ["help", "Помощь"]],
+    uz: [["start", "Menyu"], ["make", "Mavzu bo‘yicha rolik"], ["viral", "Videolardan bitta virusli rolik"], ["settings", "Sozlamalar"], ["balance", "Balans va limitlar"], ["status", "Hozir nima bajarilmoqda"], ["cancel", "Bekor qilish"], ["help", "Yordam"]],
+    en: [["start", "Menu"], ["make", "Video on a topic"], ["viral", "One viral clip from videos"], ["settings", "Settings"], ["balance", "Balance and limits"], ["status", "What is running"], ["cancel", "Cancel"], ["help", "Help"]],
+  };
+  for (const [lang, cmds] of Object.entries(sets) as [Lang, [string, string][]][]) {
+    try {
+      await api.setMyCommands(
+        cmds.map(([command, description]) => ({ command, description })),
+        lang === "ru" ? undefined : lang,
+      );
+    } catch (err) {
+      log(`⚠ setMyCommands(${lang}): ${errMsg(err)}`);
+    }
+  }
+}
+
 /** Long-polling loop. Never throws: getUpdates failures back off, each update is handled in try/catch. */
 export async function startBot(o: BotOptions): Promise<RunningBot> {
   const log = o.onLog ?? ((l: string) => console.log(l));
@@ -1129,16 +1622,17 @@ export async function startBot(o: BotOptions): Promise<RunningBot> {
   const ac = new AbortController();
   const timeout = o.pollTimeout ?? 30;
   const retryDelay = o.retryDelayMs ?? 3000;
-  let offset = bot.state.offset ?? 0;
+  let offset = bot.offset;
+  void setCommands(bot.api, log);
 
   const wait = (ms: number) =>
     new Promise<void>((resolve) => {
-      const t = setTimeout(resolve, ms);
-      ac.signal.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
+      const tm = setTimeout(resolve, ms);
+      ac.signal.addEventListener("abort", () => (clearTimeout(tm), resolve()), { once: true });
     });
 
   const done = (async () => {
-    log(`бот запущен; рабочая папка ${bot.botDir}`);
+    log(`бот запущен; рабочая папка ${bot.botDir}; задач одновременно: ${bot.queue.maxJobs}`);
     while (!ac.signal.aborted) {
       let updates: TgUpdate[];
       try {
@@ -1158,10 +1652,7 @@ export async function startBot(o: BotOptions): Promise<RunningBot> {
         offset = Math.max(offset, u.update_id + 1);
         await bot.handleUpdate(u);
       }
-      if (updates.length && bot.state.offset !== offset) {
-        bot.state.offset = offset;
-        await bot.save();
-      }
+      if (updates.length && bot.offset !== offset) bot.offset = offset;
     }
     log("бот остановлен");
   })();

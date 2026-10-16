@@ -79,10 +79,41 @@ export interface TgMessage {
   voice?: TgVoice;
   audio?: TgVoice;
 }
+export interface TgCallbackQuery {
+  id: string;
+  from: TgUser;
+  /** the message with the inline keyboard (absent for very old messages) */
+  message?: TgMessage;
+  data?: string;
+}
 export interface TgUpdate {
   update_id: number;
   message?: TgMessage;
   edited_message?: TgMessage;
+  callback_query?: TgCallbackQuery;
+}
+
+// ── keyboards ──────────────────────────────────────────────────────────────────
+
+export interface InlineButton {
+  text: string;
+  /** ≤ 64 bytes (Bot API limit) */
+  callback_data?: string;
+  url?: string;
+}
+export interface InlineKeyboard {
+  inline_keyboard: InlineButton[][];
+}
+/** the persistent reply keyboard under the input field (main menu) */
+export interface ReplyKeyboard {
+  keyboard: { text: string }[][];
+  resize_keyboard?: boolean;
+  is_persistent?: boolean;
+  input_field_placeholder?: string;
+}
+export type ReplyMarkup = InlineKeyboard | ReplyKeyboard | { remove_keyboard: true };
+export interface SendOptions {
+  reply_markup?: ReplyMarkup;
 }
 export interface TgFile {
   file_id: string;
@@ -216,7 +247,14 @@ export interface BotApi {
   getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<TgUpdate[]>;
   getFile(fileId: string): Promise<TgFile>;
   download(file: TgFile, dest: string): Promise<void>;
-  sendMessage(chatId: number, text: string): Promise<TgMessage>;
+  sendMessage(chatId: number, text: string, opts?: SendOptions): Promise<TgMessage>;
+  /** edits a sent text message in place (status cards, option cards); `markup` replaces the inline keyboard (omit → removed) */
+  editMessageText(chatId: number, messageId: number, text: string, markup?: InlineKeyboard): Promise<void>;
+  editMessageReplyMarkup(chatId: number, messageId: number, markup?: InlineKeyboard): Promise<void>;
+  /** stops the spinner on a pressed inline button; `text` shows a short toast */
+  answerCallbackQuery(id: string, text?: string): Promise<void>;
+  /** the command list in the Telegram menu */
+  setMyCommands(commands: { command: string; description: string }[], languageCode?: string): Promise<void>;
   /** multipart upload of a local MP4 (read into a Blob) */
   sendVideo(chatId: number, filePath: string, meta?: VideoMeta): Promise<TgMessage>;
   /** a file as is; `fileName` renames it in the chat, `disableContentTypeDetection` keeps an MP4 a file (no recompression into a video) */
@@ -240,6 +278,8 @@ export interface BotApiOptions {
 }
 
 const TEXT_LIMIT = 4096;
+/** "Bad Request: message is not modified" — the same text/keyboard again; harmless */
+export const isNotModified = (err: unknown) => err instanceof TelegramError && /message is not modified/i.test(err.description);
 const CAPTION_LIMIT = 1024;
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
@@ -256,10 +296,31 @@ export function makeBotApi(token: string, o: BotApiOptions = {}): BotApi {
   return {
     limits,
     getUpdates: (offset, timeoutSec, signal) =>
-      call<TgUpdate[]>(token, "getUpdates", { offset, timeout: timeoutSec, allowed_updates: ["message"] }, { ...base, signal }),
+      call<TgUpdate[]>(token, "getUpdates", { offset, timeout: timeoutSec, allowed_updates: ["message", "callback_query"] }, { ...base, signal }),
     getFile: (fileId) => call<TgFile>(token, "getFile", { file_id: fileId }, base),
     download: (file, dest) => dl(token, file, dest, base),
-    sendMessage: (chatId, text) => call<TgMessage>(token, "sendMessage", { chat_id: chatId, text: clip(text, TEXT_LIMIT), link_preview_options: { is_disabled: true } }, base),
+    sendMessage: (chatId, text, opts = {}) =>
+      call<TgMessage>(token, "sendMessage", { chat_id: chatId, text: clip(text, TEXT_LIMIT), link_preview_options: { is_disabled: true }, reply_markup: opts.reply_markup }, base),
+    editMessageText: async (chatId, messageId, text, markup) => {
+      try {
+        await call(token, "editMessageText", { chat_id: chatId, message_id: messageId, text: clip(text, TEXT_LIMIT), link_preview_options: { is_disabled: true }, reply_markup: markup ?? { inline_keyboard: [] } }, base);
+      } catch (err) {
+        if (!isNotModified(err)) throw err;
+      }
+    },
+    editMessageReplyMarkup: async (chatId, messageId, markup) => {
+      try {
+        await call(token, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: markup ?? { inline_keyboard: [] } }, base);
+      } catch (err) {
+        if (!isNotModified(err)) throw err;
+      }
+    },
+    answerCallbackQuery: async (id, text) => {
+      await call(token, "answerCallbackQuery", { callback_query_id: id, text: text ? clip(text, 200) : undefined }, base);
+    },
+    setMyCommands: async (commands, languageCode) => {
+      await call(token, "setMyCommands", { commands, language_code: languageCode }, base);
+    },
     sendVideo: async (chatId, filePath, meta = {}) =>
       call<TgMessage>(
         token,

@@ -1,3 +1,4 @@
+import { jobSignal } from "../lib/abort.ts";
 export interface Budget {
   maxUsd: number;
   maxWallMs: number;
@@ -53,6 +54,9 @@ export class BudgetTracker {
     this.budget = { ...budgetFromEnv(), ...budget };
     const signals = [this.controller.signal, AbortSignal.timeout(this.budget.maxWallMs)];
     if (parent) signals.push(parent);
+    // a bot job cancelled with 🛑 stops the planner too (Agent SDK abort, API request signal)
+    const job = jobSignal();
+    if (job && job !== parent) signals.push(job);
     this.signal = AbortSignal.any(signals);
   }
 

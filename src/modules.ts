@@ -24,6 +24,7 @@ import { DEFAULT_AGY_MODEL } from "./understand/vision/agy.ts";
 import { VOICES } from "./voice/catalog.ts";
 import { piperStatus } from "./voice/piper.ts";
 import { geminiApiKey, geminiTtsModels } from "./voice/gemini.ts";
+import { FREE_PLAN_FIELDS, freePlanFromEnv, maxJobsFromEnv, PER_USER_QUEUED, PER_USER_RUNNING, retentionDaysFromEnv, tzOffsetFromEnv } from "./bot/plans.ts";
 import { cloudApiKey, cloudGeminiModels } from "./voice/cloudtts.ts";
 
 /**
@@ -60,6 +61,8 @@ export interface ModuleDef {
 }
 
 const has = async (p: string) => exists(p);
+/** a job started from the bot: its source is an upload under workspace/_bot/ (stage 7–18) or workspace/users/<tg_id>/ (stage 19) */
+const BOT_SOURCE = /[\\/](_bot|users[\\/]\d+)[\\/]/;
 
 export const MODULES: ModuleDef[] = [
   {
@@ -311,13 +314,37 @@ export const MODULES: ModuleDef[] = [
     id: "bot",
     stage: "delivery",
     title: "Telegram-бот",
-    what: "видео + подпись → MP4 в чат; /revise, /status",
-    selector: "npm run bot; TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS",
-    backends: [{ id: "telegram", title: "Bot API (fetch, без зависимостей)", deps: "—", license: "условия Telegram Bot API" }],
-    job: (j) => /[\\/]_bot[\\/]/.test(j.source),
+    what: "кнопки и меню на ru/uz/en: монтаж, ролик по теме, хайлайты, аватар, настройки, баланс; карточка прогресса с отменой; результат с «ещё вариант / поправить / другой формат / оценка»; команды /make, /viral, /revise, /voice, /send, /style, /avatar остаются",
+    selector: "npm run bot; TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS (закрытая бета, иначе открытая регистрация), TELEGRAM_ADMIN_IDS, TELEGRAM_API_BASE",
+    backends: [{ id: "telegram", title: "Bot API (fetch, без зависимостей): inline-кнопки, callback_query, editMessageText", deps: "—", license: "условия Telegram Bot API" }],
+    job: (j) => BOT_SOURCE.test(j.source),
     probe: async (env) => {
       const token = !!env.TELEGRAM_BOT_TOKEN?.trim();
-      return { active: "telegram", ready: token, note: token ? (env.TELEGRAM_ALLOWED_USERS?.trim() ? "" : "без белого списка") : "нет TELEGRAM_BOT_TOKEN" };
+      return { active: "telegram", ready: token, note: token ? (env.TELEGRAM_ALLOWED_USERS?.trim() ? "закрытая бета (белый список)" : "открытая регистрация") : "нет TELEGRAM_BOT_TOKEN" };
+    },
+  },
+  {
+    id: "users",
+    stage: "delivery",
+    title: "Пользователи, лимиты, очередь (этап 19)",
+    what: "регистрация (язык → цель → условия), настройки и сессии в SQLite, бесплатный тариф и кредиты, общая очередь задач с честным порядком и отменой, админка, рассылка, очистка старых файлов",
+    selector: "VEDIT_MAX_JOBS, VEDIT_RETENTION_DAYS, VEDIT_FREE_*, VEDIT_TRIAL_CREDITS, VEDIT_CREDITS_*, VEDIT_LONG_MINUTES, VEDIT_TZ_OFFSET; живые лимиты — /admin → ⚙️ Лимиты",
+    backends: [
+      { id: "sqlite", title: "node:sqlite (встроен в Node 24, без нативных зависимостей) — workspace/_bot/vedit.db: users, settings, sessions, jobs, usage, kv, callbacks, migrations", deps: "Node.js ≥ 22.13", license: "MIT (Node.js; SQLite — public domain)" },
+      { id: "legal", title: "Условия и политика конфиденциальности (черновики для юриста) — docs/legal/{terms,privacy}.{ru,uz,en}.md", deps: "—", license: "свой текст" },
+    ],
+    probe: async (env) => {
+      let ok = true;
+      let note = "";
+      try {
+        await import("node:sqlite");
+      } catch (err) {
+        ok = false;
+        note = `node:sqlite недоступен: ${err instanceof Error ? err.message : err}`;
+      }
+      const admins = (env.TELEGRAM_ADMIN_IDS ?? env.TELEGRAM_ALLOWED_USERS ?? "").trim();
+      if (ok && !admins) note = "нет TELEGRAM_ADMIN_IDS — админка недоступна";
+      return { active: "sqlite", ready: ok, note };
     },
   },
   {
@@ -327,7 +354,7 @@ export const MODULES: ModuleDef[] = [
     what: "vedit run/plan/revise/render, batch по папке",
     selector: "всегда",
     backends: [{ id: "commander", title: "commander", deps: "commander", license: "MIT" }],
-    job: (j) => !/[\\/]_bot[\\/]/.test(j.source) && !/(make|avatar):/.test(j.source),
+    job: (j) => !BOT_SOURCE.test(j.source) && !/(make|avatar):/.test(j.source),
     probe: async () => ({ active: "commander", ready: true, note: "" }),
   },
 ];
@@ -411,6 +438,22 @@ export function limitsCatalog(env: NodeJS.ProcessEnv = process.env): LimitEntry[
   fixed("ingest.fps", "ingest", "кадров в секунду после нормализации", String(TARGET_FPS));
   fixed("render.worker_mb", "render", "памяти на воркер рендера, МБ (резерв системе)", `${WORKER_MB} (${RESERVE_MB})`, "--workers");
   fixed("bot.file_mb", "bot", "файл от пользователя / ответ бота, МБ", env.TELEGRAM_API_BASE?.trim() ? "2000 / 2000 (локальный Bot API)" : "20 / 50", "env TELEGRAM_API_BASE");
+  // stage 19: free plan, queue, retention (a bad value is shown as an error, like the budget)
+  const num = (fn: () => number) => {
+    try {
+      return String(fn());
+    } catch (err) {
+      return `✖ ${err instanceof Error ? err.message : err}`;
+    }
+  };
+  for (const f of FREE_PLAN_FIELDS) {
+    const overridden = !!env[f.env]?.trim();
+    out.push({ id: `users.free.${f.key}`, module: "users", what: f.what, value: num(() => freePlanFromEnv(env)[f.key]), default: String(f.default), set_by: overridden ? `env ${f.env}` : `env ${f.env} / /admin → Лимиты` });
+  }
+  out.push({ id: "users.max_jobs", module: "users", what: "задач одновременно (общая очередь)", value: num(() => maxJobsFromEnv(env)), default: "1 при < 12 ГБ RAM, иначе 2", set_by: "env VEDIT_MAX_JOBS" });
+  out.push({ id: "users.per_user", module: "users", what: "на пользователя: в работе / в очереди", value: `${PER_USER_RUNNING} / ${PER_USER_QUEUED}`, default: `${PER_USER_RUNNING} / ${PER_USER_QUEUED}`, set_by: "код" });
+  out.push({ id: "users.retention_days", module: "users", what: "хранение загрузок и готовых задач, дней", value: num(() => retentionDaysFromEnv(env)), default: "7", set_by: "env VEDIT_RETENTION_DAYS" });
+  out.push({ id: "users.tz_offset", module: "users", what: "граница суток для дневных лимитов, UTC+ч", value: num(() => tzOffsetFromEnv(env)), default: "5", set_by: "env VEDIT_TZ_OFFSET" });
   return out;
 }
 

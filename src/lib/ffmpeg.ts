@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { jobSignal } from "./abort.ts";
 
 const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 const FFPROBE = process.env.FFPROBE_PATH || "ffprobe";
@@ -14,7 +15,7 @@ export class ProcessError extends Error {
 
 function run(bin: string, args: string[], opts: { cwd?: string } = {}): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { windowsHide: true, cwd: opts.cwd });
+    const child = spawn(bin, args, { windowsHide: true, cwd: opts.cwd, signal: jobSignal() });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -67,7 +68,7 @@ export function parseRate(rate: string | undefined): number {
 /** ffmpeg writing raw bytes to stdout (`-f rawvideo|f32le … -`): returns the bytes. Keep outputs small (ROI frames, short audio windows). */
 export function ffmpegBuffer(args: string[]): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const child = spawn(FFMPEG, ["-hide_banner", "-loglevel", "error", "-nostdin", ...args], { windowsHide: true });
+    const child = spawn(FFMPEG, ["-hide_banner", "-loglevel", "error", "-nostdin", ...args], { windowsHide: true, signal: jobSignal() });
     const chunks: Buffer[] = [];
     let stderr = "";
     child.stdout.on("data", (d: Buffer) => chunks.push(d));

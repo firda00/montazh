@@ -300,6 +300,9 @@ test("bot: /voice lists, sets (with a sample voice message), turns off; /make an
     callMethod: fake.callMethod,
     download: fake.download,
     onLog: () => {},
+    onboarding: false,
+    quotas: false,
+    cleanupIntervalMs: 0,
     voiceSample: async (id, dest) => {
       samples.push(id);
       await fs.mkdir(path.dirname(dest), { recursive: true });
@@ -316,7 +319,7 @@ test("bot: /voice lists, sets (with a sample voice message), turns off; /make an
   assert.match(fake.texts().at(-1)!, /сейчас: авто — (dmitri|gemini_charon)[\s\S]*gemini_charon[\s\S]*denis[\s\S]*chatterbox_default/);
   await bot.handleUpdate(msg({ text: "/voice ДЕНИС" }));
   await bot.idle();
-  assert.equal(bot.state.chats["9"].voice, "denis");
+  assert.equal(bot.settings(1).voice, "denis");
   assert.match(fake.texts().at(-1)!, /^Голос: denis/);
   const voiceMsg = fake.calls.find((c) => c.method === "sendVoice");
   assert.ok(voiceMsg && (voiceMsg.params.voice as File).type === "audio/ogg", "a sample goes out as a voice message");
@@ -350,7 +353,7 @@ test("bot: /voice lists, sets (with a sample voice message), turns off; /make an
   assert.match(fake.texts().at(-1)!, /Им будет говорить \/avatar/);
 
   await bot.handleUpdate(msg({ text: "/voice off" }));
-  assert.equal(bot.state.chats["9"].voice, "off");
+  assert.equal(bot.settings(1).voice, "off");
   assert.equal(fake.texts().at(-1), MSG.voiceOff);
   await bot.handleUpdate(msg({ text: "/make тема" }));
   await bot.idle();
@@ -372,7 +375,11 @@ test("bot: /send file (default) | video | both; oversize outputs go as a shrunk 
     callMethod: fake.callMethod,
     download: fake.download,
     onLog: () => {},
+    onboarding: false,
+    quotas: false,
+    cleanupIntervalMs: 0,
     limits: { uploadBytes: 1000 },
+    adminIds: [1], // the server path of the original is shown to admins only
     shrinkVideo: async (f) => {
       shrunk.push(f);
       const out = f.replace(/\.mp4$/, "_tg.mp4");
@@ -390,7 +397,7 @@ test("bot: /send file (default) | video | both; oversize outputs go as a shrunk 
   assert.equal(sent()[0].params.disable_content_type_detection, true);
 
   await bot.handleUpdate(msg({ text: "/send видео" }));
-  assert.equal(bot.state.chats["9"].send, "video");
+  assert.equal(bot.settings(1).send, "video");
   fake.calls.length = 0;
   await bot.handleUpdate(msg({ text: "/make тема" }));
   await bot.idle();

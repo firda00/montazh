@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { jobSignal } from "../lib/abort.ts";
 import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -171,7 +172,7 @@ async function download(url: string, dest: string, label: string, onEvent?: (l: 
 
 function run(cmd: string, args: string[], cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { cwd, stdio: ["ignore", "ignore", "pipe"] });
+    const p = spawn(cmd, args, { cwd, stdio: ["ignore", "ignore", "pipe"], signal: jobSignal() });
     let err = "";
     p.stderr.on("data", (d) => (err += d));
     p.on("error", reject);
@@ -248,7 +249,7 @@ export function piperSynth(o: { piperDir?: string; modelsDir?: string; onEvent?:
     if (opt.noiseScale !== undefined) args.push("--noise_scale", String(opt.noiseScale));
     if (opt.noiseW !== undefined) args.push("--noise_w", String(opt.noiseW));
     const pcm = await new Promise<Buffer>((resolve, reject) => {
-      const p = spawn(exe, args, { cwd, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+      const p = spawn(exe, args, { cwd, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, signal: jobSignal() });
       const out: Buffer[] = [];
       let err = "";
       p.stdout.on("data", (d: Buffer) => out.push(d));
