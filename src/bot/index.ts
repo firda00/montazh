@@ -91,6 +91,8 @@ export const SessionSchema = z.object({
   /** the mode chosen in the menu before uploading (🏀 → hl) */
   intent: z.enum(["reels", "viral", "hl", "pp"]).optional(),
   draft: z.object({ mode: z.enum(["reels", "viral", "hl", "pp"]), count: z.number(), seconds: z.number(), aspect: z.string(), style: z.string() }).optional(),
+  /** the option card of the open batch: more uploads edit it instead of sending a new card */
+  card: z.number().optional(),
   make: z.object({ topic: z.string(), aspect: z.string(), voice: z.string() }).optional(),
   broadcast: z.string().optional(),
 });
@@ -842,14 +844,29 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     return { mode, count: 3, seconds: mode === "reels" ? 30 : 60, aspect: aspectOf(uid), style: PRESET_STYLE[styleOf(uid)] ?? "pop" };
   }
 
+  /** one option card per batch: the first upload sends it, later uploads to the same batch edit it */
   async function montageCard(uid: number, chatId: number, n: number) {
     const L = T(uid);
-    const d = draftFor(uid, n);
-    patchSess(uid, { draft: d });
-    await say(chatId, n > 1 ? L.batchSaved(n) : L.videoSaved, encodeKb(montageKb(L, d)));
+    const s = sess(uid);
+    // keep the user's choices when the card is refreshed; only the default mode follows the batch size
+    const d = s.card && s.draft ? { ...s.draft, mode: s.intent ?? (s.draft.mode === "reels" && n > 1 ? "viral" : s.draft.mode) } : draftFor(uid, n);
+    const text = n > 1 ? L.batchSaved(n) : L.videoSaved;
+    const kb = encodeKb(montageKb(L, d));
+    if (s.card) {
+      try {
+        await api.editMessageText(chatId, s.card, text, kb);
+        patchSess(uid, { draft: d });
+        return;
+      } catch {
+        // too old / deleted: fall through to a new card
+      }
+    }
+    const id = await say(chatId, text, kb);
+    patchSess(uid, { draft: d, card: id });
   }
 
-  const albums = new Map<string, { caption?: string; timer?: ReturnType<typeof setTimeout> }>();
+  // uploads are debounced per album and per user: a burst of separate files gets one card, after the last one
+  const albums = new Map<string, { caption?: string; timer?: ReturnType<typeof setTimeout>; release?: () => void }>();
   const albumDelayMs = o.albumDelayMs ?? 4000;
 
   async function onVideo(uid: number, m: TgMessage, v: { fileId: string; size?: number; duration?: number }) {
@@ -864,34 +881,33 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const batch = s.batch_closed ? [dest] : [...(s.sources ?? []).filter((f) => f !== dest), dest];
     // tiny files cannot be long videos: skip ffprobe for them
     const seconds = v.duration ?? ((file.file_size ?? v.size ?? 0) >= 1024 * 1024 ? await probeDuration(dest) : undefined);
-    patchSess(uid, { source: dest, sources: batch, batch_closed: false, durations: { ...(s.batch_closed ? {} : s.durations), ...(seconds ? { [dest]: seconds } : {}) } });
+    patchSess(uid, { source: dest, sources: batch, batch_closed: false, ...(s.batch_closed ? { card: undefined } : {}), durations: { ...(s.batch_closed ? {} : s.durations), ...(seconds ? { [dest]: seconds } : {}) } });
     log(`[${uid}] видео сохранено: ${dest} (в подборке ${batch.length})`);
     const caption = m.caption?.trim();
-    const group = m.media_group_id;
-    if (group) {
-      // an album arrives as separate messages: act once, after the last one
-      const g = albums.get(group) ?? { caption: undefined as string | undefined, timer: undefined as ReturnType<typeof setTimeout> | undefined };
-      if (caption) g.caption = caption;
-      if (g.timer) clearTimeout(g.timer);
-      let release!: () => void;
-      const done = new Promise<void>((r) => (release = r));
-      track(done);
-      g.timer = setTimeout(() => {
-        albums.delete(group);
-        const task = (async () => {
-          if (g.caption && !g.caption.startsWith("/")) await startRun(uid, chatId, g.caption);
-          else if (g.caption && /^\/viral\b/i.test(g.caption)) await startRun(uid, chatId, VIRAL_INSTRUCTION);
-          else await montageCard(uid, chatId, sess(uid).sources.length);
-        })().catch((err) => log(`[${uid}] альбом: ${errMsg(err)}`));
-        track(task);
-        void task.finally(release);
-      }, albumDelayMs);
-      albums.set(group, g);
-      return;
-    }
-    if (caption && !caption.startsWith("/")) return startRun(uid, chatId, caption); // video + instruction in one message
-    if (caption && /^\/viral\b/i.test(caption)) return startRun(uid, chatId, VIRAL_INSTRUCTION);
-    return montageCard(uid, chatId, batch.length);
+    // an album arrives as separate messages, and so do several files sent one after another: act once, after the last one
+    const act = async (text?: string) => {
+      // video + instruction in the caption runs straight away; otherwise one option card for the whole burst
+      if (text && !text.startsWith("/")) await startRun(uid, chatId, text);
+      else if (text && /^\/viral\b/i.test(text)) await startRun(uid, chatId, VIRAL_INSTRUCTION);
+      else await montageCard(uid, chatId, sess(uid).sources.length);
+    };
+    if (albumDelayMs <= 0 && !m.media_group_id) return act(caption); // no debounce (tests)
+    const group = m.media_group_id ?? `u:${uid}`;
+    const g = albums.get(group) ?? {};
+    if (caption) g.caption = caption;
+    if (g.timer) clearTimeout(g.timer);
+    g.release?.(); // the superseded timer's pending promise must not keep idle() waiting
+    let release!: () => void;
+    const done = new Promise<void>((r) => (release = r));
+    g.release = release;
+    track(done);
+    g.timer = setTimeout(() => {
+      albums.delete(group);
+      const task = act(g.caption).catch((err) => log(`[${uid}] подборка: ${errMsg(err)}`));
+      track(task);
+      void task.finally(release);
+    }, albumDelayMs);
+    albums.set(group, g);
   }
 
   /** avatar_result*.zip: find its job (meta.json inside, else the user's last avatar job) and run the montage. */

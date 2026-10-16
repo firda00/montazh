@@ -88,7 +88,7 @@ function fakeTelegram() {
     w?.();
   };
   const messages = () => calls.filter((c) => c.method === "sendMessage").map((c) => String(c.params.text));
-  return { callMethod, download, push, messages };
+  return { callMethod, download, push, messages, calls };
 }
 
 async function waitFor(pred: () => boolean, what: string, ms = 5000) {
@@ -109,6 +109,7 @@ test("bot: several videos then /viral → one run with all sources; the next vid
   tg.push({ video: { file_id: "A", file_size: 1000 } });
   tg.push({ video: { file_id: "B", file_size: 1000 } });
   await waitFor(() => tg.messages().some((m) => m === MSG.batchSaved(2)), "batch of 2");
+  assert.ok(!tg.messages().includes(MSG.videoSaved), "separate files sent in a burst get one card, not one per file");
   tg.push({ text: "/viral" });
   await waitFor(() => runs.length === 1, "run");
   assert.equal(runs[0].sources?.length, 2);
@@ -119,6 +120,22 @@ test("bot: several videos then /viral → one run with all sources; the next vid
   await waitFor(() => tg.messages().filter((m) => m === MSG.videoSaved).length === 1, "new single video");
   tg.push({ text: "/clear" });
   await waitFor(() => tg.messages().includes(MSG.cleared), "cleared");
+  await running.stop();
+});
+
+test("bot: four separate files → one card for the batch (default: one clip from all); a late fifth file edits that card", async () => {
+  const tg = fakeTelegram();
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "vedit-bot-"));
+  const running = await startBot({ token: "T", workspace, callMethod: tg.callMethod, download: tg.download, onLog: () => {}, pollTimeout: 1, onboarding: false, quotas: false, cleanupIntervalMs: 0, albumDelayMs: 60, pipeline: async () => assert.fail("no run") });
+  for (const id of ["F1", "F2", "F3", "F4"]) tg.push({ video: { file_id: id, file_size: 1000 } });
+  await waitFor(() => tg.messages().includes(MSG.batchSaved(4)), "one card for 4");
+  const cards = tg.calls.filter((c) => c.method === "sendMessage");
+  assert.equal(cards.length, 1, "exactly one card");
+  const kb = JSON.stringify(cards[0].params.reply_markup);
+  assert.match(kb, /✓ Один вирусный ролик/, "several videos default to one clip from all of them");
+  tg.push({ video: { file_id: "F5", file_size: 1000 } });
+  await waitFor(() => tg.calls.some((c) => c.method === "editMessageText" && c.params.text === MSG.batchSaved(5)), "card edited to 5");
+  assert.equal(tg.calls.filter((c) => c.method === "sendMessage").length, 1, "no second card");
   await running.stop();
 });
 

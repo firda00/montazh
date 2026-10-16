@@ -30,7 +30,7 @@ async function outputFile(name = "output_make.mp4") {
 async function boot(extra: Partial<BotOptions> = {}) {
   const tg = fakeTelegram();
   const logs: string[] = [];
-  const bot = await createBot({ token: "t", workspace: await tmp(), callMethod: tg.callMethod, download: tg.download, onLog: (l) => logs.push(l), statusEditMs: 0, cleanupIntervalMs: 0, broadcastDelayMs: 0, ...extra });
+  const bot = await createBot({ token: "t", workspace: await tmp(), callMethod: tg.callMethod, download: tg.download, onLog: (l) => logs.push(l), statusEditMs: 0, cleanupIntervalMs: 0, broadcastDelayMs: 0, albumDelayMs: 0, ...extra });
   return { tg, bot, logs };
 }
 

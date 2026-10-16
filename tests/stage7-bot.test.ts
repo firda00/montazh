@@ -94,8 +94,8 @@ async function makeOutputs(ids: string[]) {
 async function boot(tg: ReturnType<typeof fakeTelegram>, extra: Partial<BotOptions> = {}) {
   const workspace = extra.workspace ?? (await fs.mkdtemp(path.join(os.tmpdir(), "vedit-bot-")));
   const logs: string[] = [];
-  // stage 7–18 behaviour: no registration, no quotas, every card edit visible at once
-  const running = await startBot({ token: "TEST", workspace, callMethod: tg.callMethod, download: tg.download, onLog: (l) => logs.push(l), pollTimeout: 1, onboarding: false, quotas: false, statusEditMs: 0, cleanupIntervalMs: 0, ...extra });
+  // stage 7–18 behaviour: no registration, no quotas, every card edit visible at once, a single video acts at once
+  const running = await startBot({ token: "TEST", workspace, callMethod: tg.callMethod, download: tg.download, onLog: (l) => logs.push(l), pollTimeout: 1, onboarding: false, quotas: false, statusEditMs: 0, cleanupIntervalMs: 0, albumDelayMs: 0, ...extra });
   return { running, workspace, logs };
 }
 
