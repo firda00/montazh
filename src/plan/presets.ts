@@ -19,6 +19,9 @@ export const BUILTIN_PRESETS: Record<string, Preset> = {
     music_default: false,
     notes: ["хук в первые 3 секунды", "заканчивать на законченной фразе", "чередовать сцены"],
     design: {
+      // stage 23: smaller, softer captions (thin stroke + soft shadow), 3 words a page, lower third, off the faces
+      colors: { stroke: "rgba(0,0,0,0.85)" },
+      captions: { anchor_y: 0.75, max_words: 3, max_chars: 20, font_size: 60, line_height: 1.12, stroke_width: 3, shadow_opacity: 0.5, avoid_face: true },
       outro: {
         enabled: true,
         duration: 1.8,

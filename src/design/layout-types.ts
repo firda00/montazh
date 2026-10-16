@@ -47,6 +47,13 @@ export interface LayoutPage {
   lines: LayoutLine[];
   /** widest line (px) */
   width: number;
+  /**
+   * vertical centre of the page (fraction of the height): the preset anchor, or a free spot off the faces
+   * (stage 23, design.captions.avoid_face); absent → layout.captions.anchorY
+   */
+  anchorY?: number;
+  /** how the spot was chosen (placement.ts PlaceRule) */
+  place?: string;
 }
 
 export interface LayoutTitle {
@@ -58,14 +65,21 @@ export interface LayoutTitle {
   fontSize: number;
   lines: string[];
   width: number;
+  /** vertical centre (fraction of the height), off the faces when they are known; absent → the style's default anchor */
+  anchorY?: number;
+  place?: string;
 }
 
 export interface Layout {
   frame: { width: number; height: number; fps: number; duration: number };
   captions: { anchorY: number; maxWidth: number; baseFontSize: number; strokeWidth: number; uppercase: boolean; language: string };
   titles: { anchorY: number; maxWidth: number; baseFontSize: number };
+  /** stage 23: where the face information came from and what the placement did */
+  faces?: { source: "mediapipe" | "scenes" | "none"; avoid: boolean; moved: number; compact: number; least_overlap: number; safe: { top: number; bottom: number } };
   pages: LayoutPage[];
   titlesOut: LayoutTitle[];
+  /** stage 23: vertical centre of the outro CTA text when it had to move off a face (default: the middle) */
+  outroAnchorY?: number;
   font: { family: string; file: string; weight: number; source: FontMetrics["source"] };
   /** engine version, for cache keys */
   version: string;

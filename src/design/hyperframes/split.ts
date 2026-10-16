@@ -92,6 +92,16 @@ export function panelFrame(W: number, H: number, seamFrac: number): { x: number;
   return { x, y, w: W - 2 * x, h: seam - y - 60 };
 }
 
+/** Where the hook title sits on the seam and for how long (fractions of the frame) — an obstacle for the captions. */
+export function hookExtent(W: number, H: number, design: DesignSpec, panels: Panels, duration: number): { start: number; end: number; lo: number; hi: number } | null {
+  const hook = panels.hook_title;
+  if (!hook.length) return null;
+  const seam = Math.round(design.split.seam * H);
+  const total = hook.reduce((n, l) => n + Math.min(118, (W - 140) / Math.max(1, l.text.length * (l.style === "serif" ? 0.5 : 0.66))), 0);
+  const top = Math.round(seam - total * 0.55);
+  return { start: 0, end: Math.min(4.5, panels.panels[0]?.end ?? 4.5, duration), lo: top / H, hi: (top + total * 0.98 + 12) / H };
+}
+
 export function buildSplitLayer(s: SplitInput): SplitLayer {
   const D = s.design;
   const SP = D.split;

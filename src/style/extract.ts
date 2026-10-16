@@ -11,6 +11,7 @@ import { canonicalUrl, contentKey, StyleCache, tgAlias } from "./cache.ts";
 import { DEFAULT_DNA, parseDNA, STYLE_DNA_RESPONSE_SCHEMA, type StyleDNA } from "./dna.ts";
 import { audioStats, bandDiffs, cutStats, detectJumpCuts, grayFrames, mergeCuts, pictureStats, sceneCuts, speechStats } from "./metrics.ts";
 import { StyleProfileSchema, type Measured, type StyleProfile } from "./profile.ts";
+import { detectMusic, MUSIC_DETECT_VERSION } from "../audio/musicdetect.ts";
 
 /**
  * Reference reel → Style DNA (stage 22).
@@ -135,7 +136,17 @@ export async function measureReference(file: string, transcript: Transcript | nu
   const speech = transcript ? speechStats(transcript, duration) : null;
   const audio = transcript && wav ? audioStats(await loudnessTimeline(wav), transcript) : null;
   const picture = await pictureStats(file, maxSeconds).catch(() => null);
-  return { duration: r2(duration), cuts, ...cutStats(cuts, duration), speech, audio, picture };
+  const music = await measureMusic(file, transcript, maxSeconds);
+  return { duration: r2(duration), cuts, ...cutStats(cuts, duration), speech, audio, ...(music ? { music } : {}), picture };
+}
+
+/** Music under the voice, measured on the audio (stage 23); undefined when the file has no audio track. */
+export async function measureMusic(file: string, transcript: Transcript | null, maxSeconds = STYLE_MAX_SECONDS): Promise<Measured["music"]> {
+  const hasAudio = (await ffprobe(file)).streams.some((s) => s.codec_type === "audio");
+  if (!hasAudio) return undefined;
+  const words = transcript ? transcript.segments.flatMap((s) => s.words).map((w) => ({ start: w.start, end: w.end })) : [];
+  const r = await detectMusic(file, words, maxSeconds);
+  return { version: MUSIC_DETECT_VERSION, verdict: r.decision.verdict, score: r.decision.score, floor_tonality: r.features.floor_tonality, gap_db: r.features.gap_db, reasons: r.decision.reasons };
 }
 
 /** The measurements as text for the model (prompts/style.dna.user.md). */
@@ -151,6 +162,7 @@ export function metricsText(m: Measured): string {
     lines.push(`- hesitation sounds heard (э, ммм, uh, um): ${s.fillers}`);
   } else lines.push("- speech: none recognised");
   if (m.audio) lines.push(`- loudness: words ${m.audio.speech_lufs ?? "?"} LUFS, gaps between words ${m.audio.gap_lufs ?? "too few gaps to measure"} LUFS${m.audio.gap_lufs !== null ? ` → ${m.audio.music_likely ? "something keeps playing in the gaps (music bed likely)" : "gaps are quiet"}` : ""}`);
+  if (m.music) lines.push(`- music under the voice, measured from the quiet moments of the audio: ${m.music.verdict === "music" ? "a music bed is present" : m.music.verdict === "no_music" ? "NO music bed (the quiet moments are plain room tone)" : "unclear"} (score ${m.music.score})`);
   if (m.picture) lines.push(`- picture (8-bit, signalstats): mean luma ${m.picture.yavg}, luma spread p10–p90 ${m.picture.yrange}, mean saturation ${m.picture.satavg}`);
   return lines.join("\n");
 }
@@ -189,15 +201,50 @@ export function mergeMeasured(dna: StyleDNA, m: Measured, fromModel: boolean): {
       prov["planner_rules.remove_fillers_and_retakes"] = "measured";
     }
   }
-  if (m.audio && m.audio.gap_lufs !== null && fromModel && m.audio.music_likely !== out.audio_and_color.has_background_music) {
-    // the ear of the model beats our rough gap loudness, but the disagreement is worth a note in the provenance
-    prov["audio_and_color.has_background_music"] = "merged";
-  }
-  if (!fromModel && m.audio?.music_likely) {
-    out.audio_and_color.has_background_music = true;
-    prov["audio_and_color.has_background_music"] = "measured";
-  }
+  const music = decideMusic(out.audio_and_color.has_background_music, m, fromModel);
+  out.audio_and_color.has_background_music = music.value;
+  prov["audio_and_color.has_background_music"] = music.provenance;
   return { dna: out, provenance: prov };
+}
+
+/**
+ * Background music of a reference (stage 23). The local measurement wins: a confident "music" / "no music" from the
+ * audio decides regardless of Gemini (it heard a bed in a reference that had none). When the audio is unclear,
+ * reference mode stays without music (a bed that is not in the reference is worse than a missing one) unless Gemini
+ * says music AND the audio leans that way (score > 0) — or, for profiles made before stage 23, the old gap
+ * loudness heard something.
+ */
+export function decideMusic(model: boolean, m: Pick<Measured, "music" | "audio">, fromModel: boolean): { value: boolean; provenance: "measured" | "merged" | "gemini" | "default" } {
+  const v = m.music;
+  if (v?.verdict === "music") return { value: true, provenance: "measured" };
+  if (v?.verdict === "no_music") return { value: false, provenance: "measured" };
+  const localLean = v ? v.score > 0 : m.audio?.gap_lufs !== null && m.audio?.gap_lufs !== undefined && m.audio.music_likely;
+  if (fromModel && model && localLean) return { value: true, provenance: "merged" };
+  return { value: false, provenance: v || m.audio ? "measured" : fromModel ? "merged" : "default" };
+}
+
+/**
+ * A cached profile from before stage 23 has no music measurement: measure it now when the reference file is at hand
+ * (the CLI, a re-sent file) and re-decide has_background_music; without the file the same rule runs on what the
+ * profile has (no local evidence → no music). Returns the profile unchanged when it is already current.
+ */
+export async function refreshMusic(profile: StyleProfile, file?: string): Promise<{ profile: StyleProfile; changed: boolean }> {
+  if (profile.measured.music?.version === MUSIC_DETECT_VERSION) return { profile, changed: false };
+  const measured: Measured = { ...profile.measured };
+  if (file) {
+    try {
+      const music = await measureMusic(file, null);
+      if (music) measured.music = music;
+    } catch {
+      /* keep what we have */
+    }
+  }
+  const before = profile.dna.audio_and_color.has_background_music;
+  const d = decideMusic(before, measured, profile.gemini !== null);
+  const dna = structuredClone(profile.dna);
+  dna.audio_and_color.has_background_music = d.value;
+  const next = StyleProfileSchema.parse({ ...profile, dna, measured, provenance: { ...profile.provenance, "audio_and_color.has_background_music": d.provenance } });
+  return { profile: next, changed: true };
 }
 
 /** A reduced copy for the model: ≤ 90 s, ≤ 960 px on the long side, 15 fps, mono AAC (captions stay legible). */
@@ -250,7 +297,9 @@ export async function extractStyle(input: ExtractInput, opts: ExtractOptions = {
         const hit = await cache.byAlias(a);
         if (hit) {
           log(`стиль: из кэша (${a})`);
-          return { profile: hit, cached: true, file: cache.file(hit.key) };
+          const r = await refreshMusic(hit, input.file);
+          if (r.changed) await cache.put(r.profile, []);
+          return { profile: r.profile, cached: true, file: cache.file(hit.key) };
         }
       }
     }
@@ -266,7 +315,9 @@ export async function extractStyle(input: ExtractInput, opts: ExtractOptions = {
       if (hit) {
         if (aliases.length) await cache.alias(key, aliases);
         log("стиль: из кэша (тот же файл)");
-        return { profile: hit, cached: true, file: cache.file(key) };
+        const r = await refreshMusic(hit, file);
+        if (r.changed) await cache.put(r.profile, []);
+        return { profile: r.profile, cached: true, file: cache.file(key) };
       }
     }
 

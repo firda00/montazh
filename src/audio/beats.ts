@@ -114,3 +114,45 @@ export function nearestBeat(beats: number[], t: number, maxShift: number): numbe
   for (const b of beats) if (Math.abs(b - t) <= maxShift && (best === null || Math.abs(b - t) < Math.abs(best - t))) best = b;
   return best;
 }
+
+/** Bar phase of a beat grid: which of 4 consecutive beats collects the most low-band onset energy every 4 beats. */
+export function barPhase(env: number[], beats: number[], hop = HOP): number {
+  let best = 0;
+  let bestSum = -Infinity;
+  for (let k = 0; k < Math.min(4, beats.length); k++) {
+    let s = 0;
+    for (let j = k; j < beats.length; j += 4) {
+      const i = Math.round(beats[j] / hop);
+      s += Math.max(env[i] ?? 0, env[i - 1] ?? 0, env[i + 1] ?? 0);
+    }
+    if (s > bestSum) {
+      bestSum = s;
+      best = k;
+    }
+  }
+  return best;
+}
+
+/**
+ * Where a music bed should start (stage 23): past a quiet intro (~15 % into a track that is ≥ 20 s longer than the
+ * reel, at most 30 s) and on a downbeat — the first beat of a bar (the beat whose every-4th neighbours carry the
+ * strongest kick) — so the bed does not come in mid-bar. A track without a clear beat starts at the intro offset.
+ */
+export async function bedStart(file: string, trackSeconds: number, reelSeconds: number): Promise<{ offset: number; bpm: number | null; strength: number }> {
+  const offset0 = trackSeconds > reelSeconds + 20 ? Math.min(30, trackSeconds * 0.15) : 0;
+  const sr = 11025;
+  const seconds = Math.min(24, Math.max(8, trackSeconds - offset0));
+  const raw = await ffmpegBuffer(["-ss", offset0.toFixed(3), "-t", seconds.toFixed(3), "-i", file, "-vn", "-ac", "1", "-ar", String(sr), "-f", "f32le", "-"]);
+  const s = new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + Math.floor(raw.length / 4) * 4));
+  const low = new Float32Array(s.length);
+  let y = 0;
+  const alpha = 1 - Math.exp((-2 * Math.PI * 150) / sr);
+  for (let i = 0; i < s.length; i++) low[i] = y += alpha * (s[i] - y);
+  const e1 = onsetStrength(low, sr);
+  const e2 = onsetStrength(s, sr);
+  const grid = beatGridFromEnvelope(e1.map((v, i) => v + 0.6 * (e2[i] ?? 0)), s.length / sr);
+  if (grid.strength < 0.08 || grid.beats.length < 4) return { offset: Math.round(offset0 * 1000) / 1000, bpm: null, strength: grid.strength };
+  const k = barPhase(e1, grid.beats);
+  const offset = offset0 + grid.beats[k];
+  return { offset: Math.round(offset * 1000) / 1000, bpm: grid.bpm, strength: grid.strength };
+}

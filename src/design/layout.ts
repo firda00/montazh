@@ -54,8 +54,11 @@ import { DesignSpecSchema, type DesignSpec } from "../schemas/index.ts";
 import type { DesignJob } from "./export.ts";
 import type { OutPhrase, OutWord } from "./timeline.ts";
 import type { FontMetrics, Layout, LayoutLine, LayoutOptions, LayoutPage, LayoutTitle, LayoutWord } from "./layout-types.ts";
+import { hookExtent } from "./hyperframes/split.ts";
+import type { FaceTrack } from "./faces.ts";
+import { placeBlock, placeSequence, safeAreaFor, type BlockRequest, type Obstacle, type PlaceOptions } from "./placement.ts";
 
-export const LAYOUT_VERSION = "layout/1";
+export const LAYOUT_VERSION = "layout/2";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 export const DEFAULT_HOLD_GAP = 0.6;
@@ -66,6 +69,35 @@ const SIZE_STEP = 2;
 const PUNCT_LINE_BONUS = 0.15;
 const MIN_SIZE_RATIO = 0.6;
 const TITLE_EXTRA_PAD = 12;
+/** Splits a short text into ≤ maxLines lines of similar length at word boundaries (CTA cards; no font measuring needed). */
+export function splitBalanced(text: string, maxLines: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length < 4 || maxLines < 2) return [words.join(" ")];
+  let best = words.length;
+  let bestDiff = Infinity;
+  for (let i = 1; i < words.length; i++) {
+    const a = words.slice(0, i).join(" ").length;
+    const b = words.slice(i).join(" ").length;
+    const diff = Math.abs(a - b);
+    if (diff <= bestDiff) (bestDiff = diff), (best = i); // ties → longer first line
+  }
+  return [words.slice(0, best).join(" "), words.slice(best).join(" ")];
+}
+
+
+/** The outro CTA text as the composition draws it: balanced lines and a conservative size (0.62 em per character). */
+export function outroText(D: DesignSpec, lang: string, W: number, H: number): { lines: string[]; fontSize: number } | null {
+  const text = (D.outro.text_by_lang[lang] ?? D.outro.text).trim();
+  if (!text) return null;
+  const scale = Math.min(W, H) / 1080;
+  const safeX = Math.round(D.safe_area.x * W);
+  const lines = splitBalanced(text, 2);
+  const maxLineChars = Math.max(...lines.map((l) => l.length));
+  return { lines, fontSize: Math.round(Math.min(D.outro.font_size * scale, (W - 2 * safeX) / (0.62 * maxLineChars)) * 1000) / 1000 };
+}
+
+/** vertical centre of "callout" titles (highlights accents), fraction of the height: above the zoomed hoop */
+export const CALLOUT_ANCHOR_Y = 0.3;
 
 /** Words a caption page/line must not end on (lower-case; apostrophes are normalised to ʻ when matching). */
 export const DEFAULT_FUNCTION_WORDS: Record<string, string[]> = {
@@ -460,6 +492,29 @@ function fitPage(texts: string[], fwEnd: boolean[], punctEnd: boolean[], metrics
   throw new Error("unreachable: the last size step always yields an arrangement");
 }
 
+/**
+ * A smaller block for a page that finds no free spot off the faces: one line at a smaller size if it fits down to
+ * 0.6·base, else the same lines at 0.6·base. null when that would not be smaller.
+ */
+function fitCompact(texts: string[], metrics: FontMetrics, current: FittedPage, base: number, maxWidth: number, popMax: number, popGrow: number): FittedPage | null {
+  const n = texts.length;
+  for (const size of sizeSteps(base)) {
+    if (size > current.fontSize + 1e-9) continue;
+    const widths = texts.map((t) => metrics.measure(t, size));
+    const popScales = widths.map((w) => (popMax > 1 && w > 0 ? Math.min(popMax, 1 + (2 * popGrow) / w) : Math.min(popMax, 1)));
+    const growth = n > 1 ? Math.max(...widths.map((w, i) => Math.max(0, (w * (popScales[i] - 1)) / 2))) : 0;
+    const wordGap = Math.ceil((metrics.spaceWidth(size) + growth) * 100) / 100;
+    if (current.ends.length > 1 && spanWidth(widths, wordGap, 0, n) <= maxWidth) return { fontSize: size, wordGap, widths, popScales, ends: [n] };
+  }
+  const min = base * MIN_SIZE_RATIO;
+  if (current.fontSize - min < 1) return null;
+  const widths = texts.map((t) => metrics.measure(t, min));
+  const popScales = widths.map((w) => (popMax > 1 && w > 0 ? Math.min(popMax, 1 + (2 * popGrow) / w) : Math.min(popMax, 1)));
+  const growth = n > 1 ? Math.max(...widths.map((w, i) => Math.max(0, (w * (popScales[i] - 1)) / 2))) : 0;
+  const wordGap = Math.ceil((metrics.spaceWidth(min) + growth) * 100) / 100;
+  return { fontSize: min, wordGap, widths, popScales, ends: current.ends.map((e) => e) };
+}
+
 // ---------------------------------------------------------------- display windows (rule f)
 
 interface Window {
@@ -585,6 +640,47 @@ export function titleAnchor(D: DesignSpec, faceY?: number): number {
   return r2(clamp(D.captions.anchor_y - 0.17, 0.5, Math.max(0.5, D.captions.anchor_y - 0.1)));
 }
 
+/**
+ * The box a caption page covers (fractions of the frame): its lines at the page size and line height, the backing
+ * pill (padding + margins) when enabled, the stroke, a little for the pop of the active word.
+ */
+export function captionBlock(D: DesignSpec, p: Pick<LayoutPage, "lines" | "fontSize" | "width">, W: number, H: number): { height: number; width: number } {
+  const scale = Math.min(W, H) / 1080;
+  const back = D.captions.backing;
+  const strokePx = D.captions.stroke_width * scale;
+  const lineH = p.fontSize * D.captions.line_height + (back.enabled ? 2 * back.padding * scale + 6 * scale : 0);
+  const h = p.lines.length * lineH + 2 * strokePx + 0.06 * p.fontSize + 8 * scale;
+  const w = p.width + (back.enabled ? 2 * (back.padding + 8) * scale : 0) + 2 * strokePx;
+  return { height: h / H, width: Math.min(1, w / W) };
+}
+
+/** The box a title covers (fractions of the frame), by style: a card / hero title, a "lower" line, a callout label. */
+export function titleBlock(D: DesignSpec, t: Pick<LayoutTitle, "style" | "lines" | "fontSize" | "width">, W: number, H: number, measure: FontMetrics["measure"]): { height: number; width: number } {
+  const scale = Math.min(W, H) / 1080;
+  const strokePx = D.captions.stroke_width * scale;
+  if (t.style === "lower") {
+    const fs = D.captions.font_size * scale * 0.72;
+    const textW = measure(t.lines.join(" "), fs) + 1.2 * fs;
+    const n = Math.max(1, Math.ceil(textW / (W - 2 * D.safe_area.x * W)));
+    return { height: (n * fs * 1.2 + 0.56 * fs) / H, width: Math.min(1, Math.min(W - 2 * D.safe_area.x * W, textW) / W) };
+  }
+  if (t.style === "callout") {
+    const fs = Math.min(t.fontSize, D.titles.font_size * scale) * 0.6;
+    return { height: (fs * 1.25 + 12 * scale) / H, width: Math.min(1, (measure(t.lines.join(" "), fs) + 0.84 * fs) / W) };
+  }
+  const card = t.style === "card";
+  return {
+    height: (t.lines.length * t.fontSize * 1.08 + (card ? 2 * D.titles.padding * scale : 2 * strokePx) + 8 * scale) / H,
+    width: Math.min(1, (t.width + (card ? 2 * (D.titles.padding + 12) * scale : 2 * strokePx)) / W),
+  };
+}
+
+/** A stand-in face for a vertical reel without any face data: where a talking head usually is. */
+export function typicalFaceTrack(split: boolean, duration: number): FaceTrack {
+  const box: [number, number, number, number] = split ? [0.3, 0.6, 0.7, 0.8] : [0.2, 0.22, 0.8, 0.64];
+  return { source: "none", fps: 1, samples: Array.from({ length: Math.ceil(duration) + 2 }, (_, t) => ({ t, boxes: [box] })) };
+}
+
 export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOptions = {}): Layout {
   const D = DesignSpecSchema.parse(job.design ?? {});
   const t = job.timeline;
@@ -606,12 +702,16 @@ export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOp
   const popMax = D.captions.word_animation === "pop" ? D.captions.pop_scale : 1;
   const drafts = t.captions?.enabled === false ? [] : paginatePhrases(t.phrases, { maxWords: D.captions.max_words, maxChars: D.captions.max_chars, functionWords: opts.functionWords });
   const windows = displayWindows(drafts, duration, fps, holdGap, tailHold);
-  const pages: LayoutPage[] = drafts.map((d, index) => {
+  const fitted = drafts.map((d) => {
     const caseLang = captionsLang ?? d.lang;
     const texts = d.words.map((w) => displayWord(w.w, caseLang, D.captions.uppercase));
     const fwEnd = d.words.map((w) => isFw(w.w, d.lang, sets));
     const punctEnd = d.words.map((w) => CLAUSE_END.test(w.w.trim()));
-    const fit = fitPage(texts, fwEnd, punctEnd, metrics, capBase, capMax, popMax, popGrow);
+    return { texts, fit: fitPage(texts, fwEnd, punctEnd, metrics, capBase, capMax, popMax, popGrow) };
+  });
+  const makePage = (index: number, fit: FittedPage): LayoutPage => {
+    const d = drafts[index];
+    const texts = fitted[index].texts;
     const words: LayoutWord[] = d.words.map((w, i) => ({
       text: texts[i],
       raw: w.w,
@@ -636,7 +736,50 @@ export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOp
       lines,
       width: Math.max(...lines.map((l) => l.width)),
     };
-  });
+  };
+  const pages: LayoutPage[] = drafts.map((_, index) => makePage(index, fitted[index].fit));
+
+  // stage 23: pages (and titles below) placed off the faces, inside the Reels safe area
+  const avoid = D.captions.avoid_face;
+  const faces = job.faces;
+  const safe = safeAreaFor(W, H, D.safe_area.y);
+  const strokePx = D.captions.stroke_width * scale;
+  const capBlock = (p: Pick<LayoutPage, "lines" | "fontSize" | "width">) => captionBlock(D, p, W, H);
+  const extra: Obstacle[] = [];
+  if (D.layout === "split" && job.panels) {
+    const hk = hookExtent(W, H, D, job.panels, duration);
+    if (hk) extra.push({ ...hk, lo: hk.lo - 0.01, hi: hk.hi + 0.01 });
+  }
+  // a split speaker's face fills the bottom box: the hair above the face box sits higher than in a full frame
+  const placeOpts: PlaceOptions = { safe, extra, ...(D.layout === "split" ? { padAbove: 0.08 } : {}) };
+  let moved = 0;
+  let compact = 0;
+  let leastOverlap = 0;
+  if (avoid && pages.length) {
+    const reqs: BlockRequest[] = pages.map((p, i) => ({ start: p.dispStart, end: p.dispEnd, ...capBlock(p), preferred: D.captions.anchor_y, clip: drafts[i].clip }));
+    const compacts = new Map<number, LayoutPage>();
+    const alternatives = (i: number): BlockRequest | null => {
+      const c = fitCompact(fitted[i].texts, metrics, fitted[i].fit, capBase, capMax, popMax, popGrow);
+      if (!c) return null;
+      const page = makePage(i, c);
+      compacts.set(i, page);
+      return { ...reqs[i], ...capBlock(page) };
+    };
+    // no face information at all on a vertical reel: assume the usual talking-head face (upper middle; the bottom
+    // box in split) for the captions, so a centred anchor still lands under the chin; titles keep their slots
+    const capFaces = faces && faces.source !== "none" ? faces : H > W ? typicalFaceTrack(D.layout === "split", duration) : faces;
+    const placed = placeSequence(reqs, capFaces, placeOpts, alternatives);
+    placed.forEach((pl, i) => {
+      if (pl.alt && compacts.has(i)) {
+        pages[i] = compacts.get(i)!;
+        compact++;
+      }
+      pages[i].anchorY = pl.y;
+      pages[i].place = pl.rule;
+      if (pl.rule !== "preferred") moved++;
+      if (pl.rule === "least_overlap") leastOverlap++;
+    });
+  }
 
   // titles
   const ttlBase = D.titles.font_size * scale;
@@ -659,13 +802,40 @@ export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOp
     }
     titlesOut.push({ index: titlesOut.length, at, duration: dur, text, style: title.style, fontSize: r2(fit.fontSize), lines, width: r2(width) });
   }
+  const tracked = !!faces && faces.source !== "none";
+  let outroAnchorY: number | undefined;
+  if (avoid && D.layout !== "split") {
+    // captions already placed are obstacles for a title on screen at the same time
+    const capObs: Obstacle[] = pages.map((p) => {
+      const b = capBlock(p);
+      const y = p.anchorY ?? D.captions.anchor_y;
+      return { lo: y - b.height / 2 - 0.01, hi: y + b.height / 2 + 0.01, x0: 0.5 - b.width / 2, x1: 0.5 + b.width / 2, start: p.dispStart, end: p.dispEnd };
+    });
+    for (const t of titlesOut) {
+      const { height, width } = titleBlock(D, t, W, H, metrics.measure);
+      const preferred = t.style === "lower" ? D.captions.anchor_y : t.style === "callout" ? CALLOUT_ANCHOR_Y : tracked ? D.titles.anchor_y : titleAnchor(D, job.face_y);
+      const pl = placeBlock({ start: t.at, end: t.at + t.duration, height, width, preferred }, faces, { ...placeOpts, extra: [...extra, ...capObs] });
+      t.anchorY = pl.y;
+      t.place = pl.rule;
+    }
+    // the outro CTA (centred over the last seconds): off the faces too, the captions under it are obstacles
+    const ot = D.outro.enabled && duration > D.outro.duration + 1 ? outroText(D, language || "ru", W, H) : null;
+    if (ot && tracked) {
+      const start = duration - D.outro.duration;
+      const width = Math.min(1, (Math.max(...ot.lines.map((l) => metrics.measure(l, ot.fontSize))) + 2 * strokePx) / W);
+      const pl = placeBlock({ start, end: duration, height: (ot.lines.length * ot.fontSize * 1.1 + 8 * scale) / H, width, preferred: 0.5 }, faces, { ...placeOpts, extra: [...extra, ...capObs] });
+      if (pl.rule !== "preferred") outroAnchorY = pl.y;
+    }
+  }
 
   return {
     frame: { width: W, height: H, fps, duration },
     captions: { anchorY: D.captions.anchor_y, maxWidth: r2(capMax), baseFontSize: r2(capBase), strokeWidth: r2(D.captions.stroke_width * scale), uppercase: D.captions.uppercase, language },
     titles: { anchorY: titleAnchor(D, job.face_y), maxWidth: r2(ttlMax), baseFontSize: r2(ttlBase) },
+    ...(avoid ? { faces: { source: faces?.source ?? "none", avoid, moved, compact, least_overlap: leastOverlap, safe: { top: r2(safe.top), bottom: r2(safe.bottom) } } } : {}),
     pages,
     titlesOut,
+    ...(outroAnchorY !== undefined ? { outroAnchorY } : {}),
     font: { family: metrics.family, file: metrics.file, weight: D.font.weight, source: metrics.source },
     version: LAYOUT_VERSION,
   };

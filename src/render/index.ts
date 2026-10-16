@@ -7,10 +7,11 @@ import { exportDesignJob, type ExportOptions } from "../design/export.ts";
 import { CutReportSchema } from "../cut/index.ts";
 import type { OverlayRenderer, RenderQuality } from "../design/renderer.ts";
 import { finalizeOutput, measureLoudness, outputPath } from "./finalize.ts";
-import { ffmpeg } from "../lib/ffmpeg.ts";
+import { ffmpeg, ffprobe } from "../lib/ffmpeg.ts";
+import { bedStart } from "../audio/beats.ts";
 import { loadJob } from "../lib/workspace.ts";
 import { loadPreset } from "../plan/presets.ts";
-import { mixSoundtrack } from "../audio/mix.ts";
+import { mixSoundtrack, speechRangesFrom } from "../audio/mix.ts";
 import { isMood, pickMusic, type Mood, type MusicTrack } from "../audio/music.ts";
 import { SFX_KINDS, type SfxCue } from "../audio/sfx.ts";
 import { styledPreset } from "../style/profile.ts";
@@ -87,8 +88,9 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
   const cutFile = path.join(dir, "cut.json");
   const cutReport = (await exists(cutFile)) ? await readJson(cutFile, CutReportSchema) : null;
   const meta = await loadJob(jobId);
-  const { preset } = await styledPreset(jobId, (await loadPreset(opts.preset ?? meta.preset ?? "bold_pop")).preset);
+  const { preset, mapping: styleMapping } = await styledPreset(jobId, (await loadPreset(opts.preset ?? meta.preset ?? "bold_pop")).preset);
   let track: MusicTrack | null | undefined; // undefined = not looked up yet
+  const bedOffsets = new Map<string, number>(); // music file → start (downbeat after the intro), per reel length
 
   for (const output of targets) {
     const warnings: string[] = [];
@@ -117,7 +119,9 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
       const tf = Date.now();
       const fin = await finalizeOutput(rendered.file, rough, outputPath(dir, output.id), { previewAt: (job.timeline.titles[0]?.at ?? 0.5) + 0.6 });
       // background music, ducked under the speech
-      const wantMusic = opts.music ?? (output.audio?.music ?? (output.music.enabled || preset.music_default ? "auto" : "none"));
+      // reference style: the reference decides (stage 23 — its measured music beats the plan's music.enabled, which
+      // followed an older DNA); otherwise the plan or the preset
+      const wantMusic = opts.music ?? (output.audio?.music ?? (styleMapping ? (styleMapping.audio.music ? "auto" : "none") : output.music.enabled || preset.music_default ? "auto" : "none"));
       const plan = output.audio; // sound design decided at plan time (highlights)
       const cues = (output.sfx ?? []).filter((c): c is SfxCue => (SFX_KINDS as readonly string[]).includes(c.kind));
       let musicNote: { music?: string; music_attribution?: string } = {};
@@ -132,16 +136,45 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
           if (!track) warnings.push("музыка не найдена (нет assets/music и нет доступа к Openverse)");
         }
         if (track) {
-          opts.onEvent?.(`    музыка: «${track.title}»${track.creator ? ` — ${track.creator}` : ""} (${track.license})`);
+          // stage 23: the montage bed starts on a downbeat past the intro, follows the speech (no side-chain pumping),
+          // fades over the last clip, and the whole mix gets a linear trim to −14 LUFS instead of a dynamic loudnorm
+          let musicOffset = plan?.music_offset;
+          if (!plan) {
+            const key = `${track.file}|${Math.round(fin.duration)}`;
+            if (!bedOffsets.has(key)) {
+              try {
+                const trackSeconds = Number((await ffprobe(track.file)).format.duration) || 0;
+                bedOffsets.set(key, (await bedStart(track.file, trackSeconds, fin.duration)).offset);
+              } catch {
+                bedOffsets.set(key, 0);
+              }
+            }
+            musicOffset = bedOffsets.get(key);
+          }
+          const words = job.timeline.phrases.flatMap((p) => p.words);
+          const lastClip = job.timeline.clips[job.timeline.clips.length - 1];
+          opts.onEvent?.(`    музыка: «${track.title}»${track.creator ? ` — ${track.creator}` : ""} (${track.license})${!plan && musicOffset ? `, с ${musicOffset.toFixed(1)} с (сильная доля)` : ""}`);
           const tmp = fin.output.replace(/\.mp4$/i, ".music.mp4");
           await mixSoundtrack(
             plan
               ? { video: fin.output, out: tmp, duration: fin.duration, music: track.file, speech: false, musicOffset: plan.music_offset, musicLufs: plan.music_lufs, origGainDb: plan.orig_gain_db, duck: plan.duck, sfx: cues }
-              : { video: fin.output, out: tmp, duration: fin.duration, music: track.file, speech: true, sfx: cues, ...(output.music_duck_db !== undefined ? { musicUnderSpeechDb: output.music_duck_db } : {}) },
+              : {
+                  video: fin.output,
+                  out: tmp,
+                  duration: fin.duration,
+                  music: track.file,
+                  speech: true,
+                  sfx: cues,
+                  ...(musicOffset ? { musicOffset } : {}),
+                  ...(words.length ? { speechRanges: speechRangesFrom(words) } : {}),
+                  ...(lastClip ? { musicFadeOut: lastClip.out_end - lastClip.out_start } : {}),
+                  noFinalLoudnorm: true,
+                  ...(output.music_duck_db !== undefined ? { musicUnderSpeechDb: output.music_duck_db } : {}),
+                },
           );
           await fs.rename(tmp, fin.output);
           // the mix normalises in one pass (dynamic loudnorm lands within ~1 LU): a linear trim brings a planned mix to the target
-          if (plan) {
+          {
             const m = await measureLoudness(fin.output);
             // always through the limiter: the one-pass mix can leave true peaks above 0 dBFS even when the level is right
             if (Number.isFinite(m.input_i)) {

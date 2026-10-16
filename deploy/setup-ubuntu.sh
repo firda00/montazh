@@ -167,7 +167,8 @@ if (( WITH_PY_ASR )); then
   fi
 fi
 
-# ── Python matte sidecar (MediaPipe selfie segmenter, ~250 MB disk, CPU only; split_news cuts the speaker out) ──
+# ── Python matte sidecar (MediaPipe selfie segmenter + BlazeFace, ~250 MB disk, CPU only; split_news cuts the speaker out,
+#    every preset keeps captions off the faces — stage 23) ──
 # The venv lives next to the app (tools/matte/.venv is gitignored, deploy updates keep it). Without it split_news
 # falls back to the plain video with a warning.
 if (( WITH_MATTE )); then
@@ -189,7 +190,7 @@ if (( WITH_MATTE )); then
       sudo -u vedit -H "$MVENV/bin/pip" install -q "numpy>=1.26,<3" "opencv-python-headless==4.12.0.88" "absl-py~=2.3" "flatbuffers~=25.9" "matplotlib>=3.8" certifi
     fi
     if sudo -u vedit -H "$MVENV/bin/python" -I -c "from mediapipe.tasks.python import vision; import cv2" >/dev/null 2>&1; then
-      ok "установлен (модель selfie_segmenter скачается при первом рендере или: tools/matte/.venv/bin/python tools/matte/vedit_matte.py model)"
+      ok "установлен (модели selfie_segmenter и blaze_face_short_range скачаются при первом рендере или: tools/matte/.venv/bin/python tools/matte/vedit_matte.py model)"
     else
       warn "mediapipe не импортируется — split_news пойдёт без вырезания фона; проверьте: $MVENV/bin/python -c 'import mediapipe'"
     fi

@@ -36,7 +36,8 @@
       "uppercase": false,
       "stroke_width": 3,
       "word_animation": "none",
-      "page_animation": "fade_up"
+      "page_animation": "fade_up",
+      "avoid_face": true
     },
     "titles": {
       "anchor_y": 0.14,

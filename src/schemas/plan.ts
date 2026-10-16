@@ -227,6 +227,12 @@ export const DesignSpecSchema = z.object({
       padding: z.number().default(10),
       radius: z.number().default(18),
     }).prefault({}),
+    /**
+     * stage 23: keep every caption page (and titles, callouts) off the faces: a face track of the rough cut
+     * (MediaPipe, or the scenes' focus points as a fallback) moves a page from anchor_y to a free band inside
+     * the Reels safe area (top 8 %, bottom 16 %), with hysteresis between pages
+     */
+    avoid_face: z.boolean().default(true),
     /** soft dark gradient over the lower part of the frame, under the captions */
     shade: z.object({
       enabled: z.boolean().default(false),

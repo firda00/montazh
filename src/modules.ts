@@ -286,6 +286,27 @@ export const MODULES: ModuleDef[] = [
     },
   },
   {
+    id: "faces",
+    stage: "design",
+    title: "Субтитры не закрывают лицо (этап 23)",
+    what: "лица по кадрам черновой нарезки → каждая страница субтитров, титр, плашка и аутро — в свободной полосе вне лица, в безопасной зоне Reels (верх 8 %, низ 16 %), без скачков между страницами",
+    selector: "design.captions.avoid_face (по умолчанию true, все пресеты); VEDIT_MATTE_PYTHON",
+    backends: [
+      {
+        id: "mediapipe",
+        title: "MediaPipe Tasks FaceDetector, BlazeFace short-range (8 кадров/с, кадр + квадратные окна), кэш design/<id>-faces/",
+        deps: "tools/matte/.venv (тот же сайдкар, что вырезание спикера); модель blaze_face_short_range.tflite в tools/matte/models (скачивается один раз, ~230 КБ)",
+        license: "Apache-2.0 (MediaPipe, модель BlazeFace — карточка модели Google)",
+      },
+      { id: "scenes", title: "Запаска без сайдкара: точки фокуса сцен (vision) через кроп нарезки, размер лица по типу плана", deps: "scenes.json с focus", license: "свой код" },
+    ],
+    step: "render",
+    probe: async (env) => {
+      const py = await findMattePython(env);
+      return py ? { active: "mediapipe", ready: true, note: "" } : { active: "scenes", ready: true, note: "сайдкар tools/matte не установлен — лица по точкам фокуса сцен (грубо)" };
+    },
+  },
+  {
     id: "make",
     stage: "design",
     title: "Ролик из ничего",

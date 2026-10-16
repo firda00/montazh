@@ -36,6 +36,7 @@
       "line_height": 1.15,
       "uppercase": true,
       "stroke_width": 6,
+      "avoid_face": true,
       "word_animation": "pop",
       "pop_scale": 1.12,
       "page_animation": "fade_up",

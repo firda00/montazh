@@ -44,6 +44,20 @@ export const MeasuredSchema = z.object({
       music_likely: z.boolean(),
     })
     .nullable(),
+  /**
+   * stage 23: music under the voice from the audio itself (src/audio/musicdetect.ts — tonality of the quiet moments,
+   * silent gaps); beats Gemini's ear. Absent in profiles made before stage 23.
+   */
+  music: z
+    .object({
+      version: z.string(),
+      verdict: z.enum(["music", "no_music", "uncertain"]),
+      score: z.number(),
+      floor_tonality: z.number(),
+      gap_db: z.number().nullable(),
+      reasons: z.array(z.string()),
+    })
+    .optional(),
   picture: z
     .object({
       /** mean luma 0–255, mean luma spread (YHIGH − YLOW), mean saturation 0–~180 (signalstats) */
@@ -85,7 +99,9 @@ export const STYLE_FILE = "style.json";
 export async function loadJobStyle(jobId: string): Promise<{ profile: StyleProfile; mapping: StyleMapping } | null> {
   const f = path.join(jobDir(jobId), STYLE_FILE);
   if (!(await exists(f))) return null;
-  const profile = await readJson(f, StyleProfileSchema);
+  let profile = await readJson(f, StyleProfileSchema);
+  // a style attached before stage 23: re-decide its music with the stage-23 rule (no local evidence → no bed)
+  if (!profile.measured.music) profile = (await (await import("./extract.ts")).refreshMusic(profile)).profile;
   return { profile, mapping: mapStyle(profile.dna) };
 }
 

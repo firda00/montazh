@@ -15,7 +15,8 @@ import { directPanels, fallbackPanels, PanelsSchema, resanitizePanels, type Pane
 import { generateImages } from "../make/images.ts";
 import { findPhotos, photoCreditLine, type PhotoCredit } from "../make/photos.ts";
 import { FRAMES } from "../lib/aspect.ts";
-import { panelFrame } from "./hyperframes/split.ts";
+import { panelFrame, videoOffset } from "./hyperframes/split.ts";
+import { resolveFaceTrack, toOutputFrame, type FaceTrack, type FrameView } from "./faces.ts";
 import { cutoutGeometry, resolveCutout, type CutoutMode } from "./matte.ts";
 import { addCost } from "../lib/cost.ts";
 import { writeJson } from "../lib/workspace.ts";
@@ -43,7 +44,12 @@ export interface DesignJob {
    * split layout: the speaker cut out — `plate` (H.264, width×plate_height: the speaker over the designed
    * background, the box below the seam) and `pop` (VP9+alpha WebM, width×overlap: the head above the seam)
    */
-  cutout?: { plate: string; pop?: string; width: number; plate_height: number; overlap: number };
+  cutout?: { plate: string; pop?: string; width: number; plate_height: number; overlap: number; y0?: number; scaled_height?: number };
+  /**
+   * stage 23: face boxes over time in the COMPOSITION frame (fractions; split layout: mapped into the bottom box),
+   * from the rough cut (MediaPipe) or estimated from scenes.json; captions and titles are placed off them
+   */
+  faces?: FaceTrack;
 }
 
 export interface ExportOptions {
@@ -60,6 +66,8 @@ export interface ExportOptions {
   cutout?: CutoutMode;
   /** progress lines of long design steps (the matte sidecar) */
   onLog?: (line: string) => void;
+  /** face track: "auto" (default) = sidecar → scenes → none; "scenes" = skip the sidecar; "off" = no track */
+  faces?: "auto" | "scenes" | "off";
 }
 
 export async function exportDesignJob(jobId: string, outputId: string, opts: ExportOptions = {}): Promise<DesignJob> {
@@ -83,7 +91,8 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
   // the house style decides the title look: an EDL title left at the schema default ("hero") follows the preset
   if (preset.title_style === "card") timeline.titles = timeline.titles.map((t) => (t.style === "hero" ? { ...t, style: "card" } : t));
   const scenesFile = path.join(dir, "scenes.json");
-  const faceY = (await exists(scenesFile)) ? faceCentreY(usedClips, await readJson(scenesFile, ScenesSchema)) : undefined;
+  const scenes = (await exists(scenesFile)) ? await readJson(scenesFile, ScenesSchema) : undefined;
+  const faceY = scenes ? faceCentreY(usedClips, scenes) : undefined;
 
   const target = output.captions.enabled ? (output.captions.language ?? null) : null;
   let translated = false;
@@ -182,11 +191,32 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
       if (r.cutout) {
         const c = r.cutout;
         opts.onLog?.(`    вырезание фона: ${c.cached ? "из кэша" : `${c.stats.timings.wall_seconds.toFixed(0)} с (${c.stats.timings.realtime_factor}× реального времени)`}, спикер ${Math.round(c.stats.coverage.median * 100)}% кадра`);
-        Object.assign(split, { cutout: { plate: c.plate, ...(c.pop ? { pop: c.pop } : {}), width: c.width, plate_height: c.plateHeight, overlap: c.overlap } });
+        const o = c.stats.output as { y0: number; scaled_height?: number };
+        Object.assign(split, { cutout: { plate: c.plate, ...(c.pop ? { pop: c.pop } : {}), width: c.width, plate_height: c.plateHeight, overlap: c.overlap, y0: o.y0, ...(o.scaled_height ? { scaled_height: o.scaled_height } : {}) } });
       }
     }
   }
-  return { job_id: jobId, rough_path: path.join(dir, `rough_${outputId}.mp4`), timeline, pages, design, preset: preset.name, captions_language: target, translated, warnings, ...(faceY !== undefined ? { face_y: faceY } : {}), ...split };
+  // stage 23: the face track of the rough cut (the framing after crop and punch-ins), mapped into the composition frame
+  let faces: FaceTrack | undefined;
+  if (design.captions.avoid_face && opts.faces !== "off") {
+    const rough = path.join(dir, `rough_${outputId}.mp4`);
+    const clips = usedClips.map((c, i) => ({ ...c, out_start: timeline.clips[i]?.out_start ?? 0, out_end: timeline.clips[i]?.out_end ?? 0 }));
+    const r = await resolveFaceTrack({ rough, cacheDir: path.join(dir, "design", `${outputId}-faces`), clips, scenes, media, aspect: output.aspect }, { ...(opts.faces === "scenes" ? { python: null } : {}), onLog: opts.onLog && ((l) => opts.onLog!(`    ${l}`)) });
+    warnings.push(...r.warnings);
+    if (r.track.source === "mediapipe") opts.onLog?.(`    лица: ${r.cached ? "из кэша" : `${r.seconds?.toFixed(0) ?? "?"} с`}, лицо в ${Math.round((r.track.samples.filter((x) => x.boxes.length).length / Math.max(1, r.track.samples.length)) * 100)}% кадров`);
+    faces = r.track;
+    if (design.layout === "split" && faces.source !== "none") {
+      const W = timeline.width;
+      const H = timeline.height;
+      const cut = (split as { cutout?: DesignJob["cutout"] }).cutout;
+      const view: FrameView =
+        cut && cut.y0 !== undefined
+          ? { kind: "cutout", seam: design.split.seam, overlap: cut.overlap, y0: cut.y0, layerW: cut.width, scaledH: cut.scaled_height ?? Math.round((H * cut.width) / W), frameW: W, frameH: H }
+          : { kind: "split", seam: design.split.seam, offsetPct: videoOffset(faceY, H, Math.round(design.split.seam * H)), frameW: W, frameH: H, roughW: W, roughH: H };
+      faces = toOutputFrame(faces, view);
+    }
+  }
+  return { job_id: jobId, rough_path: path.join(dir, `rough_${outputId}.mp4`), timeline, pages, design, preset: preset.name, captions_language: target, translated, warnings, ...(faceY !== undefined ? { face_y: faceY } : {}), ...split, ...(faces ? { faces } : {}) };
 }
 
 /** Duration-weighted mean of the clips' focus y (each clip's focus = overlap-weighted scene focus); undefined without any focus. */

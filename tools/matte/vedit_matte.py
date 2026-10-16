@@ -15,7 +15,11 @@ Progress goes to stderr; stats go to the --stats JSON; nothing goes to stdout.
            [--head-margin 24] [--analysis-fps 15] [--fps N] [--crf 30]
            [--model models/selfie_segmenter.tflite] [--segmenter mediapipe|key --key-color #RRGGBB]
            [--ffmpeg ffmpeg] [--ffprobe ffprobe] [--max-seconds S]
-  model    downloads the model into tools/matte/models (once)
+  faces    --input video.mp4 --out faces.json [--fps 8] [--max-side 960] [--min-score 0.5] [--tiles 1]
+           face boxes per sample (MediaPipe Tasks FaceDetector, BlazeFace short-range, Apache-2.0): the full frame
+           plus square windows of a tall frame (BlazeFace letterboxes to 128×128), merged by NMS; normalised 0..1.
+           Stage 23: captions are placed off these boxes (src/design/faces.ts, placement.ts)
+  model    downloads the models into tools/matte/models (once; --faces 0 skips BlazeFace)
   selftest synthetic clip (a coloured "person" on a moving background) through the whole pipeline
            with the colour-key segmenter (no model, no network), prints the stats JSON to stderr
 
@@ -23,7 +27,7 @@ The layer is the rough cut scaled to --width and cropped to --crop-h rows starti
 sidecar picks so the head top lands --head-margin rows below the crop top; its first --overlap rows (the
 pop strip) sit above the seam, so the head breaks over the top panel ("pop-out"), the rest is the plate.
 
-Licences: MediaPipe (Apache-2.0), selfie_segmenter.tflite (Apache-2.0, model card:
+Licences: MediaPipe (Apache-2.0), blaze_face_short_range.tflite (Apache-2.0), selfie_segmenter.tflite (Apache-2.0, model card:
 https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Selfie%20Segmentation.pdf),
 OpenCV (Apache-2.0), NumPy (BSD-3-Clause).
 """
@@ -48,6 +52,11 @@ MODELS_DIR = Path(os.environ.get("VEDIT_MATTE_MODELS", HERE / "models"))
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite"
 MODEL_FILE = MODELS_DIR / "selfie_segmenter.tflite"
 SEG = 256  # selfie_segmenter input side
+# face track for caption placement (faces command): BlazeFace short-range, Apache-2.0
+# (model card: https://storage.googleapis.com/mediapipe-assets/MediaPipe%20BlazeFace%20Model%20Card%20(Short%20Range).pdf)
+FACE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
+FACE_MODEL_FILE = MODELS_DIR / "blaze_face_short_range.tflite"
+FACES_VERSION = "faces/1"
 
 
 def log(msg: str) -> None:
@@ -69,11 +78,11 @@ def cv():
 
 # ---------------------------------------------------------------- model / segmenters
 
-def ensure_model(path: Path) -> Path:
+def ensure_model(path: Path, url: str = MODEL_URL) -> Path:
     if path.exists() and path.stat().st_size > 10_000:
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    log(f"downloading {MODEL_URL}")
+    log(f"downloading {url}")
     tmp = path.with_suffix(".part")
     try:
         import certifi
@@ -82,7 +91,7 @@ def ensure_model(path: Path) -> Path:
         ctx = ssl.create_default_context(cafile=certifi.where())
     except Exception:
         ctx = None
-    with urllib.request.urlopen(MODEL_URL, timeout=60, context=ctx) as r, open(tmp, "wb") as f:
+    with urllib.request.urlopen(url, timeout=60, context=ctx) as r, open(tmp, "wb") as f:
         f.write(r.read())
     tmp.replace(path)
     return path
@@ -703,9 +712,128 @@ def cmd_selftest(a: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+# ---------------------------------------------------------------- faces command (caption placement)
+
+class MediaPipeFaces:
+    """BlazeFace short-range (MediaPipe Tasks FaceDetector): RGB uint8 → [(x0, y0, x1, y1, score)] in pixels."""
+
+    name = "mediapipe-blazeface-short"
+
+    def __init__(self, model: Path, min_score: float):
+        from mediapipe.tasks.python import BaseOptions, vision
+        import mediapipe as mp
+
+        self._mp = mp
+        opts = vision.FaceDetectorOptions(
+            base_options=BaseOptions(model_asset_buffer=model.read_bytes()),
+            running_mode=vision.RunningMode.IMAGE,
+            min_detection_confidence=min_score,
+            min_suppression_threshold=0.3,
+        )
+        self._det = vision.FaceDetector.create_from_options(opts)
+
+    def __call__(self, rgb: np.ndarray) -> list:
+        img = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
+        out = []
+        for d in self._det.detect(img).detections:
+            b = d.bounding_box
+            score = float(d.categories[0].score) if d.categories else 0.0
+            out.append((float(b.origin_x), float(b.origin_y), float(b.origin_x + b.width), float(b.origin_y + b.height), score))
+        return out
+
+    def close(self) -> None:
+        try:
+            self._det.close()
+        except Exception:
+            pass
+
+
+def iou(a, b) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / ua if ua > 0 else 0.0
+
+
+def nms(boxes: list, thr: float = 0.3) -> list:
+    """highest score first; a box overlapping a kept one (IoU > thr, or mostly inside it) is dropped"""
+    kept: list = []
+    for b in sorted(boxes, key=lambda x: -x[4]):
+        inside = lambda k: (min(b[2], k[2]) - max(b[0], k[0])) * (min(b[3], k[3]) - max(b[1], k[1])) > 0.6 * (b[2] - b[0]) * (b[3] - b[1])
+        if all(iou(b, k) <= thr and not inside(k) for k in kept):
+            kept.append(b)
+    return kept
+
+
+def tiles_for(w: int, h: int) -> list:
+    """square windows over the long side (BlazeFace letterboxes to 128×128: a face in a tall frame gets few pixels)"""
+    if max(w, h) < 1.3 * min(w, h):
+        return []
+    side = min(w, h)
+    long = max(w, h)
+    n = max(2, int(np.ceil(long / side * 1.5)))
+    starts = sorted({int(round(i * (long - side) / (n - 1))) for i in range(n)})
+    return [(0, s, side, side) if h > w else (s, 0, side, side) for s in starts]
+
+
+def cmd_faces(a: argparse.Namespace) -> dict:
+    """Face boxes of a video at --fps (normalised 0..1 to the frame), for keeping captions off faces."""
+    t0 = time.time()
+    info = probe(a.ffprobe, a.input)
+    long = max(info["w"], info["h"])
+    s = min(1.0, a.max_side / long)
+    w = int(round(info["w"] * s / 2) * 2)
+    h = int(round(info["h"] * s / 2) * 2)
+    det = MediaPipeFaces(ensure_model(Path(a.model), FACE_MODEL_URL), a.min_score)
+    tiles = tiles_for(w, h) if a.tiles else []
+    samples = []
+    with_face = 0
+    try:
+        reader = FrameReader(a.ffmpeg, a.input, f"fps={a.fps:g},scale={w}:{h}:flags=area", w, h, a.max_seconds)
+        for i, fr in enumerate(reader):
+            boxes = list(det(fr))
+            for (x, y, tw, th) in tiles:
+                for b in det(fr[y : y + th, x : x + tw]):
+                    boxes.append((b[0] + x, b[1] + y, b[2] + x, b[3] + y, b[4]))
+            # tiny boxes are false positives at this scale (a face < 3 % of the short side cannot carry a caption problem)
+            boxes = [b for b in boxes if (b[2] - b[0]) >= 0.03 * min(w, h)]
+            boxes = nms(boxes)
+            faces = [[round(max(0.0, b[0] / w), 4), round(max(0.0, b[1] / h), 4), round(min(1.0, b[2] / w), 4), round(min(1.0, b[3] / h), 4), round(b[4], 3)] for b in boxes]
+            if faces:
+                with_face += 1
+            samples.append({"t": round(i / a.fps, 3), "faces": faces})
+            if i % max(1, int(a.fps * 5)) == 0:
+                log(f"faces: {i / a.fps:.0f} s, {len(faces)} face(s)")
+        err = reader.error()
+        if not samples:
+            raise RuntimeError(f"no frames decoded: {err[-300:]}")
+    finally:
+        det.close()
+    stats = {
+        "version": FACES_VERSION,
+        "detector": MediaPipeFaces.name,
+        "width": info["w"],
+        "height": info["h"],
+        "analysis": [w, h],
+        "tiles": len(tiles),
+        "fps": a.fps,
+        "duration": info["duration"],
+        "samples": samples,
+        "with_face": round(with_face / max(1, len(samples)), 3),
+        "wall_seconds": round(time.time() - t0, 2),
+    }
+    write_json(a.out, stats)
+    log(f"faces: {len(samples)} samples, face in {stats['with_face'] * 100:.0f}%, {stats['wall_seconds']} s")
+    return stats
+
+
 def cmd_model(a: argparse.Namespace) -> None:
     p = ensure_model(Path(a.model))
     log(f"model ok: {p} ({p.stat().st_size} bytes)")
+    if a.faces:
+        q = ensure_model(Path(a.face_model), FACE_MODEL_URL)
+        log(f"model ok: {q} ({q.stat().st_size} bytes)")
 
 
 def main() -> None:
@@ -747,14 +875,29 @@ def main() -> None:
     s.add_argument("--out-dir", required=True)
     s.add_argument("--ffmpeg", default=os.environ.get("FFMPEG_PATH", "ffmpeg"))
     s.add_argument("--ffprobe", default=os.environ.get("FFPROBE_PATH", "ffprobe"))
+    f = sub.add_parser("faces")
+    f.add_argument("--input", required=True)
+    f.add_argument("--out", required=True, help="JSON: face boxes per sample (normalised to the frame)")
+    f.add_argument("--fps", type=float, default=8.0)
+    f.add_argument("--max-side", type=int, default=960, help="analysis size of the long side")
+    f.add_argument("--min-score", type=float, default=0.5)
+    f.add_argument("--tiles", type=int, default=1, help="also scan square windows of a tall/wide frame (small faces)")
+    f.add_argument("--model", default=str(FACE_MODEL_FILE))
+    f.add_argument("--ffmpeg", default=os.environ.get("FFMPEG_PATH", "ffmpeg"))
+    f.add_argument("--ffprobe", default=os.environ.get("FFPROBE_PATH", "ffprobe"))
+    f.add_argument("--max-seconds", type=float)
     d = sub.add_parser("model")
     d.add_argument("--model", default=str(MODEL_FILE))
+    d.add_argument("--face-model", default=str(FACE_MODEL_FILE))
+    d.add_argument("--faces", type=int, default=1, help="also the BlazeFace model for the faces command")
     a = ap.parse_args()
     try:
         if a.cmd == "matte":
             cmd_matte(a)
         elif a.cmd == "selftest":
             cmd_selftest(a)
+        elif a.cmd == "faces":
+            cmd_faces(a)
         else:
             cmd_model(a)
     except Exception as e:  # one readable line for the Node side

@@ -47,6 +47,34 @@ export interface MixOptions {
    * bed steady with no side-chain (a reference without ducking).
    */
   musicUnderSpeechDb?: number | null;
+  /**
+   * stage 23, montage: where the speech is (output seconds, words merged across short pauses). With it the bed is not
+   * side-chained (a compressor keyed by the voice pumps on every syllable of a jump-cut track) but automated: it sits
+   * BED_UNDER_SPEECH_DB below the speech while someone talks and comes up to MONTAGE_BED_LUFS in real pauses, with
+   * 0.3 s ramps. The final level is a linear trim (renderOutputs), not a second dynamic loudnorm.
+   */
+  speechRanges?: { start: number; end: number }[];
+  /** fade-out length of the bed at the end (s); default min(2.5, D/4) — montage: the last clip */
+  musicFadeOut?: number;
+  /** skip the final loudnorm (the caller trims linearly) */
+  noFinalLoudnorm?: boolean;
+}
+
+/** montage bed in pauses (LUFS, before the final −14) and how far below the speech it sits while someone talks */
+export const MONTAGE_BED_LUFS = -21;
+export const BED_UNDER_SPEECH_DB = -18;
+/** speech level the rough cut is normalised to (finalize) */
+const SPEECH_LUFS = -14;
+
+/** Words → speech ranges: pauses shorter than `bridge` are bridged (the bed does not bob up between words). */
+export function speechRangesFrom(words: { start: number; end: number }[], bridge = 0.6): { start: number; end: number }[] {
+  const out: { start: number; end: number }[] = [];
+  for (const w of [...words].sort((a, b) => a.start - b.start)) {
+    const last = out[out.length - 1];
+    if (last && w.start - last.end < bridge) last.end = Math.max(last.end, w.end);
+    else out.push({ start: w.start, end: w.end });
+  }
+  return out.map((r) => ({ start: Math.round(r.start * 1000) / 1000, end: Math.round(r.end * 1000) / 1000 }));
 }
 
 /** music bed level (LUFS, before the final −14) for a reference's ducking depth; see MixOptions.musicUnderSpeechDb */
@@ -68,12 +96,13 @@ export interface MixGraph {
 
 const gainFilter = (db?: number) => (db ? `,volume=${db.toFixed(1)}dB` : "");
 
-/** Music volume automation: −10 dB inside each range with 0.25 s ramps (eval per frame). */
-export function duckFilter(ranges?: { start: number; end: number }[]): string {
+/** Music volume automation: `db` (default −10 dB) inside each range with `ramp` s ramps (eval per frame). */
+export function duckFilter(ranges?: { start: number; end: number }[], db = -10, ramp = 0.25): string {
   if (!ranges?.length) return "";
   const r = (n: number) => String(Math.round(n * 1000) / 1000);
-  const dips = ranges.map((x) => `clip(min((t-${r(x.start - 0.25)})/0.25,(${r(x.end + 0.25)}-t)/0.25),0,1)`).join("+");
-  return `,volume='1-0.684*min(1,${dips})':eval=frame`;
+  const depth = Math.round((1 - 10 ** (db / 20)) * 1000) / 1000;
+  const dips = ranges.map((x) => `clip(min((t-${r(x.start - ramp)})/${ramp},(${r(x.end + ramp)}-t)/${ramp}),0,1)`).join("+");
+  return `,volume='1-${depth}*min(1,${dips})':eval=frame`;
 }
 
 /** The ffmpeg command for a mix (pure: the caller probes the video and resolves effect files). */
@@ -103,10 +132,14 @@ export function buildMixGraph(o: MixOptions, ctx: { hasAudio: boolean; sfxFile: 
   if (o.music) {
     inputs.push("-stream_loop", "-1", ...(o.musicOffset ? ["-ss", o.musicOffset.toFixed(3)] : []), "-i", o.music);
     const styled = o.musicUnderSpeechDb !== undefined && speech && !voice;
-    const lufs = o.musicLufs ?? (styled ? bedLufsForDucking(o.musicUnderSpeechDb ?? null) : voice ? VOICE_BED.lufs : speech ? -24 : -16);
+    // stage 23: a montage bed automated from the speech ranges instead of a side-chain
+    const automated = !!o.speechRanges && speech && !voice && !o.duck && !(styled && o.musicUnderSpeechDb === null);
+    const under = styled && typeof o.musicUnderSpeechDb === "number" ? o.musicUnderSpeechDb : BED_UNDER_SPEECH_DB;
+    const lufs = o.musicLufs ?? (automated ? MONTAGE_BED_LUFS : styled ? bedLufsForDucking(o.musicUnderSpeechDb ?? null) : voice ? VOICE_BED.lufs : speech ? -24 : -16);
     // under a narrator the bed stays up to the last words and fades over the tail only
-    const fadeOut = Math.min(voice ? 1.0 : 2.5, D / 4);
-    chains.push(`[${idx}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS,loudnorm=I=${lufs}:TP=-2:LRA=11,afade=t=in:st=0:d=${voice ? 0.15 : 0.8},afade=t=out:st=${(D - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}${duckFilter(o.duck)}[mus]`);
+    const fadeOut = o.musicFadeOut !== undefined ? Math.min(Math.max(o.musicFadeOut, 0.8), 3.5, D / 2) : Math.min(voice ? 1.0 : 2.5, D / 4);
+    const automation = automated ? duckFilter(o.speechRanges, Math.min(0, SPEECH_LUFS + under - lufs), 0.3) : duckFilter(o.duck);
+    chains.push(`[${idx}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS,loudnorm=I=${lufs}:TP=-2:LRA=11,afade=t=in:st=0:d=${voice ? 0.15 : 0.8}:curve=qsin,afade=t=out:st=${(D - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}:curve=qsin${automation}[mus]`);
     idx++;
     if (speech) {
       chains.push(`[0:a]aresample=48000,aformat=channel_layouts=stereo${voice ? "[sp]" : ",asplit=2[sp][sc]"}`);
@@ -120,6 +153,10 @@ export function buildMixGraph(o: MixOptions, ctx: { hasAudio: boolean; sfxFile: 
       const B = VOICE_BED;
       chains.push(`[mus]${keys.shift()}sidechaincompress=threshold=${B.threshold}:ratio=${B.ratio}:attack=${B.attack}:release=${B.release}:knee=${B.knee}:makeup=1[duck]`);
       mixIn.push("[duck]");
+    } else if (automated) {
+      // the bed follows the speech ranges (volume automation above): the speech split goes unused
+      chains.push(`[sc]anullsink`);
+      mixIn.push("[mus]");
     } else if (styled && o.musicUnderSpeechDb === null) {
       // the reference keeps its bed steady under the voice: no side-chain (the speech split goes unused)
       chains.push(`[sc]anullsink`);
@@ -153,7 +190,7 @@ export function buildMixGraph(o: MixOptions, ctx: { hasAudio: boolean; sfxFile: 
 
   if (!mixIn.length) return { args: ["-i", o.video, "-c", "copy", "-movflags", "+faststart", o.out], cues: [], copy: true };
   const target = o.targetLufs ?? -14;
-  chains.push(`${mixIn.join("")}amix=inputs=${mixIn.length}:normalize=0:duration=longest,atrim=0:${D.toFixed(3)},loudnorm=I=${target}:TP=-1.5:LRA=11[aout]`);
+  chains.push(`${mixIn.join("")}amix=inputs=${mixIn.length}:normalize=0:duration=longest,atrim=0:${D.toFixed(3)}${o.noFinalLoudnorm ? "" : `,loudnorm=I=${target}:TP=-1.5:LRA=11`}[aout]`);
   return {
     args: [...inputs, "-filter_complex", chains.join(";"), "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t", D.toFixed(3), "-movflags", "+faststart", o.out],
     cues,
