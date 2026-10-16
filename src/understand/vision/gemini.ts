@@ -7,11 +7,16 @@ import { fill, loadPrompt } from "../../lib/prompts.ts";
 import type { Highlights, Scenes } from "../../schemas/index.ts";
 import type { AnalysisChunk, AnalysisContext, VisionProvider, VisionResult } from "./types.ts";
 
-/** The "slim" default: cheapest Gemini that understands video. Override with VEDIT_VISION_MODEL. */
-export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite";
+/**
+ * The "slim" default: cheapest Gemini that understands video. Override with VEDIT_VISION_MODEL.
+ * gemini-2.5-flash-lite answers 404 "no longer available to new users" (checked 2026-10-16) → 3.5-flash-lite.
+ */
+export const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite";
 
 /** USD per million tokens (text/image/video input; output incl. thinking). Source: ai.google.dev/gemini-api/docs/pricing, cached 2026-10. Unknown models are logged unpriced (usd 0). */
 export const GEMINI_PRICES: Record<string, { in: number; out: number }> = {
+  "gemini-3.5-flash-lite": { in: 0.3, out: 2.5 }, // checked 2026-10-16
+  "gemini-3.8-flash": { in: 0.75, out: 3.75 }, // until 2026-12-31, then 1.50 / 7.50
   "gemini-2.5-flash-lite": { in: 0.1, out: 0.4 },
   "gemini-2.5-flash": { in: 0.3, out: 2.5 },
   "gemini-2.5-pro": { in: 1.25, out: 10 },

@@ -61,7 +61,8 @@ test("mapAnswer: one scene per shot, missing shots stay honest, focus clamped, h
 test("priceUsage: known models priced from the table, unknown ones unpriced", () => {
   const p = priceUsage(DEFAULT_GEMINI_MODEL, { promptTokenCount: 1_000_000, candidatesTokenCount: 500_000, thoughtsTokenCount: 500_000 });
   assert.equal(p.priced, true);
-  assert.ok(Math.abs(p.usd - 0.5) < 1e-9);
+  assert.ok(Math.abs(p.usd - (0.3 + 2.5)) < 1e-9, "3.5-flash-lite: $0.30 in + $2.50 out per million");
+  assert.ok(Math.abs(priceUsage("gemini-2.5-flash-lite", { promptTokenCount: 1_000_000, candidatesTokenCount: 1_000_000 }).usd - 0.5) < 1e-9);
   assert.deepEqual(priceUsage("gemini-9-ultra", { promptTokenCount: 10 }), { usd: 0, priced: false });
 });
 
@@ -127,7 +128,7 @@ test("GeminiVisionProvider: inline request shape, structured answer mapped, cost
   assert.equal(r.scenes[0].focus, undefined);
   assert.deepEqual(r.highlights, [{ start: 1, end: 2.5, reason: "pattern", score: 0.3 }]);
   assert.equal(r.cost.model, DEFAULT_GEMINI_MODEL);
-  assert.ok(Math.abs(r.cost.usd - (1200 * 0.1 + 150 * 0.4) / 1e6) < 1e-12);
+  assert.ok(Math.abs(r.cost.usd - (1200 * 0.3 + 150 * 2.5) / 1e6) < 1e-12);
   assert.deepEqual(r.cost.units, { chunk_seconds: 2, input_tokens: 1200, output_tokens: 150 });
   const left = (await fs.readdir(dir)).filter((f) => f.startsWith("vedit-gemini-"));
   assert.deepEqual(left, [], "temporary clip is deleted");

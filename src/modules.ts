@@ -135,7 +135,7 @@ export const MODULES: ModuleDef[] = [
     what: "описание шотов, точки фокуса (auto_face), highlights",
     selector: "--vision auto|gemini|agy|stub, VEDIT_VISION; auto = ключ → agy → stub",
     backends: [
-      { id: "gemini", title: "Gemini API", deps: "GEMINI_API_KEY", license: "условия Gemini API; по умолчанию gemini-2.5-flash-lite" },
+      { id: "gemini", title: "Gemini API", deps: "GEMINI_API_KEY", license: "условия Gemini API; по умолчанию gemini-3.5-flash-lite" },
       { id: "agy", title: "Antigravity CLI", deps: "agy + вход Google", license: "условия Antigravity; $0, подписка" },
       { id: "stub", title: "Заглушка", deps: "—", license: "—" },
     ],
