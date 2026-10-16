@@ -49,6 +49,7 @@ export async function writeHyperframesProject(job: DesignJob, layout: Layout, di
   }
 
   let panelRel: Record<number, string> | undefined;
+  let cutoutRel: { plate: string; pop?: string } | undefined;
   let extraFontFaces: string | undefined;
   if (job.design.layout === "split") {
     panelRel = {};
@@ -57,10 +58,18 @@ export async function writeHyperframesProject(job: DesignJob, layout: Layout, di
       await linkOrCopy(f, path.join(dir, rel));
       panelRel[Number(i)] = rel;
     }
+    if (job.cutout) {
+      cutoutRel = { plate: `assets/${path.basename(job.cutout.plate)}` };
+      await linkOrCopy(job.cutout.plate, path.join(dir, cutoutRel.plate));
+      if (job.cutout.pop) {
+        cutoutRel.pop = `assets/${path.basename(job.cutout.pop)}`;
+        await linkOrCopy(job.cutout.pop, path.join(dir, cutoutRel.pop));
+      }
+    }
     const { installFonts } = await import("../../make/fonts.ts");
     extraFontFaces = await installFonts(dir, ["playfair-italic", "mono"]);
   }
-  const html = composeHyperframes(job, layout, { videoRel, fontRel, gsapRel: "assets/gsap.min.js", panelRel, extraFontFaces });
+  const html = composeHyperframes(job, layout, { videoRel, fontRel, gsapRel: "assets/gsap.min.js", panelRel, extraFontFaces, cutoutRel });
   const entry = path.join(dir, "index.html");
   await fs.writeFile(entry, html);
   const name = `${job.job_id}-${job.timeline.output_id}`;

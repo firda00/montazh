@@ -100,7 +100,7 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
     try {
       opts.onEvent?.(`▸ design ${output.id}`);
       const tb = Date.now();
-      const job = await exportDesignJob(jobId, output.id, { translate: opts.translate ?? true, llm: opts.llm, model: opts.model, preset: opts.preset, panelImages: opts.panelImages });
+      const job = await exportDesignJob(jobId, output.id, { translate: opts.translate ?? true, llm: opts.llm, model: opts.model, preset: opts.preset, panelImages: opts.panelImages, cutout: opts.cutout, onLog: opts.onEvent });
       warnings.push(...job.warnings);
       const projectDir = path.join(dir, "design", output.id);
       await fs.rm(projectDir, { recursive: true, force: true });

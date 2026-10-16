@@ -9,6 +9,7 @@ import { systemFontFile } from "./lib/sysfont.ts";
 import { HF_BIN, ROOT } from "./design/hyperframes/project.ts";
 import { whisperPaths } from "./understand/whisper.ts";
 import { findAsrPython } from "./understand/asr.ts";
+import { findMattePython } from "./design/matte.ts";
 import { findAgy } from "./understand/vision/agy.ts";
 import { claudeLoginAvailable } from "./plan/backend/index.ts";
 import { piperExe, PIPER_DIR } from "./voice/piper.ts";
@@ -103,6 +104,8 @@ export async function runDoctor(opts: { env?: NodeJS.ProcessEnv; bot?: boolean; 
   add("piper", "Piper TTS (локальный голос)", piperOk, false, piperOk ? piper : `скачается при первом синтезе в ${path.dirname(PIPER_DIR)} (${process.platform}-${process.arch})`);
   const py = await findAsrPython(env);
   add("asr-python", "Python-сайдкар tools/asr (faster-whisper, говорящие)", !!py, false, py ?? "не установлен (необязательно; на сервере: setup-ubuntu.sh --with-python-asr)");
+  const mpy = await findMattePython(env);
+  add("matte-python", "Python-сайдкар tools/matte (вырезание спикера в сплите, MediaPipe)", !!mpy, false, mpy ?? "не установлен (необязательно: split_news идёт с обычным видео; на сервере: setup-ubuntu.sh)");
 
   // fonts
   const inter = path.join(ROOT, "assets", "fonts", "Inter-Variable.ttf");

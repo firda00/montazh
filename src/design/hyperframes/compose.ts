@@ -16,6 +16,8 @@ export interface ComposeAssets {
   /** split layout: panel images (index → project-relative path) and the extra @font-face rules */
   panelRel?: Record<number, string>;
   extraFontFaces?: string;
+  /** split layout: the speaker cutout — the plate replaces the rough cut as the a-roll, the pop strip goes above the seam */
+  cutoutRel?: { plate: string; pop?: string };
 }
 
 export const COMPOSE_VERSION = "hf-compose/1";
@@ -108,10 +110,15 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
   });
 
   const ttlHtml: string[] = [];
+  // the cutout files are cut to their boxes at 1080 px wide: scale them to this frame
+  const cutoutBox =
+    D.layout === "split" && job.cutout && assets.cutoutRel
+      ? { plateHeight: r3(job.cutout.plate_height * (W / job.cutout.width)), popHeight: assets.cutoutRel.pop ? r3(job.cutout.overlap * (W / job.cutout.width)) : 0 }
+      : undefined;
   // split layout: the hook title replaces the EDL titles (they would collide with the top panels)
   const split =
     D.layout === "split" && job.panels
-      ? buildSplitLayer({ W, H, duration: DUR, design: D, panels: job.panels, images: assets.panelRel ?? {}, credits: Object.fromEntries((job.panel_credits ?? []).map((c) => [c.beat, shortPhotoCredit(c)])), faceY: job.face_y, serifFamily: `'VPlayfairItalic', serif`, monoFamily: `'VMono', monospace`, displayFamily: `'${layout.font.family.replace(/['"<>]/g, "")}', sans-serif` })
+      ? buildSplitLayer({ W, H, duration: DUR, design: D, panels: job.panels, images: assets.panelRel ?? {}, credits: Object.fromEntries((job.panel_credits ?? []).map((c) => [c.beat, shortPhotoCredit(c)])), faceY: job.face_y, serifFamily: `'VPlayfairItalic', serif`, monoFamily: `'VMono', monospace`, displayFamily: `'${layout.font.family.replace(/['"<>]/g, "")}', sans-serif`, cutout: cutoutBox })
       : null;
   if (split) tw.push(...split.tweens);
   if (!split) layout.titlesOut.forEach((t) => {
@@ -254,7 +261,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       data-duration="${DUR}"
       data-fps="${FPS}"
     >
-      <video id="a-roll" src="${assets.videoRel}" data-start="0" data-duration="${DUR}" data-track-index="0" muted playsinline></video>
+      <video id="a-roll" src="${cutoutBox ? assets.cutoutRel!.plate : assets.videoRel}" data-start="0" data-duration="${DUR}" data-track-index="0" muted playsinline></video>${cutoutBox?.popHeight ? `\n      <video id="a-pop" src="${assets.cutoutRel!.pop}" data-start="0" data-duration="${DUR}" data-track-index="8" muted playsinline></video>` : ""}
 ${D.captions.shade.enabled && layout.pages.length ? `      <section id="shade" class="clip shade" data-start="0" data-duration="${DUR}" data-track-index="1"></section>\n` : ""}${capHtml.join("\n")}
 ${ttlHtml.join("\n")}${split ? `\n${split.sections.join("\n")}` : ""}
 ${outroHtml.join("\n")}

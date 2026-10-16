@@ -16,6 +16,7 @@ import { generateImages } from "../make/images.ts";
 import { findPhotos, photoCreditLine, type PhotoCredit } from "../make/photos.ts";
 import { FRAMES } from "../lib/aspect.ts";
 import { panelFrame } from "./hyperframes/split.ts";
+import { cutoutGeometry, resolveCutout, type CutoutMode } from "./matte.ts";
 import { addCost } from "../lib/cost.ts";
 import { writeJson } from "../lib/workspace.ts";
 import type { DesignSpec } from "../schemas/index.ts";
@@ -37,6 +38,11 @@ export interface DesignJob {
   panel_images?: Record<number, string>;
   /** split layout: real photos used on panels (CC BY needs attribution: lines go into the description) */
   panel_credits?: PhotoCredit[];
+  /**
+   * split layout: the speaker cut out — `plate` (H.264, width×plate_height: the speaker over the designed
+   * background, the box below the seam) and `pop` (VP9+alpha WebM, width×overlap: the head above the seam)
+   */
+  cutout?: { plate: string; pop?: string; width: number; plate_height: number; overlap: number };
 }
 
 export interface ExportOptions {
@@ -49,6 +55,10 @@ export interface ExportOptions {
   panelImages?: boolean;
   llm?: StructuredFn;
   model?: string;
+  /** split layout: speaker cutout mode instead of the preset's design.split.cutout */
+  cutout?: CutoutMode;
+  /** progress lines of long design steps (the matte sidecar) */
+  onLog?: (line: string) => void;
 }
 
 export async function exportDesignJob(jobId: string, outputId: string, opts: ExportOptions = {}): Promise<DesignJob> {
@@ -90,7 +100,7 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
 
   const pages = timeline.phrases.flatMap((p) => paginate(p, design.captions.max_words, design.captions.max_chars).map((words) => ({ start: words[0].start, end: words[words.length - 1].end, words })));
   // split layout: the director decides what the top half shows; images via Antigravity (cached per output)
-  let split: { panels?: Panels; panel_images?: Record<number, string>; panel_credits?: PhotoCredit[] } = {};
+  let split: { panels?: Panels; panel_images?: Record<number, string>; panel_credits?: PhotoCredit[]; cutout?: DesignJob["cutout"] } = {};
   if (design.layout === "split") {
     const panelsFile = path.join(dir, "design", `${outputId}.panels.json`);
     const imgDir = path.join(dir, "design", `${outputId}-panels`);
@@ -160,6 +170,19 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
     // 3) everything else (and any missing picture) is a code-rendered graphic
     const usedCredits = credits.filter((c) => images[c.beat] && panels.panels[c.beat]?.source === "photo");
     split = { panels, panel_images: images, panel_credits: usedCredits };
+    // 4) the speaker cut out over a designed background (MediaPipe matte, cached per rough cut)
+    const mode = opts.cutout ?? design.split.cutout;
+    if (mode !== "off") {
+      const g = cutoutGeometry(1080, 1920, design.split.seam, design.split.pop_out);
+      const rough = path.join(dir, `rough_${outputId}.mp4`);
+      const r = await resolveCutout(mode, rough, path.join(dir, "design", `${outputId}-cutout`), { width: g.width, height: g.height, overlap: g.overlap, bg: design.split.panel_bg, accent: design.split.accent }, { onLog: opts.onLog && ((l) => opts.onLog!(`    ${l}`)) });
+      warnings.push(...r.warnings);
+      if (r.cutout) {
+        const c = r.cutout;
+        opts.onLog?.(`    вырезание фона: ${c.cached ? "из кэша" : `${c.stats.timings.wall_seconds.toFixed(0)} с (${c.stats.timings.realtime_factor}× реального времени)`}, спикер ${Math.round(c.stats.coverage.median * 100)}% кадра`);
+        Object.assign(split, { cutout: { plate: c.plate, ...(c.pop ? { pop: c.pop } : {}), width: c.width, plate_height: c.plateHeight, overlap: c.overlap } });
+      }
+    }
   }
   return { job_id: jobId, rough_path: path.join(dir, `rough_${outputId}.mp4`), timeline, pages, design, preset: preset.name, captions_language: target, translated, warnings, ...(faceY !== undefined ? { face_y: faceY } : {}), ...split };
 }

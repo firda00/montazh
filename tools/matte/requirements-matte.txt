@@ -1,0 +1,18 @@
+# vedit matte sidecar (tools/matte/vedit_matte.py) — Python 3.11/3.12, Windows x64 and Linux aarch64/x86_64.
+#
+# Install order (MediaPipe's own pins pull opencv-contrib-python with GUI libraries and sounddevice/PortAudio,
+# which a headless server does not need):
+#   python -m venv tools/matte/.venv
+#   tools/matte/.venv/bin/pip install --no-deps mediapipe==1.1.1
+#   tools/matte/.venv/bin/pip install -r tools/matte/requirements-matte.txt
+#
+# mediapipe 1.1.1 ships py3-none wheels: win_amd64, manylinux_2_28_aarch64 (Ubuntu 24.04 / glibc 2.39 is fine),
+# manylinux_2_28_x86_64, macOS arm64. The legacy mp.solutions API is gone in 1.x: the sidecar uses the Tasks API.
+# Licences: MediaPipe Apache-2.0, OpenCV Apache-2.0, NumPy BSD-3, absl-py Apache-2.0, flatbuffers Apache-2.0,
+# matplotlib PSF-based (imported by mediapipe.tasks.vision at import time), certifi MPL-2.0.
+numpy>=1.26,<3
+opencv-python-headless==4.12.0.88
+absl-py~=2.3
+flatbuffers~=25.9
+matplotlib>=3.8
+certifi

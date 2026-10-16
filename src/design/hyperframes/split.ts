@@ -31,6 +31,12 @@ export interface SplitInput {
   serifFamily: string;
   monoFamily: string;
   displayFamily: string;
+  /**
+   * the speaker cut out: `plateHeight` px of plate (opaque, the speaker already over the designed
+   * background) from the seam down, and `popHeight` px of alpha strip right above the seam (the head
+   * breaking over the top panel; 0 = none)
+   */
+  cutout?: { plateHeight: number; popHeight: number };
 }
 
 export interface SplitLayer {
@@ -163,6 +169,16 @@ export function buildSplitLayer(s: SplitInput): SplitLayer {
         return `right:${cardX - 18}px; top:${cardY + cardH - 250}px;`;
     }
   };
+  const cut = s.cutout;
+  // cutout z-order: top background 0 → panels and the seam line 1 → plate 2 → pop strip 3 (the head over the
+  // panel frame and the seam line) → captions 4 → hook 5 → outro 6. The designed background of the bottom box
+  // (panel colour, the same 60 px grid, a darker floor, an accent glow behind the head) is baked into the plate.
+  const popCss = cut?.popHeight ? `
+      #a-pop { position: absolute; left: 0; top: ${r1(seam - cut.popHeight)}px; width: ${s.W}px; height: ${cut.popHeight}px; object-fit: fill; z-index: 3; }` : "";
+  const cutCss = cut
+    ? `
+      .sp-bg { z-index: 0; } .sp-panel { z-index: 1; } .sp-seam { z-index: 1; } .cap, .shade { z-index: 4; } .sp-hook { z-index: 5; } .outro { z-index: 6; }${popCss}`
+    : "";
   const css = `
       .sp-bg { position: absolute; left: 0; top: 0; width: ${s.W}px; height: ${seam + 40}px; display: block; background-color: ${SP.panel_bg}; background-image: linear-gradient(rgba(255,255,255,0.045) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.045) 1px, transparent 1px), radial-gradient(70% 60% at 50% 40%, ${accent}33, transparent 70%); background-size: 60px 60px, 60px 60px, 100% 100%; }
       .sp-panel { position: absolute; left: 0; top: 0; width: ${s.W}px; height: ${seam}px; overflow: visible; }
@@ -189,8 +205,12 @@ export function buildSplitLayer(s: SplitInput): SplitLayer {
       .sp-hook { position: absolute; inset: 0; pointer-events: none; }
       .sp-hookin { position: absolute; left: 60px; right: 60px; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 0; }
       .sp-hl { display: block; white-space: nowrap; line-height: 0.98; letter-spacing: -0.02em; text-shadow: 0 6px 30px rgba(0,0,0,0.85), 0 2px 6px rgba(0,0,0,0.9); }
-      .sp-seam { position: absolute; left: 0; top: ${seam - 1}px; width: ${s.W}px; height: 2px; display: block; background: linear-gradient(90deg, transparent, ${accent}, transparent); }`;
-  const videoCss = `#a-roll { position: absolute; left: 0; top: ${seam}px; width: ${s.W}px; height: ${s.H - seam}px; object-fit: cover; object-position: 50% ${videoOffset(s.faceY, s.H, seam)}%; }`;
+      .sp-seam { position: absolute; left: 0; top: ${seam - 1}px; width: ${s.W}px; height: 2px; display: block; background: linear-gradient(90deg, transparent, ${accent}, transparent); }${cutCss}`;
+  // with a cutout the a-roll is the plate, already cut to the bottom box. No CSS filter on the videos: a
+  // drop-shadow rim drew a purple halo around the hair and cost ~70 ms a frame
+  const videoCss = cut
+    ? `#a-roll { position: absolute; left: 0; top: ${seam}px; width: ${s.W}px; height: ${cut.plateHeight}px; object-fit: fill; z-index: 2; }`
+    : `#a-roll { position: absolute; left: 0; top: ${seam}px; width: ${s.W}px; height: ${s.H - seam}px; object-fit: cover; object-position: 50% ${videoOffset(s.faceY, s.H, seam)}%; }`;
   sections.push(`      <section id="sp-seam" class="clip sp-seam" data-start="0" data-duration="${fmt(s.duration)}" data-track-index="7"></section>`);
   return { css, videoCss, sections, tweens };
 }

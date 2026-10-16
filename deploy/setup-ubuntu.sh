@@ -2,7 +2,7 @@
 # vedit: one-time (and re-runnable) preparation of a fresh Ubuntu 24.04 server for the Telegram bot.
 # Target: Oracle Cloud Always Free, VM.Standard.A1.Flex (ARM64 / aarch64), 1–2 OCPU, 6–12 GB RAM, no GPU.
 #
-#   sudo bash setup-ubuntu.sh [--with-python-asr] [--swap-gb 8] [--no-ufw] [--chrome playwright|ppa]
+#   sudo bash setup-ubuntu.sh [--with-python-asr] [--no-matte] [--swap-gb 8] [--no-ufw] [--chrome playwright|ppa]
 #
 # Idempotent: every step checks what is already there. Safe for SSH: port 22 stays open
 # (ufw allows 22/tcp before it is enabled; Oracle's own iptables rules in /etc/iptables/rules.v4 are left as is).
@@ -10,11 +10,13 @@
 #   swapfile (when RAM < 16 GB) · apt upgrade · build tools, ffmpeg, python3-venv, fonts · Node.js 24 (NodeSource)
 #   · headless Chrome for ARM64 (Playwright's chromium headless shell, pinned; fallback: xtradeb PPA chromium .deb —
 #   never the snap) · system user `vedit`, /opt/vedit/{app,workspace,…} · unattended-upgrades · journald size cap
+#   · matte sidecar tools/matte/.venv (MediaPipe speaker cutout for split_news; --no-matte skips it)
 #   · ufw (22 only) · systemd units vedit-bot.service + vedit-cleanup.timer (enabled; the bot starts once the
 #   code and .env are deployed by deploy/deploy.sh).
 set -euo pipefail
 
 WITH_PY_ASR=0
+WITH_MATTE=1
 SWAP_GB=8
 USE_UFW=1
 CHROME_MODE=playwright
@@ -25,10 +27,11 @@ VEDIT_HOME=/opt/vedit
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --with-python-asr) WITH_PY_ASR=1 ;;
+    --no-matte) WITH_MATTE=0 ;;
     --swap-gb) SWAP_GB="$2"; shift ;;
     --no-ufw) USE_UFW=0 ;;
     --chrome) CHROME_MODE="$2"; shift ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -161,6 +164,35 @@ if (( WITH_PY_ASR )); then
     sudo -u vedit -H "$VENV/bin/pip" install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu
     sudo -u vedit -H "$VENV/bin/pip" install -q faster-whisper speechbrain scipy
     ok "установлен (сайдкар включается сам; whisper.cpp остаётся основным)"
+  fi
+fi
+
+# ── Python matte sidecar (MediaPipe selfie segmenter, ~250 MB disk, CPU only; split_news cuts the speaker out) ──
+# The venv lives next to the app (tools/matte/.venv is gitignored, deploy updates keep it). Without it split_news
+# falls back to the plain video with a warning.
+if (( WITH_MATTE )); then
+  step "Python-сайдкар вырезания фона (tools/matte/.venv)"
+  MVENV="$VEDIT_HOME/app/tools/matte/.venv"
+  MREQ="$VEDIT_HOME/app/tools/matte/requirements-matte.txt"
+  if [[ -x "$MVENV/bin/python" ]] && sudo -u vedit -H "$MVENV/bin/python" -I -c "import mediapipe, cv2" >/dev/null 2>&1; then
+    ok "уже есть: $MVENV"
+  else
+    sudo -u vedit mkdir -p "$VEDIT_HOME/app/tools/matte"
+    sudo -u vedit -H python3 -m venv "$MVENV"
+    sudo -u vedit -H "$MVENV/bin/pip" install -q --upgrade pip
+    # mediapipe 1.1.1 has a manylinux_2_28_aarch64 wheel; --no-deps skips its opencv-contrib-python (GUI libs) and
+    # sounddevice pins — the headless OpenCV and the rest come from requirements-matte.txt
+    sudo -u vedit -H "$MVENV/bin/pip" install -q --no-deps "mediapipe==1.1.1"
+    if [[ -f "$MREQ" ]]; then
+      sudo -u vedit -H "$MVENV/bin/pip" install -q -r "$MREQ"
+    else
+      sudo -u vedit -H "$MVENV/bin/pip" install -q "numpy>=1.26,<3" "opencv-python-headless==4.12.0.88" "absl-py~=2.3" "flatbuffers~=25.9" "matplotlib>=3.8" certifi
+    fi
+    if sudo -u vedit -H "$MVENV/bin/python" -I -c "from mediapipe.tasks.python import vision; import cv2" >/dev/null 2>&1; then
+      ok "установлен (модель selfie_segmenter скачается при первом рендере или: tools/matte/.venv/bin/python tools/matte/vedit_matte.py model)"
+    else
+      warn "mediapipe не импортируется — split_news пойдёт без вырезания фона; проверьте: $MVENV/bin/python -c 'import mediapipe'"
+    fi
   fi
 fi
 

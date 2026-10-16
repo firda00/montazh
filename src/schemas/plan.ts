@@ -253,6 +253,13 @@ export const DesignSpecSchema = z.object({
     panel_bg: z.string().default("#0D0A1A"),
     accent: z.string().default("#8B6CFF"),
     image_style: z.string().default("cinematic, moody purple and blue neon light, shallow depth of field, high detail"),
+    /**
+     * speaker cutout (MediaPipe matte, tools/matte): "on" cuts the speaker out over a designed background,
+     * "auto" does it when the matte passes the quality check (plain video otherwise), "off" never
+     */
+    cutout: z.enum(["off", "on", "auto"]).default("off"),
+    /** how far the cut-out head may break above the seam, fraction of the height */
+    pop_out: z.number().min(0).max(0.15).default(0.06),
   }).prefault({}),
   /** call-to-action card over the last seconds (overlay only: the cut and its audio are untouched) */
   outro: z.object({

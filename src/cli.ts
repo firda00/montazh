@@ -11,6 +11,7 @@ import { revise, type ReviseResult } from "./plan/revise.ts";
 import { PlanError, selectBackend, DEFAULT_MODEL, type BackendChoice, type Effort } from "./plan/backend/index.ts";
 import { renderOutputs, RenderReportSchema, type RenderReport } from "./render/index.ts";
 import { HyperFramesRenderer } from "./render/hyperframes.ts";
+import type { CutoutMode } from "./design/matte.ts";
 import type { RenderQuality } from "./design/renderer.ts";
 import { createJob, exists, jobDir, loadJob, readJson, runStep, writeJson } from "./lib/workspace.ts";
 import { EdlSchema, MediaSchema, CostSchema, TranscriptSchema, HighlightsSchema, PlanReportSchema, ReviseReportSchema, type Edl, type Scenes, type Transcript, type PlanReport } from "./schemas/index.ts";
@@ -106,6 +107,7 @@ interface RenderCliOpts {
   renderer: string;
   bgMusic?: string;
   design?: string;
+  cutout?: string;
 }
 
 function withRenderOptions(cmd: Command) {
@@ -115,19 +117,21 @@ function withRenderOptions(cmd: Command) {
     .option("--no-translate", "не переводить субтитры на язык из плана")
     .option("--renderer <name>", "hyperframes (другие — после этапа 4)", "hyperframes")
     .option("--bg-music <m>", "музыка под речью: auto | upbeat|chill|… | файл | none (по умолчанию — из пресета)")
-    .option("--design <preset>", "пресет оформления вместо пресета задачи (например split_news)");
+    .option("--design <preset>", "пресет оформления вместо пресета задачи (например split_news)")
+    .option("--cutout <mode>", "сплит: вырезать фон спикера (MediaPipe) — on | off | auto (по умолчанию — из пресета)");
 }
 
 function makeRenderer(o: RenderCliOpts) {
   if (o.renderer !== "hyperframes") throw new Error(`рендерер "${o.renderer}" не подключён; доступен: hyperframes`);
   if (!["draft", "looks", "delivery"].includes(o.quality)) throw new Error("--quality: ожидается draft | looks | delivery");
+  if (o.cutout !== undefined && !["on", "off", "auto"].includes(o.cutout)) throw new Error("--cutout: ожидается on | off | auto");
   return new HyperFramesRenderer({ workers: o.workers });
 }
 
 async function runRender(jobId: string, o: RenderCliOpts & { only?: string[] }, edl?: Edl) {
   const renderer = makeRenderer(o);
   await renderer.prepare();
-  const r = await runStep(jobId, "render", () => renderOutputs(jobId, { renderer, quality: o.quality, only: o.only, translate: o.translate, edl, music: o.bgMusic, preset: o.design, onEvent: (l) => console.log(l) }));
+  const r = await runStep(jobId, "render", () => renderOutputs(jobId, { renderer, quality: o.quality, only: o.only, translate: o.translate, edl, music: o.bgMusic, preset: o.design, cutout: o.cutout as CutoutMode | undefined, onEvent: (l) => console.log(l) }));
   printRenderReport(r);
   return r;
 }

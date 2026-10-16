@@ -82,7 +82,9 @@
       "seam": 0.5,
       "panel_bg": "#0D0A1A",
       "accent": "#8B6CFF",
-      "image_style": "documentary news photo, natural light, real materials and places, 35 mm, no neon, no glow, no surreal elements, no text"
+      "image_style": "documentary news photo, natural light, real materials and places, 35 mm, no neon, no glow, no surreal elements, no text",
+      "cutout": "auto",
+      "pop_out": 0.07
     }
   }
 }

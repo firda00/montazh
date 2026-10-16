@@ -15,3 +15,5 @@ tools/avatar/.cache/
 __pycache__/
 tools/voice/bin/
 tools/voice/models/
+tools/matte/.venv/
+tools/matte/models/

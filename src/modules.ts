@@ -5,6 +5,7 @@ import { promptNames, promptsHash } from "./lib/prompts.ts";
 import { exists, readJson, WORKSPACE_ROOT } from "./lib/workspace.ts";
 import { claudeLoginAvailable } from "./plan/backend/index.ts";
 import { HF_BIN } from "./design/hyperframes/project.ts";
+import { findMattePython, MATTE_MODEL } from "./design/matte.ts";
 import { findAsrPython } from "./understand/asr.ts";
 import { selectAsr } from "./understand/index.ts";
 import { selectVisionProvider } from "./understand/vision/index.ts";
@@ -243,6 +244,28 @@ export const MODULES: ModuleDef[] = [
     probe: async () => {
       const ok = await has(HF_BIN);
       return { active: "hyperframes", ready: ok, note: ok ? "" : "npm install" };
+    },
+  },
+  {
+    id: "cutout",
+    stage: "render",
+    title: "Вырезание спикера (сплит)",
+    what: "split_news: спикер без фона поверх фирменного фона, голова «выходит» над стыком; auto — только при надёжной маске",
+    selector: "design.split.cutout off|on|auto (split_news: auto), --cutout on|off|auto; VEDIT_MATTE_PYTHON",
+    backends: [
+      {
+        id: "mediapipe",
+        title: "MediaPipe Tasks ImageSegmenter, selfie_segmenter.tflite (256×256, 15 кадров/с) + цветной guided filter, сглаживание во времени → VP9 WebM с альфой",
+        deps: "tools/matte/.venv: mediapipe 1.1.1 (--no-deps), opencv-python-headless, numpy, absl-py, flatbuffers, matplotlib, certifi; модель в tools/matte/models (скачивается один раз)",
+        license: "Apache-2.0 (MediaPipe, модель selfie_segmenter — карточка модели Google), OpenCV Apache-2.0, NumPy BSD-3",
+      },
+    ],
+    step: "render",
+    probe: async (env) => {
+      const py = await findMattePython(env);
+      if (!py) return { active: "mediapipe", ready: false, note: "сайдкар tools/matte не установлен — сплит идёт с обычным видео" };
+      const model = await has(MATTE_MODEL);
+      return { active: "mediapipe", ready: true, note: model ? "" : "модель скачается при первом запуске" };
     },
   },
   {
