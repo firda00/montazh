@@ -840,7 +840,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
 
   function draftFor(uid: number, n: number): MontageDraft {
     const s = sess(uid);
-    const mode: MontageMode = s.intent ?? (n > 1 ? "viral" : "reels");
+    // 🏀 from the menu preselects highlights for one game video; several videos default to one clip from all of them
+    const mode: MontageMode = n > 1 ? (s.intent === "pp" ? "pp" : "viral") : (s.intent ?? "reels");
     return { mode, count: 3, seconds: mode === "reels" ? 30 : 60, aspect: aspectOf(uid), style: PRESET_STYLE[styleOf(uid)] ?? "pop" };
   }
 
@@ -849,7 +850,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const L = T(uid);
     const s = sess(uid);
     // keep the user's choices when the card is refreshed; only the default mode follows the batch size
-    const d = s.card && s.draft ? { ...s.draft, mode: s.intent ?? (s.draft.mode === "reels" && n > 1 ? "viral" : s.draft.mode) } : draftFor(uid, n);
+    const d = s.card && s.draft ? { ...s.draft, mode: n > 1 && (s.draft.mode === "reels" || s.draft.mode === "hl") ? ("viral" as const) : s.draft.mode } : draftFor(uid, n);
     const text = n > 1 ? L.batchSaved(n) : L.videoSaved;
     const kb = encodeKb(montageKb(L, d));
     if (s.card) {
@@ -1215,7 +1216,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
           return void (await say(chatId, L.styleSet(want)));
         }
         case "clear":
-          patchSess(uid, { sources: [], batch_closed: false, durations: {} });
+          patchSess(uid, { sources: [], batch_closed: false, durations: {}, intent: undefined, draft: undefined, card: undefined });
           return void (await say(chatId, L.cleared));
         case "voice":
         case "voices":

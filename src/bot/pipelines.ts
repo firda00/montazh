@@ -6,6 +6,11 @@ import { PlanError } from "../plan/backend/types.ts";
 import { MediaSchema, TranscriptSchema, type Edl, type Transcript } from "../schemas/index.ts";
 import type { Aspect } from "../lib/aspect.ts";
 import { STRINGS } from "./i18n.ts";
+import { NoHighlightsError } from "../highlights/index.ts";
+
+/** what the planner gets when "highlights" footage turns out to have no game moments (someone talking, etc.) */
+export const SPEECH_FALLBACK_INSTRUCTION =
+  "Смонтируй один ролик 30–60 секунд из самых сильных моментов речи: хук в первые 2 секунды, каждый клип — законченная фраза, динамичный темп, финал с законченной мыслью. Субтитры на языке речи.";
 
 // same hints as src/cli.ts (cli.ts runs commander on import, so the table is duplicated here)
 export const HINTS: Partial<Record<PlanError["code"], string>> = {
@@ -236,7 +241,17 @@ export const runFullPipeline: PipelineFn = async ({ source, sources, instruction
   // sports / action footage ("как мы играем в баскет", "броски", "трюки"): highlights mode, no speech plan
   const { highlightsIntent, wantsHighlights } = await import("../highlights/intent.ts");
   const intent = many ? null : highlightsIntent(instruction);
-  if (intent === "strong") return runHighlightsBot({ source, instruction, progress, onJob, signal, log });
+  if (intent === "strong") {
+    try {
+      return await runHighlightsBot({ source, instruction, progress, onJob, signal, log });
+    } catch (err) {
+      if (!(err instanceof NoHighlightsError)) throw err;
+      // talking-head or other non-game footage sent as "highlights": make a normal montage instead of failing
+      log(`  ${err.message} — обычный монтаж`);
+      await progress("▸ игровых моментов не нашлось — делаю обычный монтаж по речи…");
+      instruction = SPEECH_FALLBACK_INSTRUCTION;
+    }
+  }
   const job = await createJob(many ? `combined:${sources!.length} videos` : source, { prompt: instruction, preset });
   onJob(job.id);
   log(`job ${job.id}`);
@@ -262,7 +277,15 @@ export const runFullPipeline: PipelineFn = async ({ source, sources, instruction
   // "лучшие моменты" of a video that is mostly not speech → highlights on the same job
   if (intent === "weak") {
     const spoken = u.transcript.segments.reduce((s, seg) => s + seg.words.reduce((a, w) => a + Math.max(0, w.end - w.start), 0), 0);
-    if (wantsHighlights(intent, spoken / Math.max(1, media.duration))) return runHighlightsBot({ source, instruction, progress, onJob, signal, log, jobId: job.id, media });
+    if (wantsHighlights(intent, spoken / Math.max(1, media.duration))) {
+      try {
+        return await runHighlightsBot({ source, instruction, progress, onJob, signal, log, jobId: job.id, media });
+      } catch (err) {
+        if (!(err instanceof NoHighlightsError)) throw err;
+        log(`  ${err.message} — обычный монтаж`);
+        await progress("▸ игровых моментов не нашлось — делаю обычный монтаж по речи…");
+      }
+    }
   }
 
   await progress("▸ план…");

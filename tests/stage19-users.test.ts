@@ -199,6 +199,20 @@ test("closed beta: TELEGRAM_ALLOWED_USERS ignores strangers (messages and button
 
 // ── buttons ────────────────────────────────────────────────────────────────────
 
+test("🏀 preselects highlights only for one video; a second video switches the card to one clip; /clear forgets the mode", async () => {
+  const { tg, bot } = await boot({ onboarding: false, quotas: false, pipeline: async () => assert.fail("no run") });
+  await bot.handleUpdate(tg.press(4, "H:highlights", 1));
+  await bot.handleUpdate(tg.video(4, "G1"));
+  assert.equal(bot.session(4).draft?.mode, "hl");
+  await bot.handleUpdate(tg.video(4, "G2"));
+  assert.equal(bot.session(4).draft?.mode, "viral", "several videos are not a highlights batch");
+  await bot.handleUpdate(tg.text(4, "/clear"));
+  assert.equal(bot.session(4).intent, undefined);
+  await bot.handleUpdate(tg.video(4, "T1"));
+  assert.equal(bot.session(4).draft?.mode, "reels", "after /clear the 🏀 choice is gone");
+  bot.close();
+});
+
 test("montage by buttons: video → option card; mode / format / style toggles edit the keyboard; ▶️ starts the run with the composed instruction", async () => {
   const runs: PipelineArgs[] = [];
   const out = await outputFile("output_reel_1.mp4");

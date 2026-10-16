@@ -180,6 +180,14 @@ export interface HighlightsResult {
   plan: HighlightEdl;
 }
 
+/** No moment worth a highlight was found in the footage (events: how many the detector returned). */
+export class NoHighlightsError extends Error {
+  constructor(readonly events: number) {
+    super(`в видео не нашлось игровых моментов для хайлайтов (событий: ${events})`);
+    this.name = "NoHighlightsError";
+  }
+}
+
 export async function planHighlights(jobId: string, media: Media, o: HighlightsOptions = {}): Promise<HighlightsResult> {
   const t0 = Date.now();
   const log = o.onLog ?? (() => {});
@@ -204,6 +212,8 @@ export async function planHighlights(jobId: string, media: Media, o: HighlightsO
 
   // 2. selection by rules
   const sel = selectHighlights(ev.events, { target: target + 2, min: Math.max(15, target - 5), max: target + 10, aspect });
+  // nothing game-like in the footage (e.g. someone talking to the camera): the caller falls back to a speech montage
+  if (!sel.picks.length) throw new NoHighlightsError(ev.events.length);
   notes.push(...sel.notes);
   let picks: HighlightPick[] = sel.picks;
   let title = o.title ?? brief.title ?? "";
