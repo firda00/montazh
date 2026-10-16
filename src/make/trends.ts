@@ -8,9 +8,11 @@ import { findAgy } from "../understand/vision/agy.ts";
 import { LANGUAGE_NAMES } from "./script.ts";
 
 /**
- * Trend research without an API key: the Antigravity CLI agent searches the web and reads pages
- * (its own tools), and answers with JSON. ~60–120 s. YouTube Data API becomes a second backend
- * when a key is available.
+ * Trend research. Two backends:
+ *   agy            — without an API key: the Antigravity CLI agent searches the web and reads pages (its own
+ *                    tools) and answers with JSON. ~60–120 s. Used whenever agy is installed (dev laptop).
+ *   gemini-search  — with GEMINI_API_KEY only (server mode, no agy): Gemini + Google Search grounding,
+ *                    src/make/trends-gemini.ts. Same TrendsSchema; fact sources from the grounding citations.
  */
 
 export const TrendsSchema = z.object({
@@ -34,6 +36,8 @@ const JSON_SCHEMA = {
 
 export interface TrendsOptions {
   language?: string;
+  /** Gemini grounding options (server mode / no agy): key, models, fetch for tests */
+  gemini?: import("./trends-gemini.ts").GeminiTrendsOptions;
   model?: string;
   bin?: string;
   run?: AgyRunner;
@@ -46,11 +50,28 @@ export interface TrendsResult {
   wall_seconds: number;
   usage: { input_tokens: number; output_tokens: number };
   model: string;
+  /** which backend answered (default agy) */
+  provider?: "agy" | "gemini-search";
+  /** API cost; agy runs on the subscription ($0) */
+  usd?: number;
+}
+
+/** Which trends backend this machine has: agy (never in server mode), else Gemini with a key, else none. */
+export async function trendsBackend(env: NodeJS.ProcessEnv = process.env): Promise<"agy" | "gemini-search" | null> {
+  if (await findAgy(env)) return "agy";
+  if ((env.GEMINI_API_KEY || env.GOOGLE_API_KEY || "").trim()) return "gemini-search";
+  return null;
 }
 
 export async function researchTrends(topic: string, opts: TrendsOptions = {}): Promise<TrendsResult> {
   const bin = opts.bin ?? (await findAgy());
-  if (!bin && !opts.run) throw new AgyError("trends: Antigravity CLI (agy) не найден — исследование трендов недоступно, запустите с --no-trends");
+  if (!bin && !opts.run) {
+    if (opts.gemini?.key || (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim()) {
+      const { researchTrendsGemini } = await import("./trends-gemini.ts");
+      return researchTrendsGemini(topic, { language: opts.language, ...opts.gemini });
+    }
+    throw new AgyError("trends: нет Antigravity CLI (agy) и нет GEMINI_API_KEY — исследование трендов недоступно, запустите с --no-trends");
+  }
   const model = opts.model ?? "gemini-3.8-flash-medium";
   const run = opts.run ?? defaultAgyRunner(bin!, opts.timeoutMs ?? 600_000);
   const language = LANGUAGE_NAMES[opts.language ?? "ru"] ?? opts.language ?? "Russian";
@@ -69,7 +90,7 @@ export async function researchTrends(topic: string, opts: TrendsOptions = {}): P
     const raw = result.structured_output && typeof result.structured_output === "object" ? result.structured_output : extractJson(result.response ?? "");
     const trends = TrendsSchema.parse(raw);
     const u = result.usage ?? {};
-    return { trends, wall_seconds: Math.round(((result.duration_seconds ?? (Date.now() - t0) / 1000) + Number.EPSILON) * 10) / 10, usage: { input_tokens: u.input_tokens ?? 0, output_tokens: (u.output_tokens ?? 0) + (u.thinking_tokens ?? 0) }, model };
+    return { trends, wall_seconds: Math.round(((result.duration_seconds ?? (Date.now() - t0) / 1000) + Number.EPSILON) * 10) / 10, usage: { input_tokens: u.input_tokens ?? 0, output_tokens: (u.output_tokens ?? 0) + (u.thinking_tokens ?? 0) }, model, provider: "agy", usd: 0 };
   } finally {
     await fs.rm(cwd, { recursive: true, force: true }).catch(() => {});
   }

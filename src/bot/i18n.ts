@@ -234,6 +234,8 @@ ${TTS_KEYS_HELP}`
   quotaExceeded: (long: boolean, need: number, have: number) =>
     `Дневной лимит ${long ? "длинных задач" : "задач"} исчерпан, а кредитов не хватает: нужно ${need}, есть ${have}. Лимит обновится завтра. Скоро: оплата — 💳 Баланс.`,
   paidNote: (n: number, left: number) => `Списано кредитов: ${n}, осталось ${left}.`,
+  userDailyCap: (n: number) => `Сегодня вы уже запустили ${n} задач — это дневной максимум. Лимит обновится завтра.`,
+  budgetPaused: "Сервис на сегодня исчерпал дневной бюджет на ИИ — новые задачи принимаются завтра. Уже запущенные доделаются.",
   busy: "У вас уже есть задача в работе и две в очереди — дождитесь результата или отмените (/cancel).",
 
   kind: { run: "🎬 Монтаж", make: "✨ Ролик по теме", revise: "✏️ Правка", avatar: "🧑 Аватар", avatar_import: "🧑 Монтаж аватара" } as Record<string, string>,
@@ -487,6 +489,8 @@ const uz: Strings = {
   quotaExceeded: (long: boolean, need: number, have: number) =>
     `Kunlik ${long ? "uzun vazifalar" : "vazifalar"} limiti tugadi, kreditlar esa yetmaydi: ${need} kerak, ${have} bor. Limit ertaga yangilanadi. Tez orada: to‘lov — 💳 Balans.`,
   paidNote: (n: number, left: number) => `${n} kredit yechildi, ${left} qoldi.`,
+  userDailyCap: (n: number) => `Bugun siz allaqachon ${n} ta vazifa boshladingiz — bu kunlik maksimum. Limit ertaga yangilanadi.`,
+  budgetPaused: "Xizmat bugungi AI byudjetini tugatdi — yangi vazifalar ertaga qabul qilinadi. Boshlanganlari yakunlanadi.",
   busy: "Sizda bitta vazifa bajarilmoqda va ikkitasi navbatda — natijani kuting yoki bekor qiling (/cancel).",
 
   kind: { run: "🎬 Montaj", make: "✨ Mavzu bo‘yicha rolik", revise: "✏️ Tuzatish", avatar: "🧑 Avatar", avatar_import: "🧑 Avatar montaji" },
@@ -738,6 +742,8 @@ const en: Strings = {
   quotaExceeded: (long: boolean, need: number, have: number) =>
     `The daily limit of ${long ? "long jobs" : "jobs"} is used up and there aren’t enough credits: ${need} needed, ${have} available. The limit resets tomorrow. Payments are coming soon — 💳 Balance.`,
   paidNote: (n: number, left: number) => `Credits charged: ${n}, left: ${left}.`,
+  userDailyCap: (n: number) => `You have already started ${n} jobs today — that is the daily maximum. The limit resets tomorrow.`,
+  budgetPaused: "The service has used up today’s AI budget — new jobs are accepted again tomorrow. Jobs already started will finish.",
   busy: "You already have one job running and two in the queue — wait for the result or cancel (/cancel).",
 
   kind: { run: "🎬 Edit", make: "✨ Video on a topic", revise: "✏️ Revision", avatar: "🧑 Avatar", avatar_import: "🧑 Avatar edit" },

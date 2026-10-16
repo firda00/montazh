@@ -152,7 +152,7 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
         const r = await generateImages(todo, imgDir, { style: panels.image_style || design.split.image_style });
         for (const [b, f] of r.files) images[b] = f;
         if (r.missing.length) warnings.push(`картинки панелей не получены: ${r.missing.join(", ")} — там будет графика`);
-        await addCost(jobId, { step: "design", provider: "antigravity-cli", model: r.model, units: { ...r.usage, images: r.files.size, wall_seconds: r.wall_seconds, subscription: 1 }, usd: 0 });
+        await addCost(jobId, { step: "design", provider: r.provider === "gemini-image" ? "gemini-image" : "antigravity-cli", model: r.model, units: { ...r.usage, images: r.files.size, wall_seconds: r.wall_seconds, ...(r.provider === "gemini-image" ? {} : { subscription: 1 }) }, usd: r.usd });
       } catch (err) {
         warnings.push(`картинки панелей не сгенерированы: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
       }

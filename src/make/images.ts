@@ -7,7 +7,10 @@ import { AgyError, defaultAgyRunner, findAgy, parseAgyStream, type AgyRunner } f
 import { frameFor, type Frame } from "../lib/aspect.ts";
 
 /**
- * Scene images without an API key: one Antigravity CLI call asks its image tool for every image
+ * Scene images. Backends: agy when installed (dev laptop, $0 on the subscription), else the Gemini image
+ * model over the API with GEMINI_API_KEY (server mode: src/make/images-gemini.ts, paid per image, no free tier).
+ *
+ * agy: without an API key: one Antigravity CLI call asks its image tool for every image
  * the design needs (~60–120 s for 2–4 images), each saved as scene_<beat>.png in a scratch dir.
  * The images are then normalised to 1080×1920 JPEG (cover crop) for the composition. A missing
  * image is not fatal: the scene falls back to a typographic layout.
@@ -25,6 +28,17 @@ export interface ImageResult {
   wall_seconds: number;
   usage: { input_tokens: number; output_tokens: number };
   model: string;
+  /** which backend made them (for the cost log) */
+  provider: "antigravity-cli" | "gemini-image" | "test" | "none";
+  /** API cost ($0 for agy) */
+  usd: number;
+}
+
+/** Which image generator this machine has: agy (never in server mode), else Gemini with a key, else none. */
+export async function imageBackend(env: NodeJS.ProcessEnv = process.env): Promise<"agy" | "gemini-image" | null> {
+  if (await findAgy(env)) return "agy";
+  if ((env.GEMINI_API_KEY || env.GOOGLE_API_KEY || "").trim()) return "gemini-image";
+  return null;
 }
 
 export interface ImageOptions {
@@ -37,6 +51,8 @@ export interface ImageOptions {
   timeoutMs?: number;
   /** test hook: produce images without agy */
   generate?: (requests: ImageRequest[], dir: string) => Promise<void>;
+  /** Gemini image API options (no agy): key, models, fetch for tests */
+  gemini?: import("./images-gemini.ts").GeminiImageOptions;
 }
 
 const fileName = (beat: number) => `scene_${beat}.png`;
@@ -45,17 +61,28 @@ export async function generateImages(requests: ImageRequest[], outDir: string, o
   const t0 = Date.now();
   await fs.mkdir(outDir, { recursive: true });
   const files = new Map<number, string>();
-  if (!requests.length) return { files, missing: [], wall_seconds: 0, usage: { input_tokens: 0, output_tokens: 0 }, model: "none" };
+  if (!requests.length) return { files, missing: [], wall_seconds: 0, usage: { input_tokens: 0, output_tokens: 0 }, model: "none", provider: "none", usd: 0 };
   const work = await fs.mkdtemp(path.join(os.tmpdir(), "vedit-img-"));
   let usage = { input_tokens: 0, output_tokens: 0 };
-  const model = o.model ?? "gemini-3.8-flash-low";
+  let model = o.model ?? "gemini-3.8-flash-low";
+  let provider: ImageResult["provider"] = o.generate ? "test" : "antigravity-cli";
+  let usd = 0;
   const f = o.frame ?? frameFor("9:16");
   const frameWords = f.w > f.h ? "horizontal 16:9" : f.w === f.h ? "square 1:1" : "vertical 9:16";
   try {
+    const bin = o.generate ? null : (o.bin ?? (await findAgy()));
     if (o.generate) await o.generate(requests, work);
-    else {
-      const bin = o.bin ?? (await findAgy());
-      if (!bin && !o.run) throw new AgyError("images: Antigravity CLI (agy) не найден");
+    else if (!bin && !o.run) {
+      // no agy (server mode): the Gemini image model over the API
+      if (!o.gemini?.key && !(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim()) throw new AgyError("images: нет Antigravity CLI (agy) и нет GEMINI_API_KEY");
+      const { generateImagesGemini } = await import("./images-gemini.ts");
+      const aspect = f.w > f.h ? "16:9" : f.w === f.h ? "1:1" : "9:16";
+      const g = await generateImagesGemini(requests, work, { ...o.gemini, style: o.style, aspect, frameWords });
+      provider = "gemini-image";
+      model = g.model;
+      usd = g.usd;
+      usage = g.usage;
+    } else {
       const run = o.run ?? defaultAgyRunner(bin!, o.timeoutMs ?? 900_000);
       const list = requests.map((r) => `${fileName(r.beat)}: ${r.prompt.replace(/\s+/g, " ").trim()}`).join("\n");
       const prompt = fill(loadPrompt("make.images.user"), { style: o.style, list, frame: frameWords });
@@ -88,7 +115,7 @@ export async function generateImages(requests: ImageRequest[], outDir: string, o
         missing.push(q.beat);
       }
     }
-    return { files, missing, wall_seconds: Math.round((Date.now() - t0) / 100) / 10, usage, model };
+    return { files, missing, wall_seconds: Math.round((Date.now() - t0) / 100) / 10, usage, model, provider, usd };
   } finally {
     await fs.rm(work, { recursive: true, force: true }).catch(() => {});
   }

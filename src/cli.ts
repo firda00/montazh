@@ -802,6 +802,22 @@ ${TTS_KEYS_HELP}`);
   });
 
 program
+  .command("doctor")
+  .description("самопроверка: режим (сервер / локальные входы), какой бэкенд у каждого модуля, каких бинарников и ключей не хватает; код 1 — нет обязательного")
+  .option("--bot", "проверить и то, что нужно Telegram-боту (токен, node:sqlite)")
+  .option("--json", "вывести JSON")
+  .action(async (opts: { bot?: boolean; json?: boolean }) => {
+    try {
+      const { runDoctor, formatDoctor } = await import("./doctor.ts");
+      const r = await runDoctor({ bot: opts.bot });
+      console.log(opts.json ? JSON.stringify(r, null, 2) : formatDoctor(r));
+      process.exitCode = r.ok ? 0 : 1;
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+program
   .command("modules")
   .description("реестр модулей: бэкенд, готовность, использование и стоимость по задачам")
   .option("--days <n>", "окно статистики, дней", (v) => Number(v), 30)

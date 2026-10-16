@@ -1,32 +1,15 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { findHeadlessChrome } from "../lib/chrome.ts";
 
 /**
  * Text fitting in a real browser with the real fonts: every element marked data-fit is shrunk
  * (4 px steps, down to data-min) until it fits data-maxw × data-maxh and no word overflows its box.
- * Uses puppeteer-core (a HyperFrames dependency) with the cached chrome-headless-shell.
+ * Uses puppeteer-core (a HyperFrames dependency) with the cached chrome-headless-shell, or the Chrome named by
+ * VEDIT_CHROME / HYPERFRAMES_BROWSER_PATH / CHROME_PATH (linux-arm64 server: Playwright's headless shell) —
+ * see src/lib/chrome.ts.
  */
 
-export async function findHeadlessChrome(env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
-  if (env.VEDIT_CHROME?.trim()) return env.VEDIT_CHROME.trim();
-  const base = path.join(os.homedir(), ".cache", "puppeteer");
-  for (const kind of ["chrome-headless-shell", "chrome"]) {
-    const dir = path.join(base, kind);
-    const versions = (await fs.readdir(dir).catch(() => [] as string[])).sort().reverse();
-    for (const v of versions) {
-      for (const sub of await fs.readdir(path.join(dir, v)).catch(() => [] as string[])) {
-        const exe = path.join(dir, v, sub, process.platform === "win32" ? `${kind}.exe` : kind);
-        try {
-          await fs.access(exe);
-          return exe;
-        } catch {}
-      }
-    }
-  }
-  return null;
-}
+export { findHeadlessChrome } from "../lib/chrome.ts";
 
 /** Runs in the page: shrink every [data-fit] element (4 px steps) until it fits its box. */
 const FIT_IN_PAGE = `(() => {
@@ -62,7 +45,7 @@ export interface FitResult {
 
 export async function fitText(htmlFile: string, opts: { chrome?: string; width?: number; height?: number } = {}): Promise<FitResult> {
   const exe = opts.chrome ?? (await findHeadlessChrome());
-  if (!exe) throw new Error("fit: headless Chrome не найден (~/.cache/puppeteer) — задайте VEDIT_CHROME");
+  if (!exe) throw new Error("fit: headless Chrome не найден (~/.cache/puppeteer, ~/.cache/ms-playwright, /usr/bin/chromium) — задайте VEDIT_CHROME");
   const puppeteer = (await import("puppeteer-core")).default;
   const browser = await puppeteer.launch({ executablePath: exe, headless: true, args: ["--no-sandbox", "--disable-gpu", "--font-render-hinting=none"] });
   try {

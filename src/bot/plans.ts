@@ -2,6 +2,7 @@
 // (for the free plan) a live override an admin sets in /admin → ⚙️ Лимиты (stored in the DB, wins over env).
 // `vedit modules` lists them next to the other limits (src/modules.ts → limitsCatalog).
 import os from "node:os";
+import { serverForced } from "../lib/server.ts";
 
 /** what a job costs: standard (montage, make, revise, avatar montage), long (> N min of video or highlights), light (free: avatar bundle) */
 export type JobClass = "standard" | "long" | "light";
@@ -59,10 +60,23 @@ export function freePlanFromEnv(env: NodeJS.ProcessEnv = process.env): PlanLimit
   return out;
 }
 
-/** VEDIT_MAX_JOBS: jobs running at once; default 1 on a small machine (< 12 GB RAM), 2 on a server */
+/** VEDIT_MAX_JOBS: jobs running at once; default 1 on a small machine (< 12 GB RAM) and always 1 in server mode
+ *  (VEDIT_SERVER=1: a small cloud VM without a GPU must not render two videos at once), else 2 */
 export function maxJobsFromEnv(env: NodeJS.ProcessEnv = process.env, totalMemBytes = os.totalmem()): number {
-  const def = totalMemBytes < 12 * 1024 ** 3 ? 1 : 2;
+  const def = serverForced(env) || totalMemBytes < 12 * 1024 ** 3 ? 1 : 2;
   return envNumber(env, "VEDIT_MAX_JOBS", def, 1, 16);
+}
+
+/** VEDIT_USER_DAILY_JOBS: hard cap of jobs one user may start per quota day, paid with credits or not
+ *  (anti-abuse, admins exempt); 0 = no cap. Default 10. */
+export function userDailyJobsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  return envNumber(env, "VEDIT_USER_DAILY_JOBS", 10, 0, 100_000);
+}
+
+/** VEDIT_BUDGET_DAILY_USD: global spend on paid APIs (Claude, Gemini, Cloud TTS — the cost.json of every bot job)
+ *  per quota day; when reached, new jobs of non-admins are refused until the next day. 0 = no limit. Default $10. */
+export function dailyBudgetUsdFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  return envNumber(env, "VEDIT_BUDGET_DAILY_USD", 10, 0, 1_000_000);
 }
 
 /** VEDIT_RETENTION_DAYS: uploads and finished jobs older than this are deleted (daily cleanup), default 7 */

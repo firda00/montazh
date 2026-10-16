@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { withCurrent } from "../lib/abort.ts";
+import { chromeEnv } from "../lib/chrome.ts";
 
 export interface LintJson {
   ok: boolean;
@@ -18,7 +19,7 @@ export function runCli(bin: string, args: string[], cwd: string, onLine?: (line:
     const child = spawn(process.execPath, [bin, ...args], {
       cwd,
       windowsHide: true,
-      env: { ...process.env, HYPERFRAMES_NO_TELEMETRY: "1", HYPERFRAMES_SKIP_SKILLS: "1", FORCE_COLOR: "0", NO_COLOR: "1" },
+      env: { ...process.env, ...chromeEnv(), HYPERFRAMES_NO_TELEMETRY: "1", HYPERFRAMES_SKIP_SKILLS: "1", FORCE_COLOR: "0", NO_COLOR: "1" },
       signal: withCurrent(signal),
     });
     let stdout = "";

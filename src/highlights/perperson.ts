@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import { exists, jobDir, readJson, writeJson } from "../lib/workspace.ts";
 import { addCost } from "../lib/cost.ts";
+import { drawtextFont } from "../lib/sysfont.ts";
 import { fill, loadPrompt } from "../lib/prompts.ts";
 import type { StructuredFn } from "../lib/llm.ts";
 import { zodToApiSchema } from "../plan/schema-sanitize.ts";
@@ -259,7 +260,7 @@ export async function whoIsWhoSheet(source: string, players: PlayersFile, out: s
   const tmp = path.join(os.tmpdir(), `vedit-who-${process.pid}-${Date.now()}`);
   await fs.mkdir(tmp, { recursive: true });
   const ff = process.env.FFMPEG_PATH || "ffmpeg";
-  const font = "fontfile='C\\:/Windows/Fonts/arial.ttf'";
+  const font = drawtextFont();
   const rows: string[] = [];
   const persons = players.persons.filter((p) => !o.persons || o.persons.includes(p.id));
   for (const p of persons) {

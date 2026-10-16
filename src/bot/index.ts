@@ -20,7 +20,7 @@ import { hasGoogleTtsKey, menuAction, STRINGS, t, voiceLabel, type MenuAction, t
 import { adminHandlers } from "./admin.ts";
 import { JobQueue, type JobOutcome } from "./queue.ts";
 import { runRetention, type RetentionReport } from "./retention.ts";
-import { dayStart, freePlanFromEnv, maxJobsFromEnv, retentionDaysFromEnv, tzOffsetFromEnv, type JobClass, type PlanLimits } from "./plans.ts";
+import { dailyBudgetUsdFromEnv, dayStart, freePlanFromEnv, maxJobsFromEnv, retentionDaysFromEnv, tzOffsetFromEnv, userDailyJobsFromEnv, type JobClass, type PlanLimits } from "./plans.ts";
 import {
   cancelKb,
   langKb,
@@ -322,6 +322,10 @@ export interface BotOptions {
   quotas?: boolean;
   /** pipelines running at once (default VEDIT_MAX_JOBS: 1 on < 12 GB RAM, else 2) */
   maxJobs?: number;
+  /** hard cap of jobs per user per day, credits or not (default VEDIT_USER_DAILY_JOBS, 10; 0 = none) */
+  userDailyJobs?: number;
+  /** global API spend per day, $ — new jobs of non-admins are refused above it (default VEDIT_BUDGET_DAILY_USD, 10; 0 = none) */
+  dailyBudgetUsd?: number;
   /** free-plan overrides (on top of env; the admin's live changes in the DB win over both) */
   plan?: Partial<PlanLimits>;
   /** uploads and finished jobs older than this are deleted (default VEDIT_RETENTION_DAYS, 7) */
@@ -387,6 +391,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   const quotasOn = o.quotas ?? true;
   const basePlan: PlanLimits = { ...freePlanFromEnv(env), ...o.plan };
   const tz = tzOffsetFromEnv(env);
+  const userDailyJobs = o.userDailyJobs ?? userDailyJobsFromEnv(env);
+  const dailyBudgetUsd = o.dailyBudgetUsd ?? dailyBudgetUsdFromEnv(env);
   const retentionDays = o.retentionDays ?? retentionDaysFromEnv(env);
   const statusEditMs = o.statusEditMs ?? 1500;
   const docsDir = o.docsDir ?? DOCS_DIR;
@@ -562,6 +568,18 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       await say(chatId, L.busy);
       return undefined;
     }
+    // server guards (admins exempt): the global daily API budget, then the per-user daily cap
+    if (!isAdmin(uid) && cls !== "light") {
+      if (dailyBudgetUsd > 0 && db.costSince(today()) >= dailyBudgetUsd) {
+        log(`[${uid}] отказ: дневной бюджет $${dailyBudgetUsd} исчерпан`);
+        await say(chatId, L.budgetPaused);
+        return undefined;
+      }
+      if (userDailyJobs > 0 && db.countJobs(uid, today()) >= userDailyJobs) {
+        await say(chatId, L.userDailyCap(userDailyJobs));
+        return undefined;
+      }
+    }
     let paid = 0;
     if (quotasOn && !isAdmin(uid) && cls !== "light") {
       const { used, limit } = freeLeft(uid, cls);
@@ -646,7 +664,13 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         return "cancelled";
       }
       log(`[${uid}] ${job.kind} ошибка: ${err instanceof Error ? (err.stack ?? err.message) : err}`);
-      await finish("failed", { error: errMsg(err).slice(0, 500) });
+      // what the failed run already spent on APIs still counts toward the daily budget
+      const spent = await (async () => {
+        const vj = db.getJob(jobId)?.vedit_job;
+        return vj ? jobCost(vj) : 0;
+      })();
+      if (spent > 0) db.addUsage({ user: uid, kind: `${job.kind}:failed`, units: 0, cost_usd: spent, job_id: jobId });
+      await finish("failed", { error: errMsg(err).slice(0, 500), ...(spent > 0 ? { cost_usd: spent } : {}) });
       const L = T(uid);
       // the user sees a friendly text (admins see the technical one); other admins get the details
       await say(chatId, isAdmin(uid) ? errorText(err) : L.failed, encodeKb(retryKb(L, jobId)));

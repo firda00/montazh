@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { ModelAnswerSchema, RESPONSE_SCHEMA, mapAnswer, type ModelAnswer } from "./gemini.ts";
 import { fill, loadPrompt } from "../../lib/prompts.ts";
+import { serverForced } from "../../lib/server.ts";
 import type { AnalysisChunk, AnalysisContext, VisionProvider, VisionResult } from "./types.ts";
 
 /**
@@ -36,8 +37,9 @@ export interface AgyOptions {
   tmpDir?: string;
 }
 
-/** Looks for the CLI binary on PATH (Windows: agy.exe / agy.cmd). */
+/** Looks for the CLI binary on PATH (Windows: agy.exe / agy.cmd). Server mode (VEDIT_SERVER=1): never — only API keys there. */
 export async function findAgy(env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
+  if (serverForced(env)) return null;
   if (env.VEDIT_AGY_BIN?.trim()) return env.VEDIT_AGY_BIN.trim();
   const names = process.platform === "win32" ? ["agy.exe", "agy.cmd", "agy"] : ["agy"];
   for (const dir of (env.PATH ?? env.Path ?? "").split(path.delimiter).filter(Boolean)) {

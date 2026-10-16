@@ -9,9 +9,22 @@ import type { Transcript } from "../schemas/index.ts";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const VENDOR = path.join(ROOT, "vendor", "whisper");
 
-export const WHISPER_BIN =
-  process.env.WHISPER_BIN || path.join(VENDOR, "bin", "Release", process.platform === "win32" ? "whisper-cli.exe" : "whisper-cli");
-export const WHISPER_MODEL = process.env.WHISPER_MODEL || path.join(VENDOR, "ggml-large-v3-turbo-q5_0.bin");
+/**
+ * whisper.cpp binary and model. VEDIT_WHISPER_BIN / VEDIT_WHISPER_MODEL (or the older WHISPER_BIN / WHISPER_MODEL)
+ * win; otherwise vendor/whisper: Windows — the prebuilt bin/Release/whisper-cli.exe (scripts/setup-whisper.mjs);
+ * Linux / macOS — built from source (deploy/build-whisper.sh puts whisper-cli in vendor/whisper/bin/).
+ */
+export function whisperPaths(env: NodeJS.ProcessEnv = process.env, platform = process.platform): { bin: string; model: string } {
+  const bin =
+    env.VEDIT_WHISPER_BIN?.trim() ||
+    env.WHISPER_BIN?.trim() ||
+    (platform === "win32" ? path.join(VENDOR, "bin", "Release", "whisper-cli.exe") : path.join(VENDOR, "bin", "whisper-cli"));
+  const model = env.VEDIT_WHISPER_MODEL?.trim() || env.WHISPER_MODEL?.trim() || path.join(VENDOR, "ggml-large-v3-turbo-q5_0.bin");
+  return { bin, model };
+}
+
+export const WHISPER_BIN = whisperPaths().bin;
+export const WHISPER_MODEL = whisperPaths().model;
 
 // ---- raw whisper.cpp JSON (-ojf) ----
 export interface WhisperToken {
@@ -275,7 +288,8 @@ export async function transcribe(audioPath: string, duration: number, outDir: st
   const preset = wantDtw ? dtwPresetFor(WHISPER_MODEL) : null;
   if (wantDtw && !preset) warnings.push(`no DTW preset for ${path.basename(WHISPER_MODEL)} — using heuristic token timestamps`);
   const method: TimestampMethod = preset ? "dtw" : "tokens";
-  const threads = opts.threads ?? Math.max(4, Math.min(16, os.cpus().length));
+  // one thread per core, at most 16 (a 1–2 core cloud VM must not be oversubscribed); VEDIT_WHISPER_THREADS overrides
+  const threads = opts.threads ?? (Number(process.env.VEDIT_WHISPER_THREADS) > 0 ? Number(process.env.VEDIT_WHISPER_THREADS) : Math.max(1, Math.min(16, os.availableParallelism())));
 
   // short pauses only bound words; chunks are cut at pauses of ≥ 0.5 s
   const silences = await detectSilences(audioPath, duration);

@@ -670,7 +670,7 @@ node bin/vedit.mjs highlights <job_id> --per-person [--workers 1]     # или �
 TELEGRAM_BOT_TOKEN=…
 TELEGRAM_ADMIN_IDS=111111111            # админы (/admin, технические ошибки задач); по умолчанию — первый id из ALLOWED
 # TELEGRAM_ALLOWED_USERS=111,222        # задан → закрытая бета (остальных бот молча игнорирует); пусто → открытая регистрация
-# VEDIT_MAX_JOBS=1                      # задач одновременно: по умолчанию 1 при < 12 ГБ RAM, иначе 2
+# VEDIT_MAX_JOBS=1                      # задач одновременно: по умолчанию 1 при < 12 ГБ RAM или VEDIT_SERVER=1, иначе 2
 # VEDIT_RETENTION_DAYS=7                # загрузки и готовые задачи старше — удаляются раз в сутки
 npm run bot
 npx tsx tools/bot-smoke.ts              # прогон сценариев на поддельном Bot API (без Telegram, второй экземпляр не мешает живому)
@@ -763,6 +763,34 @@ failed/cancelled, этап и процент, id карточки и резул�
 
 Не сделано: оплата (Payme/Click/Telegram Stars — кнопка «скоро»), локальный `telegram-bot-api` на сервере (переменная
 есть, сервер не поднят), удаление аккаунта самим пользователем (пока через админа), вебхук вместо long polling.
+
+## Сервер: только ключи API (этап 20)
+
+Бот работает на сервере сам, без входов разработчика. `VEDIT_SERVER=1` (или авто: нет `agy` в PATH и нет входа
+Claude Code) — провайдеры не трогают Antigravity и подписку Claude:
+
+| что | локально (ноутбук) | сервер (`VEDIT_SERVER=1`) |
+|---|---|---|
+| Claude (план, сценарий, перевод) | ключ API, иначе вход Claude Code | только `ANTHROPIC_API_KEY` |
+| тренды для `make` | Antigravity (поиск в вебе) | Gemini + Google Search grounding (`src/make/trends-gemini.ts`; источники фактов — из цитат) |
+| ИИ-картинки (запаска к фото) | Antigravity | Gemini image API (`src/make/images-gemini.ts`, `VEDIT_IMAGE_MODEL`); нет квоты/бесплатного уровня → только фото и типографика |
+| понимание кадра | Gemini API, иначе agy | Gemini API |
+| задач одновременно | 1 при < 12 ГБ, иначе 2 | 1 (`VEDIT_MAX_JOBS`) |
+
+Поиск Google в Gemini и генерация картинок **не входят в бесплатный уровень** Gemini API: с бесплатным ключом тренды
+пропускаются (`make` пишет сценарий без них), картинки — нет, остаются фото Openverse.
+
+```bash
+vedit doctor [--bot] [--json]   # режим, бэкенд каждого модуля, недостающие бинарники/ключи; код 1 — нет обязательного
+# лимиты против расходов (бот, админы не ограничены):
+# VEDIT_USER_DAILY_JOBS=10      # задач на пользователя в день, жёсткий потолок (кредиты не помогают); 0 = нет
+# VEDIT_BUDGET_DAILY_USD=10     # общий расход API за сутки (cost.json всех задач бота, и упавших тоже); выше — новые задачи ждут завтра
+```
+
+Linux / ARM64: Chrome — `VEDIT_CHROME` / `HYPERFRAMES_BROWSER_PATH` (+ поиск в кэшах puppeteer, HyperFrames, Playwright и
+`/usr/bin/chromium`, `src/lib/chrome.ts`); whisper.cpp — `VEDIT_WHISPER_BIN` / `VEDIT_WHISPER_MODEL`, сборка
+`deploy/build-whisper.sh`; Piper — релиз под платформу (`piper_linux_aarch64.tar.gz`); шрифт drawtext — DejaVu/Noto
+(`src/lib/sysfont.ts`, `VEDIT_DRAWTEXT_FONT`). Деплой на Oracle Cloud (Ubuntu 24.04 ARM64) — **`deploy/README.md`**.
 
 ## Модули и промпты
 

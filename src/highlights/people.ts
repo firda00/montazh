@@ -9,6 +9,7 @@ import { addCost } from "../lib/cost.ts";
 import { GeminiClient } from "../understand/gemini-client.ts";
 import { DEFAULT_EVENT_MODELS, extractEventClip, hoopAt, mmss, parseTimestamp, sha, type EventsFile, type SportEvent } from "../understand/events.ts";
 import type { Media } from "../schemas/index.ts";
+import { drawtextFont } from "../lib/sysfont.ts";
 
 /**
  * WHO THREW EACH SHOT (per-person reels). Two sources, reconciled:
@@ -668,7 +669,7 @@ export async function attributeMakes(source: string, makes: SportEvent[], roster
     const client = o.client ?? new GeminiClient({ apiKey: apiKey!, fetchFn: o.fetchFn, onLog: log });
     const tmp = path.join(os.tmpdir(), `vedit-makes-${process.pid}-${Date.now()}`);
     await fs.mkdir(tmp, { recursive: true });
-    const font = "fontfile='C\\:/Windows/Fonts/arial.ttf'";
+    const font = drawtextFont();
     let up: Awaited<ReturnType<GeminiClient["upload"]>> | undefined;
     try {
       log(`попадания по одному: режу ${sorted.length} фрагментов…`);

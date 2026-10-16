@@ -4,7 +4,7 @@ try {
 } catch {}
 
 const { startBot } = await import("./index.ts");
-const { freePlanFromEnv, maxJobsFromEnv, retentionDaysFromEnv } = await import("./plans.ts");
+const { dailyBudgetUsdFromEnv, freePlanFromEnv, maxJobsFromEnv, retentionDaysFromEnv, userDailyJobsFromEnv } = await import("./plans.ts");
 
 const stamp = () => new Date().toISOString().slice(11, 19);
 const log = (line: string) => console.log(`${stamp()} ${line}`);
@@ -36,16 +36,31 @@ const admins = adminIds.length ? adminIds : allowedUserIds.slice(0, 1);
 if (admins.length) log(`админы: ${admins.join(", ")}${adminIds.length ? "" : " (первый из TELEGRAM_ALLOWED_USERS)"}`);
 else log("⚠ админов нет: задайте TELEGRAM_ADMIN_IDS, чтобы видеть ошибки задач и пользоваться /admin");
 
-let plan, maxJobs, retentionDays;
+let plan, maxJobs, retentionDays, userDaily, budgetUsd;
 try {
   plan = freePlanFromEnv();
   maxJobs = maxJobsFromEnv();
   retentionDays = retentionDaysFromEnv();
+  userDaily = userDailyJobsFromEnv();
+  budgetUsd = dailyBudgetUsdFromEnv();
 } catch (err) {
   console.error(`✖ ${err instanceof Error ? err.message : err}`);
   process.exit(1);
 }
 log(`бесплатно в день: ${plan.standardPerDay} обычн. + ${plan.longPerDay} длинн., пробных кредитов ${plan.trialCredits}; задач одновременно ${maxJobs}; хранение ${retentionDays} дн.`);
+log(`потолок на пользователя: ${userDaily || "нет"} задач/день; общий бюджет API: ${budgetUsd ? `$${budgetUsd}/день` : "без лимита"}`);
+
+// self-check (the same as `vedit doctor --bot`): which provider each module uses, what is missing
+if (process.env.VEDIT_DOCTOR_ON_START !== "0") {
+  try {
+    const { runDoctor, formatDoctor } = await import("../doctor.ts");
+    const report = await runDoctor({ bot: true });
+    for (const line of formatDoctor(report).split(/\r?\n/)) if (line.trim()) log(`doctor: ${line}`);
+    if (!report.ok) log("⚠ не хватает обязательного (см. doctor выше) — часть задач будет падать");
+  } catch (err) {
+    log(`⚠ doctor: ${err instanceof Error ? err.message : err}`);
+  }
+}
 
 const apiBase = process.env.TELEGRAM_API_BASE?.trim() || undefined;
 if (apiBase) log(`Bot API: ${apiBase} (локальный сервер — лимиты файлов 2000 МБ)`);

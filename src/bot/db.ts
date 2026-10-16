@@ -315,6 +315,16 @@ export class BotDb {
     return this.get<{ n: number }>("SELECT COUNT(*) AS n FROM jobs WHERE user = ? AND class = ? AND created_at >= ? AND paid_credits = 0 AND status IN ('queued','running','done')", user, cls, sinceIso)?.n ?? 0;
   }
 
+  /** jobs a user started since the quota day began (free or paid; failed and cancelled ones do not count) */
+  countJobs(user: number, sinceIso: string): number {
+    return this.get<{ n: number }>("SELECT COUNT(*) AS n FROM jobs WHERE user = ? AND created_at >= ? AND class != 'light' AND status IN ('queued','running','done')", user, sinceIso)?.n ?? 0;
+  }
+
+  /** API spend recorded since (cost.json of finished and failed jobs), $ */
+  costSince(sinceIso: string): number {
+    return this.get<{ c: number }>("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM usage WHERE created_at >= ?", sinceIso)?.c ?? 0;
+  }
+
   lastJob(user: number): JobRow | undefined {
     return this.get<JobRow>("SELECT * FROM jobs WHERE user = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", user);
   }

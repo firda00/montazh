@@ -1,7 +1,8 @@
 import os from "node:os";
 import Anthropic from "@anthropic-ai/sdk";
 import { query, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { claudeLoginExists, DEFAULT_MODEL } from "../plan/backend/index.ts";
+import { claudeLoginAvailable, DEFAULT_MODEL } from "../plan/backend/index.ts";
+import { serverForced } from "./server.ts";
 import { PlanError } from "../plan/backend/types.ts";
 import { normalizeUsage, usdForUsage } from "../plan/pricing.ts";
 import type { PlanUsage } from "../schemas/index.ts";
@@ -33,12 +34,12 @@ export type StructuredFn = (q: StructuredQuery) => Promise<StructuredResult>;
 
 /**
  * One structured-output call without tools, for small jobs such as caption translation.
- * Uses the Claude API when a key is present, otherwise the Claude Code login (Agent SDK).
+ * Uses the Claude API when a key is present, otherwise the Claude Code login (Agent SDK) — never in server mode.
  */
 export function selectStructuredLlm(env: NodeJS.ProcessEnv = process.env): StructuredFn {
   if (env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN) return anthropicStructured;
-  if (env.CLAUDE_CODE_OAUTH_TOKEN || claudeLoginExists(env)) return agentStructured;
-  throw new PlanError("нет ANTHROPIC_API_KEY и нет входа Claude Code — перевод субтитров недоступен", "no_backend");
+  if (claudeLoginAvailable(env)) return agentStructured;
+  throw new PlanError(serverForced(env) ? "серверный режим: нет ANTHROPIC_API_KEY — запросы к Claude недоступны" : "нет ANTHROPIC_API_KEY и нет входа Claude Code — перевод субтитров недоступен", "no_backend");
 }
 
 function stripFences(text: string) {

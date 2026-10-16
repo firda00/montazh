@@ -31,7 +31,7 @@ async function download(url, file) {
 
 await download(`https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${model}`, path.join(VENDOR, model));
 
-const bin = path.join(VENDOR, "bin", "Release", process.platform === "win32" ? "whisper-cli.exe" : "whisper-cli");
+const bin = process.platform === "win32" ? path.join(VENDOR, "bin", "Release", "whisper-cli.exe") : path.join(VENDOR, "bin", "whisper-cli");
 if (fs.existsSync(bin)) {
   console.log("✔ whisper-cli already present");
 } else if (process.platform === "win32") {
@@ -41,7 +41,7 @@ if (fs.existsSync(bin)) {
   fs.rmSync(zip);
   console.log(`✔ ${bin}`);
 } else {
-  console.log(`build whisper.cpp from source and set WHISPER_BIN to whisper-cli (no prebuilt binary for ${process.platform} here)`);
+  console.log(`no prebuilt whisper-cli for ${process.platform}-${process.arch}: build it from source — bash deploy/build-whisper.sh (puts it at ${bin}), or set VEDIT_WHISPER_BIN`);
 }
 
 if (model !== MODELS.turbo) console.log(`\nset WHISPER_MODEL=${path.join(VENDOR, model)} in .env to use this model`);

@@ -9,15 +9,14 @@ import { DEFAULT_GSAP, HF_BIN, HF_VERSION, ROOT, linkOrCopy } from "../design/hy
 import { runCli, type LintJson } from "../render/cli-runner.ts";
 import { HyperFramesRenderer } from "../render/hyperframes.ts";
 import type { RenderQuality } from "../design/renderer.ts";
-import { findAgy } from "../understand/vision/agy.ts";
 import { loadFontMetrics } from "../design/layout.ts";
 import { composeMake, type ComposeResult, type MakeStyle } from "./compose.ts";
 import { loadIconSvg } from "./icons.ts";
 import { ScriptSchema, scriptDuration, writeScript, type Script } from "./script.ts";
 import { describeFindings } from "./slop.ts";
-import { researchTrends, trendsText, TrendsSchema, type Trends, type TrendsOptions } from "./trends.ts";
+import { researchTrends, trendsBackend, trendsText, TrendsSchema, type Trends, type TrendsOptions } from "./trends.ts";
 import { DesignSchema, directDesign, fallbackDesign, type Design } from "./design.ts";
-import { generateImages, type ImageOptions } from "./images.ts";
+import { generateImages, imageBackend, type ImageOptions } from "./images.ts";
 import { creditRejected, findPhotos, photoCreditLine, type PhotoCredit, type PhotoOptions } from "./photos.ts";
 import { composeScenes, FPS, type BeatSpeech, type ComposedScenes } from "./scenes.ts";
 import { detectAspect, frameFor, stripAspectWords, type Aspect, type Frame } from "../lib/aspect.ts";
@@ -47,7 +46,7 @@ export const MakeReportSchema = z.object({
   beats: z.number().int(),
   output: z.string(),
   preview: z.string(),
-  trends: z.enum(["agy", "skipped", "failed"]),
+  trends: z.enum(["agy", "gemini", "skipped", "failed"]),
   music: z.string().nullable(),
   music_attribution: z.string().default(""),
   sfx: z.number().int().default(0),
@@ -236,15 +235,17 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
   let trendsStatus: MakeReport["trends"] = "skipped";
   const reuseDir = opts.fromJob ? jobDir(opts.fromJob) : null;
   if (reuseDir && !opts.scriptFile) opts = { ...opts, scriptFile: path.join(reuseDir, "script.json") };
-  const wantTrends = !opts.scriptFile && (opts.trends ?? (!!opts.trendsOptions?.run || !!(await findAgy())));
+  const trendsVia = opts.trendsOptions?.run ? "agy" : opts.trendsOptions?.gemini?.key ? "gemini-search" : await trendsBackend();
+  const wantTrends = !opts.scriptFile && (opts.trends ?? !!trendsVia);
   if (wantTrends) {
-    say("▸ тренды (поиск в вебе через Antigravity)…");
+    say(`▸ тренды (поиск в вебе через ${trendsVia === "gemini-search" ? "Gemini + Google Search" : "Antigravity"})…`);
     try {
       const r = await runStep(job.id, "understand", () => researchTrends(topicClean, { language, ...opts.trendsOptions }));
       trendsData = r.trends;
-      trendsStatus = "agy";
+      trendsStatus = r.provider === "gemini-search" ? "gemini" : "agy";
       await writeJson(path.join(dir, "trends.json"), TrendsSchema, r.trends);
-      await addCost(job.id, { step: "understand", provider: "antigravity-cli", model: r.model, units: { ...r.usage, wall_seconds: r.wall_seconds, subscription: 1 }, usd: 0 });
+      if (r.provider === "gemini-search") await addCost(job.id, { step: "understand", provider: "gemini-search", model: r.model, units: { ...r.usage, wall_seconds: r.wall_seconds }, usd: r.usd ?? 0 });
+      else await addCost(job.id, { step: "understand", provider: "antigravity-cli", model: r.model, units: { ...r.usage, wall_seconds: r.wall_seconds, subscription: 1 }, usd: 0 });
       say(`  фактов ${r.trends.facts.length}, углов ${r.trends.angles.length}, хуков ${r.trends.hooks.length} (${r.wall_seconds}s)`);
     } catch (err) {
       trendsStatus = "failed";
@@ -376,16 +377,17 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
       todo = todo.filter((w) => r.missing.includes(w.beat));
     }
     if (todo.length && mode !== "none") {
-      const canGenerate = !!opts.imageOptions?.generate || !!opts.imageOptions?.run || !!(await findAgy());
-      if (canGenerate) {
-        say(`▸ картинки (${todo.length}, Antigravity${mode === "photo" ? ": фото не нашлось" : ""})…`);
+      const imagesVia = opts.imageOptions?.generate || opts.imageOptions?.run ? "agy" : opts.imageOptions?.gemini?.key ? "gemini-image" : await imageBackend();
+      if (imagesVia) {
+        say(`▸ картинки (${todo.length}, ${imagesVia === "gemini-image" ? "Gemini API" : "Antigravity"}${mode === "photo" ? ": фото не нашлось" : ""})…`);
         try {
           const r = await generateImages(todo.map((w) => ({ beat: w.beat, prompt: w.prompt })), imgDir, { style: I.image_style, frame, ...opts.imageOptions });
           for (const [beat, file] of r.files) images[beat] = file;
           if (r.files.size) imagesUsed.push("ai");
           if (r.missing.length) warnings.push(`картинки не получены для битов ${r.missing.join(", ")} — там типографика`);
-          await addCost(job.id, { step: "design", provider: "antigravity-cli", model: r.model, units: { ...r.usage, images: r.files.size, wall_seconds: r.wall_seconds, subscription: 1 }, usd: 0 });
-          say(`  ${r.files.size}/${todo.length} за ${r.wall_seconds}s`);
+          await addCost(job.id, { step: "design", provider: r.provider === "gemini-image" ? "gemini-image" : "antigravity-cli", model: r.model, units: { ...r.usage, images: r.files.size, wall_seconds: r.wall_seconds, ...(r.provider === "gemini-image" ? {} : { subscription: 1 }) }, usd: r.usd });
+          usd += r.usd;
+          say(`  ${r.files.size}/${todo.length} за ${r.wall_seconds}s${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""}`);
         } catch (err) {
           warnings.push(`картинки не сгенерированы: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
           say(`  ⚠ ${warnings.at(-1)}`);

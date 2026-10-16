@@ -39,7 +39,7 @@ export async function exportAsrAudio(jobId: string): Promise<{ file: string; byt
   return { file, bytes: (await fs.stat(file)).size };
 }
 
-/** A zip (via the system tar, which reads zip on Windows 10+ and macOS/Linux) or a directory → the directory holding the files. */
+/** A zip (Windows: the system bsdtar; elsewhere the built-in zip reader) or a directory → the directory holding the files. */
 async function unpack(source: string, into: string): Promise<string> {
   const st = await fs.stat(source);
   if (st.isDirectory()) return source;
@@ -48,9 +48,15 @@ async function unpack(source: string, into: string): Promise<string> {
   const local = path.join(into, "bundle.zip");
   await fs.copyFile(source, local);
   try {
-    // Windows: the system bsdtar (reads zip), not a GNU tar that may sit earlier on PATH (Git Bash)
-    const tar = process.platform === "win32" ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
-    await runProcess(tar, ["-xf", "bundle.zip"], { cwd: into });
+    if (process.platform === "win32") {
+      // Windows: the system bsdtar (reads zip), not a GNU tar that may sit earlier on PATH (Git Bash)
+      const tar = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+      await runProcess(tar, ["-xf", "bundle.zip"], { cwd: into });
+    } else {
+      // Linux: GNU tar cannot read zip — the built-in reader (src/lib/zip.ts), no unzip on PATH needed
+      const { extractZip } = await import("../lib/zip.ts");
+      await extractZip(local, into);
+    }
   } finally {
     await fs.rm(local, { force: true });
   }

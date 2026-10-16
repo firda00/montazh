@@ -3,12 +3,11 @@ import path from "node:path";
 import { ffmpeg } from "./lib/ffmpeg.ts";
 import { promptNames, promptsHash } from "./lib/prompts.ts";
 import { exists, readJson, WORKSPACE_ROOT } from "./lib/workspace.ts";
-import { claudeLoginExists } from "./plan/backend/index.ts";
+import { claudeLoginAvailable } from "./plan/backend/index.ts";
 import { HF_BIN } from "./design/hyperframes/project.ts";
 import { findAsrPython } from "./understand/asr.ts";
 import { selectAsr } from "./understand/index.ts";
 import { selectVisionProvider } from "./understand/vision/index.ts";
-import { findAgy } from "./understand/vision/agy.ts";
 import { WHISPER_BIN, WHISPER_MODEL } from "./understand/whisper.ts";
 import { CostSchema, JobSchema, PresetSchema, type Cost, type Job, type Preset, type StepName } from "./schemas/index.ts";
 import { BUDGET_ENV, DEFAULT_BUDGET, budgetFromEnv, type Budget } from "./plan/budget.ts";
@@ -24,7 +23,9 @@ import { DEFAULT_AGY_MODEL } from "./understand/vision/agy.ts";
 import { VOICES } from "./voice/catalog.ts";
 import { piperStatus } from "./voice/piper.ts";
 import { geminiApiKey, geminiTtsModels } from "./voice/gemini.ts";
-import { FREE_PLAN_FIELDS, freePlanFromEnv, maxJobsFromEnv, PER_USER_QUEUED, PER_USER_RUNNING, retentionDaysFromEnv, tzOffsetFromEnv } from "./bot/plans.ts";
+import { dailyBudgetUsdFromEnv, FREE_PLAN_FIELDS, freePlanFromEnv, maxJobsFromEnv, PER_USER_QUEUED, PER_USER_RUNNING, retentionDaysFromEnv, tzOffsetFromEnv, userDailyJobsFromEnv } from "./bot/plans.ts";
+import { trendsBackend } from "./make/trends.ts";
+import { imageBackend } from "./make/images.ts";
 import { cloudApiKey, cloudGeminiModels } from "./voice/cloudtts.ts";
 
 /**
@@ -164,7 +165,7 @@ export const MODULES: ModuleDef[] = [
     cost: (e) => (e.step === "plan" || e.step === "revise") && e.units.shortlist !== 1,
     probe: async (env) => {
       if (env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN) return { active: "api", ready: true, note: "" };
-      const login = !!env.CLAUDE_CODE_OAUTH_TOKEN || claudeLoginExists(env);
+      const login = claudeLoginAvailable(env);
       return { active: login ? "agent" : "api", ready: login, note: login ? "вход Claude Code" : "нет ANTHROPIC_API_KEY и входа Claude Code" };
     },
   },
@@ -178,7 +179,7 @@ export const MODULES: ModuleDef[] = [
     step: "plan",
     cost: (e) => e.units.shortlist === 1,
     probe: async (env) => {
-      const ready = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || env.CLAUDE_CODE_OAUTH_TOKEN || claudeLoginExists(env));
+      const ready = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || claudeLoginAvailable(env));
       return { active: "llm", ready, note: ready ? "" : "без модели окна берутся из highlights" };
     },
   },
@@ -221,7 +222,7 @@ export const MODULES: ModuleDef[] = [
     step: "design",
     cost: (e) => e.step === "design",
     probe: async (env) => {
-      const ready = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || env.CLAUDE_CODE_OAUTH_TOKEN || claudeLoginExists(env));
+      const ready = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || claudeLoginAvailable(env));
       return { active: "llm", ready, note: ready ? "" : "перевод недоступен, субтитры на языке речи" };
     },
   },
@@ -252,17 +253,22 @@ export const MODULES: ModuleDef[] = [
     selector: "vedit make <тема> / Telegram /make [16:9] <тема>; --aspect, --images photo|ai|none, --no-trends, --music, --script, --voice",
     backends: [
       { id: "agy-trends", title: "Тренды: Antigravity CLI (поиск в вебе)", deps: "agy + вход Google", license: "условия Antigravity; $0" },
+      { id: "gemini-trends", title: "Тренды без agy (сервер): Gemini + Google Search grounding, источники из цитат", deps: "GEMINI_API_KEY (платный уровень: поиск не входит в бесплатный); VEDIT_TRENDS_MODEL → gemini-3.8-flash → 2.5-flash", license: "условия Gemini API; 5000 поисков/мес бесплатно, далее $14 / 1000" },
       { id: "claude-script", title: "Сценарий: structured-вызов Claude + проверка клише (src/make/slop.ts, одна переписка)", deps: "как планировщик", license: "как планировщик" },
       { id: "openverse-photos", title: "Фото: Openverse (api.openverse.org, без ключа), кэш workspace/_cache/photos", deps: "сеть; ffmpeg (кадрирование)", license: "только CC0 / Public Domain Mark / CC BY (коммерческое использование разрешено); CC BY требует атрибуции — строки в credits.json, make.json и в описании (CLI, бот)" },
       { id: "agy-images", title: "Картинки-запаска: Antigravity CLI (генерация), если фото не нашлось или --images ai", deps: "agy + вход Google", license: "условия Antigravity; $0" },
+      { id: "gemini-images", title: "Картинки-запаска без agy (сервер): Gemini image API, по запросу на картинку", deps: "GEMINI_API_KEY с биллингом (бесплатного уровня нет); VEDIT_IMAGE_MODEL → gemini-3.1-flash-lite-image → nano-banana-2.1", license: "условия Gemini API; ≈$0.034 за картинку; без квоты — только фото и типографика" },
       { id: "lucide", title: "Иконки Lucide", deps: "lucide-static (npm)", license: "ISC" },
       { id: "hyperframes", title: "Композиция и рендер HyperFrames", deps: "hyperframes, Chromium, GSAP, Inter", license: "Apache-2.0; GSAP Standard; OFL-1.1" },
     ],
     job: (j) => /make:/.test(j.source),
     probe: async (env) => {
-      const script = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || env.CLAUDE_CODE_OAUTH_TOKEN || claudeLoginExists(env));
-      const agy = !!(await findAgy(env));
-      return { active: agy ? "agy-trends+claude-script" : "claude-script", ready: script, note: script ? (agy ? "" : "без agy тренды пропускаются") : "нет входа Claude для сценария" };
+      const script = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || claudeLoginAvailable(env));
+      const trends = await trendsBackend(env);
+      const images = await imageBackend(env);
+      const active = [trends === "agy" ? "agy-trends" : trends === "gemini-search" ? "gemini-trends" : "", "claude-script", "openverse-photos", images === "agy" ? "agy-images" : images === "gemini-image" ? "gemini-images" : ""].filter(Boolean).join("+");
+      const notes = [script ? "" : "нет ANTHROPIC_API_KEY (и входа Claude) для сценария", trends ? "" : "нет agy и GEMINI_API_KEY — тренды пропускаются", images ? "" : "нет генератора картинок — только фото и типографика"].filter(Boolean);
+      return { active, ready: script, note: notes.join("; ") };
     },
   },
   {
@@ -304,9 +310,9 @@ export const MODULES: ModuleDef[] = [
     ],
     job: (j) => /avatar:/.test(j.source),
     probe: async (env) => {
-      const script = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || env.CLAUDE_CODE_OAUTH_TOKEN || claudeLoginExists(env));
-      const agy = !!(await findAgy(env));
-      const notes = [agy ? "" : "без agy нужен --photo", script ? "" : "по теме — нет входа Claude, только --text", "InsightFace — некоммерческая лицензия"].filter(Boolean);
+      const script = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || claudeLoginAvailable(env));
+      const agy = !!(await imageBackend(env));
+      const notes = [agy ? "" : "без генератора картинок (agy / GEMINI_API_KEY) нужен --photo", script ? "" : "по теме — нет входа Claude, только --text", "InsightFace — некоммерческая лицензия"].filter(Boolean);
       return { active: "colab: chatterbox+joyvasa", ready: true, note: notes.join("; ") };
     },
   },
@@ -450,8 +456,10 @@ export function limitsCatalog(env: NodeJS.ProcessEnv = process.env): LimitEntry[
     const overridden = !!env[f.env]?.trim();
     out.push({ id: `users.free.${f.key}`, module: "users", what: f.what, value: num(() => freePlanFromEnv(env)[f.key]), default: String(f.default), set_by: overridden ? `env ${f.env}` : `env ${f.env} / /admin → Лимиты` });
   }
-  out.push({ id: "users.max_jobs", module: "users", what: "задач одновременно (общая очередь)", value: num(() => maxJobsFromEnv(env)), default: "1 при < 12 ГБ RAM, иначе 2", set_by: "env VEDIT_MAX_JOBS" });
+  out.push({ id: "users.max_jobs", module: "users", what: "задач одновременно (общая очередь)", value: num(() => maxJobsFromEnv(env)), default: "1 при < 12 ГБ RAM или VEDIT_SERVER=1, иначе 2", set_by: "env VEDIT_MAX_JOBS" });
   out.push({ id: "users.per_user", module: "users", what: "на пользователя: в работе / в очереди", value: `${PER_USER_RUNNING} / ${PER_USER_QUEUED}`, default: `${PER_USER_RUNNING} / ${PER_USER_QUEUED}`, set_by: "код" });
+  out.push({ id: "users.user_daily_jobs", module: "users", what: "задач на пользователя в день, жёсткий потолок (0 = нет)", value: num(() => userDailyJobsFromEnv(env)), default: "10", set_by: "env VEDIT_USER_DAILY_JOBS" });
+  out.push({ id: "users.budget_daily_usd", module: "users", what: "общий бюджет API в день, $ — выше новые задачи не принимаются (0 = нет)", value: num(() => dailyBudgetUsdFromEnv(env)), default: "10", set_by: "env VEDIT_BUDGET_DAILY_USD" });
   out.push({ id: "users.retention_days", module: "users", what: "хранение загрузок и готовых задач, дней", value: num(() => retentionDaysFromEnv(env)), default: "7", set_by: "env VEDIT_RETENTION_DAYS" });
   out.push({ id: "users.tz_offset", module: "users", what: "граница суток для дневных лимитов, UTC+ч", value: num(() => tzOffsetFromEnv(env)), default: "5", set_by: "env VEDIT_TZ_OFFSET" });
   return out;
