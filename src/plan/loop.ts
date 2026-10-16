@@ -83,7 +83,7 @@ export async function runPlannerLoop(backend: PlannerBackend, ctx: PlanContext, 
   const currentDraft = task.currentEdl ? draftFromEdl(task.currentEdl, ctx) : null;
   const taskText = task.kind === "revise" && currentDraft
     ? buildReviseText(currentDraft, task.instruction)
-    : buildTaskText({ instruction: task.instruction, presetName: task.presetName, mode: ctx.mode, toolsAvailable: opts.tools.length > 0, speaker: ctx.speaker });
+    : buildTaskText({ instruction: task.instruction, presetName: task.presetName, mode: ctx.mode, toolsAvailable: opts.tools.length > 0, speaker: ctx.speaker, style: ctx.style?.plannerRules });
   const req: StartRequest = {
     system: opts.system,
     packText: ctx.packText,

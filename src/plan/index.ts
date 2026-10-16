@@ -29,6 +29,7 @@ import { isLong, shortlist, type Window } from "./shortlist.ts";
 import { resolveSpeaker } from "../understand/asr.ts";
 import { SourcesSchema } from "../ingest/combine.ts";
 import { selectStructuredLlm, type StructuredFn } from "../lib/llm.ts";
+import { styledPreset } from "../style/profile.ts";
 
 export interface PlanOptions {
   instruction: string;
@@ -92,8 +93,11 @@ export async function loadPlanInputs(jobId: string, presetName: string, sel: Sel
   const transcript = await optional<Transcript>("transcript.json", TranscriptSchema, { language: "unknown", segments: [] });
   const scenes = await optional("scenes.json", ScenesSchema, []);
   const highlights = await optional("highlights.json", HighlightsSchema, []);
-  const { preset, note } = await loadPreset(presetName);
-  if (note) warnings.push(note);
+  const loaded = await loadPreset(presetName);
+  if (loaded.note) warnings.push(loaded.note);
+  // reference style (style.json): pace / clip length / notes of the pack preset + the mapping the resolver applies
+  const { preset, mapping: style } = await styledPreset(jobId, loaded.preset);
+  if (style) warnings.push(`монтаж по примеру: паузы > ${style.cleanup.silenceMs} мс${style.cleanup.removeFillers ? ", паразиты" : ""} вырезаются, наезды: ${style.zoom.mode}`);
   const sourcesFile = path.join(dir, "sources.json");
   const sources = (await exists(sourcesFile)) ? (await readJson(sourcesFile, SourcesSchema)).sources : undefined;
   const speakersFile = path.join(dir, "speakers.json");
@@ -128,7 +132,7 @@ export async function loadPlanInputs(jobId: string, presetName: string, sel: Sel
       }
     }
   }
-  const ctx = buildPlanContext({ media, transcript, scenes, highlights, preset, speakers, sources, speaker, windows });
+  const ctx = buildPlanContext({ media, transcript, scenes, highlights, preset, speakers, sources, speaker, windows, style: style ?? undefined });
   if (ctx.windows.length) sel.onEvent?.(`  окна: ${ctx.windows.map((w) => `${w.id} ${Math.round(w.start)}-${Math.round(w.end)}s`).join(", ")}`);
   return { ctx, warnings, presetName: preset.name };
 }

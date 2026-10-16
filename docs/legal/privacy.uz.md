@@ -6,13 +6,14 @@
 - Telegram id, ism va username, interfeys tili, siz tanlagan foydalanish maqsadi, ro‘yxatdan o‘tgan va oxirgi kirgan sana.
 - Sozlamalar (format, uslub, ovoz, yuborish usuli), vazifalar tarixi (turi, holati, vaqti, baholar) va qayta ishlash xarajatlari.
 - Yuklangan video, rasm va ovozli xabarlar hamda tayyor roliklar — faqat qayta ishlash vaqtida va 7 kundan ko‘p emas, keyin avtomatik o‘chiriladi.
+- «🎯 Namunadagidek montaj» uchun namuna rolik (fayl yoki havola) — faqat uslubni tahlil qilish uchun: u rolikingizga qo‘shilmaydi va tahlildan so‘ng darhol o‘chiriladi; faqat uslub tavsifi (temp, pauzalar, subtitrlar ko‘rinishi, yaqinlashtirishlar, tovush, rang) va bir namunani qayta tahlil qilmaslik uchun fayl/havola izi saqlanadi. Havoladagi videolar faqat shu tahlil uchun yuklab olinadi; namuna sifatida foydalanishga ruxsatingiz bor roliklarni yuboring.
 
 **Nima uchun**
 Vazifalaringizni bajarish, limit va kreditlarni hisoblash, murojaatlarga javob berish va xizmatni yaxshilash uchun. Biz ma’lumotlarni sotmaymiz va videolaringizdan reklama uchun foydalanmaymiz.
 
 **Ma’lumotlar kimga uzatiladi (qayta ishlovchilar)**
 - **Anthropic (Claude)** — montaj rejasi, ssenariy va tarjimalar uchun vazifa matni, nutq transkripsiyasi va kadrlar tavsifi.
-- **Google (Gemini API, Cloud Text-to-Speech)** — sahnalarni tushunish va o‘yindagi lahzalarni topish uchun kadrlar va video bo‘laklari, ovozlash uchun matn. Gemini API bepul darajasida Google so‘rovlardan o‘z mahsulotlarini yaxshilash uchun foydalanishi mumkin.
+- **Google (Gemini API, Cloud Text-to-Speech)** — sahnalarni tushunish va o‘yindagi lahzalarni topish uchun kadrlar va video bo‘laklari, uslub tahlili uchun namuna rolik (javobdan so‘ng Google’dan darhol o‘chiriladi), ovozlash uchun matn. Gemini API bepul darajasida Google so‘rovlardan o‘z mahsulotlarini yaxshilash uchun foydalanishi mumkin.
 - **Openverse** — ochiq rasm va musiqa uchun qidiruv so‘rovlari (kalit so‘zlar); fayllaringiz u yerga yuborilmaydi.
 - **Telegram** — xabarlar va fayllarni yetkazish.
 - **Google Colab** — faqat avatar vazifasini o‘zingiz u yerga yuklasangiz.

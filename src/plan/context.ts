@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Highlights, Media, Preset, Scenes, Speakers, Transcript } from "../schemas/index.ts";
 import type { Window } from "./shortlist.ts";
+import type { StyleMapping } from "../style/map.ts";
 
 type Word = Transcript["segments"][number]["words"][number];
 
@@ -62,6 +63,8 @@ export interface PlanContext {
   omitted: { phrases: number; scenes: number };
   /** several source videos joined into one: where each starts and ends on the timeline */
   sources: { id: string; name: string; start: number; end: number }[];
+  /** reference style (stage 22): planner rules, jump-cut cleanup, punch-ins, grade — applied when resolving the draft */
+  style?: StyleMapping;
   mode: PackMode;
   packText: string;
   packHash: string;
@@ -110,6 +113,8 @@ export interface ContextInput {
   speaker?: string;
   /** long-video mode: keep only what lies inside these windows */
   windows?: Window[];
+  /** reference style of the job (style.json) */
+  style?: StyleMapping;
 }
 
 export function buildPlanContext(input: ContextInput): PlanContext {
@@ -151,7 +156,7 @@ export function buildPlanContext(input: ContextInput): PlanContext {
     mode = "compact";
     packText = renderPack({ ...partial, mode });
   }
-  return { ...partial, mode, packText, packHash: createHash("sha256").update(packText).digest("hex"), tokenEstimate: estimateTokens(packText) };
+  return { ...partial, ...(input.style ? { style: input.style } : {}), mode, packText, packHash: createHash("sha256").update(packText).digest("hex"), tokenEstimate: estimateTokens(packText) };
 }
 
 const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);

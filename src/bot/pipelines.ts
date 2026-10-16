@@ -59,6 +59,10 @@ export interface PipelineArgs {
   onJob: (jobId: string) => void;
   signal: AbortSignal;
   log: (line: string) => void;
+  /** «🎯 Монтаж как в примере»: the reference's style profile (workspace/_cache/style/<key>.json) */
+  like?: string;
+  /** the analysis behind `like` was just made for this run: its Gemini cost goes into this job */
+  likeFresh?: boolean;
 }
 export interface ReviseArgs {
   jobId: string;
@@ -231,7 +235,7 @@ async function renderIds(jobId: string, ids: string[], edl: Edl, progress: (t: s
 }
 
 /** createJob → ingest → understand → plan → cut → render (HyperFrames), with progress messages. */
-export const runFullPipeline: PipelineFn = async ({ source, sources, instruction, preset, progress, onJob, signal, log }) => {
+export const runFullPipeline: PipelineFn = async ({ source, sources, instruction, preset, progress, onJob, signal, log, like, likeFresh }) => {
   const { ingest } = await import("../ingest/index.ts");
   const { understand } = await import("../understand/index.ts");
   const { plan } = await import("../plan/index.ts");
@@ -240,7 +244,9 @@ export const runFullPipeline: PipelineFn = async ({ source, sources, instruction
   const many = (sources ?? []).length > 1;
   // sports / action footage ("как мы играем в баскет", "броски", "трюки"): highlights mode, no speech plan
   const { highlightsIntent, wantsHighlights } = await import("../highlights/intent.ts");
-  const intent = many ? null : highlightsIntent(instruction);
+  // a reference style is a speech montage: never highlights
+  const intent = many || like ? null : highlightsIntent(instruction);
+  const style = like ? await readJson(like, (await import("../style/profile.ts")).StyleProfileSchema) : null;
   if (intent === "strong") {
     try {
       return await runHighlightsBot({ source, instruction, progress, onJob, signal, log });
@@ -255,6 +261,10 @@ export const runFullPipeline: PipelineFn = async ({ source, sources, instruction
   const job = await createJob(many ? `combined:${sources!.length} videos` : source, { prompt: instruction, preset });
   onJob(job.id);
   log(`job ${job.id}`);
+  if (style) {
+    await (await import("../style/profile.ts")).attachStyle(job.id, style, !likeFresh);
+    log(`  стиль примера: ${style.dna.style_summary}`);
+  }
 
   let input = source;
   if (many) {

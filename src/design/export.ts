@@ -19,6 +19,7 @@ import { panelFrame } from "./hyperframes/split.ts";
 import { cutoutGeometry, resolveCutout, type CutoutMode } from "./matte.ts";
 import { addCost } from "../lib/cost.ts";
 import { writeJson } from "../lib/workspace.ts";
+import { styledPreset } from "../style/profile.ts";
 import type { DesignSpec } from "../schemas/index.ts";
 
 export interface DesignJob {
@@ -71,7 +72,8 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
   const edl = await readJson(path.join(dir, "edl.json"), EdlSchema);
   const output = edl.outputs.find((o) => o.id === outputId);
   if (!output) throw new Error(`output ${outputId} not in edl.json (${edl.outputs.map((o) => o.id).join(", ")})`);
-  const { preset } = await loadPreset(opts.preset ?? job.preset ?? "bold_pop");
+  // reference style (style.json): its captions / colours / overlays on top of the preset
+  const { preset } = await styledPreset(jobId, (await loadPreset(opts.preset ?? job.preset ?? "bold_pop")).preset);
   const design = PresetSchema.parse(preset).design;
   // the cut may have snapped/clamped clip edges: build the timeline from what was actually cut
   const cutFile = path.join(dir, "cut.json");

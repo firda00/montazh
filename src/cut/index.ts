@@ -157,6 +157,12 @@ export function expectedDuration(clips: Clip[]) {
   return clips.reduce((sum, c) => sum + (c.src_end - c.src_start) / c.speed, 0);
 }
 
+/** Colour grade of the reference style: eq (contrast / saturation / brightness) and an optional colour-balance tint. */
+export function gradeFilter(g: NonNullable<Output["grade"]>): string {
+  const eq = `eq=contrast=${num(g.contrast)}:saturation=${num(g.saturation)}:brightness=${num(g.brightness)}`;
+  return g.tint ? `${eq},${g.tint}` : eq;
+}
+
 /** Builds the ffmpeg argument list for one output. Each clip is a separately-seeked input. */
 export function buildCutArgs(output: Output, clips: Clip[], media: Media, outPath: string, focuses: (Focus | null)[] = []): string[] {
   const args: string[] = [];
@@ -168,7 +174,7 @@ export function buildCutArgs(output: Output, clips: Clip[], media: Media, outPat
   const concatInputs: string[] = [];
   clips.forEach((c, i) => {
     const setpts = c.speed === 1 ? "PTS-STARTPTS" : `(PTS-STARTPTS)/${c.speed}`;
-    const vf = cropScaleFilter(output.aspect, c.crop === "auto_face" ? focuses[i] : null, upscaleFactor(output.aspect, media));
+    const vf = cropScaleFilter(output.aspect, c.crop === "auto_face" ? focuses[i] : null, upscaleFactor(output.aspect, media)) + (output.grade ? `,${gradeFilter(output.grade)}` : "");
     const fx = [c.zoom || c.shake?.length ? zoomShakeFilter(output.aspect, c.zoom, c.shake) : "", c.flash?.length ? flashFilter(c.flash) : ""].filter(Boolean).map((f) => `,${f}`).join("");
     chains.push(`[${i}:v]setpts=${setpts},${vf}${fx},fps=${TARGET_FPS},format=yuv420p[v${i}]`);
     const vol = c.volume !== undefined && c.volume !== 1 ? [`volume=${num(c.volume)}`] : [];

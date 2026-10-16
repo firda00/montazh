@@ -65,6 +65,12 @@ export const OutputSchema = z.object({
       duck: z.array(z.object({ start: z.number(), end: z.number() })).default([]),
     })
     .optional(),
+  /** colour grade of every clip (reference style): ffmpeg eq + an optional colour-balance tint */
+  grade: z
+    .object({ contrast: z.number().min(0.5).max(2), saturation: z.number().min(0).max(3), brightness: z.number().min(-0.3).max(0.3), tint: z.string().default("") })
+    .optional(),
+  /** music level under speech relative to the voice (reference style), dB; null = no side-chain ducking */
+  music_duck_db: z.number().nullable().optional(),
   transitions: z.enum(["cut"]).default("cut"),
 });
 export type Output = z.infer<typeof OutputSchema>;

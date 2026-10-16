@@ -127,6 +127,15 @@ const MIGRATIONS: string[] = [
   CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   CREATE TABLE callbacks (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL, created_at TEXT NOT NULL);
   `,
+  // 2: stage 22 — Style DNA of references by Telegram file_unique_id / canonical link (the profile itself lives in workspace/_cache/style/<key>.json)
+  `
+  CREATE TABLE style_cache (
+    alias TEXT PRIMARY KEY,
+    key TEXT NOT NULL,
+    summary TEXT,
+    created_at TEXT NOT NULL
+  );
+  `,
 ];
 
 type Param = string | number | null;
@@ -373,5 +382,16 @@ export class BotDb {
 
   pruneCallbacks(beforeIso: string) {
     this.run("DELETE FROM callbacks WHERE created_at < ?", beforeIso);
+  }
+
+  // ── reference styles (stage 22) ──────────────────────────────────────────────
+
+  /** content key of a reference known by this alias ("tg:<file_unique_id>", "url:<canonical>") */
+  styleKey(alias: string): string | undefined {
+    return this.get<{ key: string }>("SELECT key FROM style_cache WHERE alias = ?", alias)?.key;
+  }
+
+  putStyleKey(alias: string, key: string, summary?: string) {
+    this.run("INSERT INTO style_cache (alias, key, summary, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(alias) DO UPDATE SET key = excluded.key, summary = excluded.summary", alias, key, summary ?? null, nowIso());
   }
 }

@@ -175,6 +175,13 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
     }
   }
 
+  // progress bar (reference style): a thin accent line along the top edge that fills over the whole video
+  const progressHtml: string[] = [];
+  if (D.overlays.progress_bar && DUR > 1) {
+    progressHtml.push(`      <section id="progress" class="clip progress" data-start="0" data-duration="${DUR}" data-track-index="6"><span class="progress-fill" id="progress-fill"></span></section>`);
+    tw.push(`tl.fromTo("#progress-fill", { width: "0%" }, { width: "100%", duration: ${DUR}, ease: "none" }, 0);`);
+  }
+
   return `<!doctype html>
 <html lang="${esc(lang)}" data-resolution="${W >= H ? "landscape" : "portrait"}">
   <head>
@@ -222,7 +229,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
         color: ${C.text};
         -webkit-text-stroke: ${r3(strokeVisible * 2)}px ${C.stroke};
         paint-order: stroke fill;
-        text-shadow: 0 ${r3(3 * scale)}px ${r3(14 * scale)}px rgba(0, 0, 0, 0.55);
+        text-shadow: 0 ${r3(3 * scale)}px ${r3(14 * scale)}px rgba(0, 0, 0, ${r3(D.captions.shadow_opacity)});
       }
       .ttl-box {
         display: block;
@@ -249,6 +256,8 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       .outro-backdrop { position: absolute; inset: 0; display: block; background: ${O.backdrop}; }
       .outro-text { position: relative; display: block; text-align: center; font-weight: ${layout.font.weight}; line-height: 1.1; letter-spacing: -0.01em; color: ${C.title}; -webkit-text-stroke: ${r3(strokeVisible * 2)}px ${C.stroke}; paint-order: stroke fill; text-shadow: 0 ${r3(3 * scale)}px ${r3(14 * scale)}px rgba(0, 0, 0, 0.55); }
       .outro-line { display: block; white-space: nowrap; }
+      .progress { position: absolute; left: 0; top: 0; width: 100%; height: ${r3(Math.max(6, 10 * scale))}px; display: block; pointer-events: none; background: rgba(255,255,255,0.18); }
+      .progress-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; display: block; background: ${C.highlight}; }
     </style>
   </head>
   <body>
@@ -264,7 +273,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       <video id="a-roll" src="${cutoutBox ? assets.cutoutRel!.plate : assets.videoRel}" data-start="0" data-duration="${DUR}" data-track-index="0" muted playsinline></video>${cutoutBox?.popHeight ? `\n      <video id="a-pop" src="${assets.cutoutRel!.pop}" data-start="0" data-duration="${DUR}" data-track-index="8" muted playsinline></video>` : ""}
 ${D.captions.shade.enabled && layout.pages.length ? `      <section id="shade" class="clip shade" data-start="0" data-duration="${DUR}" data-track-index="1"></section>\n` : ""}${capHtml.join("\n")}
 ${ttlHtml.join("\n")}${split ? `\n${split.sections.join("\n")}` : ""}
-${outroHtml.join("\n")}
+${outroHtml.join("\n")}${progressHtml.length ? `\n${progressHtml.join("\n")}` : ""}
     </div>
     <script>
       const tl = gsap.timeline({ paused: true });

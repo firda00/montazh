@@ -19,9 +19,10 @@ export const AGENT_ADDENDUM = `\n\n${loadPrompt("planner.agent")}`;
 export const NUDGE_TEXT = loadPrompt("planner.nudge");
 export const TOOL_BUDGET_NUDGE_TEXT = loadPrompt("planner.nudge-tools");
 
-export function buildTaskText(o: { instruction: string; presetName: string; mode: "full" | "compact" | "shortlist"; toolsAvailable: boolean; speaker?: string }) {
+export function buildTaskText(o: { instruction: string; presetName: string; mode: "full" | "compact" | "shortlist"; toolsAvailable: boolean; speaker?: string; style?: string }) {
   const speaker = o.speaker ? `\n${fill(loadPrompt("planner.speaker"), { speaker: o.speaker })}` : "";
-  return fill(loadPrompt("planner.task"), { instruction: o.instruction, preset: o.presetName, mode: o.mode.toUpperCase(), speaker, tools: o.toolsAvailable ? "available" : "none — decide from the pack" });
+  const style = o.style ? `\n${o.style}` : "";
+  return fill(loadPrompt("planner.task"), { instruction: o.instruction, preset: o.presetName, mode: o.mode.toUpperCase(), speaker, style, tools: o.toolsAvailable ? "available" : "none — decide from the pack" });
 }
 
 export function buildRepairText(issues: PlanIssue[], attempt: number, max: number) {

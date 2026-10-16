@@ -41,7 +41,16 @@ export interface MixOptions {
   origGainDb?: number;
   /** output ranges where the music dips (−10 dB, 0.25 s ramps): people talking in a highlights edit */
   duck?: { start: number; end: number }[];
+  /**
+   * reference style (Style DNA music_ducking_db): how far below the voice the bed sits under speech, dB (−26…−12).
+   * The bed is levelled to −8 + dB LUFS before the side-chain (−16 → −24 LUFS, the montage default); null keeps the
+   * bed steady with no side-chain (a reference without ducking).
+   */
+  musicUnderSpeechDb?: number | null;
 }
+
+/** music bed level (LUFS, before the final −14) for a reference's ducking depth; see MixOptions.musicUnderSpeechDb */
+export const bedLufsForDucking = (db: number | null) => (db === null ? -22 : Math.min(-14, Math.max(-36, -8 + db)));
 
 export interface MixResult {
   out: string;
@@ -93,7 +102,8 @@ export function buildMixGraph(o: MixOptions, ctx: { hasAudio: boolean; sfxFile: 
 
   if (o.music) {
     inputs.push("-stream_loop", "-1", ...(o.musicOffset ? ["-ss", o.musicOffset.toFixed(3)] : []), "-i", o.music);
-    const lufs = o.musicLufs ?? (voice ? VOICE_BED.lufs : speech ? -24 : -16);
+    const styled = o.musicUnderSpeechDb !== undefined && speech && !voice;
+    const lufs = o.musicLufs ?? (styled ? bedLufsForDucking(o.musicUnderSpeechDb ?? null) : voice ? VOICE_BED.lufs : speech ? -24 : -16);
     // under a narrator the bed stays up to the last words and fades over the tail only
     const fadeOut = Math.min(voice ? 1.0 : 2.5, D / 4);
     chains.push(`[${idx}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS,loudnorm=I=${lufs}:TP=-2:LRA=11,afade=t=in:st=0:d=${voice ? 0.15 : 0.8},afade=t=out:st=${(D - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}${duckFilter(o.duck)}[mus]`);
@@ -110,6 +120,10 @@ export function buildMixGraph(o: MixOptions, ctx: { hasAudio: boolean; sfxFile: 
       const B = VOICE_BED;
       chains.push(`[mus]${keys.shift()}sidechaincompress=threshold=${B.threshold}:ratio=${B.ratio}:attack=${B.attack}:release=${B.release}:knee=${B.knee}:makeup=1[duck]`);
       mixIn.push("[duck]");
+    } else if (styled && o.musicUnderSpeechDb === null) {
+      // the reference keeps its bed steady under the voice: no side-chain (the speech split goes unused)
+      chains.push(`[sc]anullsink`);
+      mixIn.push("[mus]");
     } else if (speech) {
       // music dips ~9 dB while someone talks, comes back in the pauses
       chains.push(`[mus][sc]sidechaincompress=threshold=0.02:ratio=6:attack=30:release=450:makeup=1[duck]`);

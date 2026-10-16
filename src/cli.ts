@@ -208,14 +208,70 @@ function plannerOpts(o: PlannerCliOpts): Omit<PlanOptions, "instruction"> {
   };
 }
 
+/** the task when `run --like` gets no -p: one reel in the reference's style */
+const LIKE_DEFAULT_INSTRUCTION = "1 рилс 30–45 секунд из самых сильных моментов, в стиле примера, субтитры на языке речи";
+
+/** a file or a link → Style DNA (cache first); prints the short summary */
+async function analyzeReference(ref: string, force?: boolean) {
+  const { extractStyle } = await import("./style/extract.ts");
+  const { styleSummaryRu } = await import("./style/map.ts");
+  const isUrl = /^https?:\/\//i.test(ref);
+  if (!isUrl && !(await exists(ref))) throw new Error(`пример не найден: ${ref}`);
+  const r = await extractStyle(isUrl ? { url: ref } : { file: path.resolve(ref), name: path.basename(ref) }, { force, onLog: (l) => console.log(`    ${l}`) });
+  const g = r.profile.gemini;
+  console.log(`  ${r.cached ? "из кэша ($0)" : `проанализирован за ${r.profile.timings.total ?? "?"} с${g ? `, Gemini ${g.model}: ${g.input_tokens} вх. / ${g.output_tokens} вых. токенов${g.priced ? `, $${g.usd.toFixed(4)}` : " (цена модели неизвестна)"}` : ""}`}`);
+  console.log(`  ${styleSummaryRu(r.profile.dna)}`);
+  for (const w of r.profile.warnings) console.log(`  ⚠ ${w}`);
+  return { profile: r.profile, cached: r.cached, file: r.file };
+}
+
+program
+  .command("style")
+  .description("Style DNA примера (этап 22): файл или ссылка → темп, паузы, субтитры, наезды, звук, цвет + как это ляжет на наши настройки")
+  .argument("<reference>", "рилс-пример: файл или ссылка (Instagram / TikTok / YouTube Shorts — нужен yt-dlp, VEDIT_YTDLP)")
+  .option("--json", "напечатать профиль JSON (DNA, замеры, происхождение полей, маппинг)")
+  .option("--out <file>", "сохранить DNA в файл")
+  .option("--force", "заново анализировать, даже если пример есть в кэше")
+  .action(async (ref: string, o: { json?: boolean; out?: string; force?: boolean }) => {
+    try {
+      const { mapStyle } = await import("./style/map.ts");
+      const r = await analyzeReference(ref, o.force);
+      const m = mapStyle(r.profile.dna);
+      if (o.out) {
+        await fs.writeFile(path.resolve(o.out), JSON.stringify(r.profile.dna, null, 2));
+        console.log(`  DNA → ${o.out}`);
+      }
+      if (o.json) {
+        console.log(JSON.stringify({ profile: r.profile, mapping: m }, null, 2));
+        return;
+      }
+      const ms = r.profile.measured;
+      console.log(`\nзамеры: ${ms.duration} с, склеек ${ms.total_cuts} (средний план ${ms.asl} с; первые 3 с: ${ms.hook_cuts}, ${ms.hook_asl} с; дальше ${ms.body_asl} с)`);
+      if (ms.speech) console.log(`  речь: ${ms.speech.wpm} слов/мин, паузы медиана ${ms.speech.pause_median_ms} мс / p90 ${ms.speech.pause_p90_ms} мс, длинных пауз ${ms.speech.long_pauses_per_min}/мин, паразитов ${ms.speech.fillers}`);
+      if (ms.audio) console.log(`  звук: слова ${ms.audio.speech_lufs ?? "?"} LUFS, паузы ${ms.audio.gap_lufs ?? "—"} LUFS${ms.audio.music_likely ? " (похоже на музыку)" : ""}`);
+      if (ms.picture) console.log(`  картинка: яркость ${ms.picture.yavg}, контраст (p10–p90) ${ms.picture.yrange}, насыщенность ${ms.picture.satavg}`);
+      console.log(`\nDNA (${r.file}):\n${JSON.stringify(r.profile.dna, null, 2)}`);
+      const measured = Object.entries(r.profile.provenance).filter(([, v]) => v === "measured").map(([k]) => k);
+      if (measured.length) console.log(`\nпо замерам: ${measured.join(", ")}`);
+      console.log(`\nмаппинг на наши настройки (база: пресет ${m.basePreset}):`);
+      for (const row of m.table) console.log(`  ${row.field.padEnd(58)} → ${row.target}: ${row.value}`);
+      if (m.unsupported.length) console.log(`\nне воспроизводится: ${m.unsupported.join("; ")}`);
+      console.log(`\nправила для планировщика:\n${m.plannerRules}`);
+    } catch (err) {
+      fail(err);
+    }
+  });
+
 withRenderOptions(
   withPlannerOptions(
     program
       .command("run")
       .description("полный пайплайн: ingest → understand → plan → cut → render")
-      .argument("<video>", "путь к исходному видео")
+      .argument("<video...>", "путь к исходному видео (несколько — склеиваются в один материал)")
       .option("-p, --prompt <text>", "инструкция по монтажу (агент-планировщик)")
       .option("--preset <name>", "пресет стиля", "bold_pop")
+      .option("--like <reference>", "монтаж как в примере: рилс-референс (файл или ссылка) → Style DNA → темп, джамп-каты, субтитры, наезды, звук и цвет как в нём")
+      .option("--force-style", "заново анализировать пример, даже если он есть в кэше")
       .option("-e, --edl <file>", "готовый edl.json вместо планировщика")
       .option("--skip-understand", "не запускать транскрипцию и анализ сцен")
       .option("--no-snap", "не подтягивать границы клипов к границам слов")
@@ -229,9 +285,20 @@ withRenderOptions(
       .option("--target <s>", "highlights: длина ролика, с", (v) => Number(v))
       .option("--no-editor", "highlights: без вызова Claude (титр и порядок по правилам)"),
   ),
-).action(async (video: string, opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; render: boolean; language?: string; vision: VisionChoice; asr: AsrChoice; diarize: boolean; speakers?: number; mode: string; target?: number; editor: boolean } & PlannerCliOpts & RenderCliOpts) => {
+).action(async (videos: string[], opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; render: boolean; language?: string; vision: VisionChoice; asr: AsrChoice; diarize: boolean; speakers?: number; mode: string; target?: number; editor: boolean; like?: string; forceStyle?: boolean } & PlannerCliOpts & RenderCliOpts) => {
   try {
+    const video = videos[0];
     if (!["auto", "highlights", "normal"].includes(opts.mode)) throw new Error("--mode: ожидается auto | highlights | normal");
+    // --like: the reference's Style DNA first (cached: a repeated reference is free and instant)
+    let style: { profile: import("./style/profile.ts").StyleProfile; cached: boolean } | null = null;
+    if (opts.like) {
+      if (opts.edl) throw new Error("--like вместе с --edl: стиль применяется при планировании, а готовый план его не увидит");
+      console.log(`▸ стиль примера: ${opts.like}`);
+      style = await analyzeReference(opts.like, opts.forceStyle);
+      if (opts.preset === "bold_pop") opts.preset = (await import("./style/map.ts")).mapStyle(style.profile.dna).basePreset;
+      opts.mode = "normal";
+      if (!opts.prompt) opts.prompt = LIKE_DEFAULT_INSTRUCTION;
+    }
     if (!opts.edl && opts.mode !== "normal") {
       const { highlightsIntent, wantsHighlights } = await import("./highlights/intent.ts");
       const intent = opts.mode === "highlights" ? "strong" : highlightsIntent(opts.prompt);
@@ -252,12 +319,23 @@ withRenderOptions(
     if (opts.edl) await readJson(path.resolve(opts.edl), EdlSchema); // validate the plan before spending time on ingest
     if (opts.prompt && opts.skipUnderstand) throw new PlanError("--skip-understand вместе с --prompt: планировать не по чему (нет фраз и сцен)", "nothing_to_plan");
     const planner = opts.prompt ? plannerOpts(opts) : null; // option errors surface before ingest/understand run
-    const job = await createJob(video, { prompt: opts.prompt, preset: opts.preset });
+    const many = videos.length > 1;
+    const job = await createJob(many ? `combined:${videos.length} videos` : video, { prompt: opts.prompt, preset: opts.preset });
     console.log(`job ${job.id}`);
     const t0 = Date.now();
+    if (style) await (await import("./style/profile.ts")).attachStyle(job.id, style.profile, style.cached);
+
+    let input = video;
+    if (many) {
+      const { combineSources, SourcesSchema } = await import("./ingest/combine.ts");
+      console.log(`▸ склеиваю ${videos.length} видео`);
+      input = path.join(jobDir(job.id), "combined.mp4");
+      const map = await combineSources(videos.map((v) => path.resolve(v)), input);
+      await writeJson(path.join(jobDir(job.id), "sources.json"), SourcesSchema, map);
+    }
 
     console.log("▸ ingest");
-    const media = await runStep(job.id, "ingest", () => ingest(job.id, video));
+    const media = await runStep(job.id, "ingest", () => ingest(job.id, input));
     console.log(`  ${media.width}x${media.height} @ ${media.fps}fps, ${media.duration.toFixed(2)}s, audio: ${media.has_audio}`);
 
     let transcript: Transcript | undefined;

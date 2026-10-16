@@ -18,7 +18,7 @@ export interface MontageDraft {
   count: number;
   seconds: number;
   aspect: string;
-  /** pop | split | calm */
+  /** pop | split | calm | ref (the reference style of «🎯 Монтаж как в примере») */
   style: string;
 }
 export interface MakeDraft {
@@ -42,6 +42,7 @@ export function mainMenu(L: Strings): InlineKeyboard {
   return {
     inline_keyboard: [
       [btn(m.montage, "H:montage")],
+      [btn(m.ref, "H:ref")],
       [btn(m.make, "H:make"), btn(m.highlights, "H:highlights")],
       [btn(m.avatar, "H:avatar"), btn(m.settings, "H:settings")],
       [btn(m.balance, "H:balance"), btn(m.help, "H:help")],
@@ -60,7 +61,7 @@ export const purposeKb = (L: Strings): InlineKeyboard => ({
 
 export const termsKb = (L: Strings): InlineKeyboard => ({ inline_keyboard: [[btn(L.btnTerms, "T:terms"), btn(L.btnPrivacy, "T:privacy")], [btn(L.btnAccept, "T:ok")]] });
 
-export function montageKb(L: Strings, d: MontageDraft): InlineKeyboard {
+export function montageKb(L: Strings, d: MontageDraft, hasRef = false): InlineKeyboard {
   const rows: InlineButton[][] = [
     [btn(mark(d.mode === "reels", L.mode.reels), "M:m:reels"), btn(mark(d.mode === "viral", L.mode.viral), "M:m:viral")],
     [btn(mark(d.mode === "hl", L.mode.hl), "M:m:hl"), btn(mark(d.mode === "pp", L.mode.pp), "M:m:pp")],
@@ -68,7 +69,11 @@ export function montageKb(L: Strings, d: MontageDraft): InlineKeyboard {
   if (d.mode === "reels") rows.push(COUNTS.map((n) => btn(mark(d.count === n, L.countLabel(n)), `M:n:${n}`)));
   if (d.mode !== "pp") rows.push(SECONDS.map((n) => btn(mark(d.seconds === n, L.secondsLabel(n)), `M:s:${n}`)));
   rows.push(["9:16", "16:9"].map((a) => btn(mark(d.aspect === a, a), `M:a:${a}`)));
-  if (d.mode === "reels" || d.mode === "viral") rows.push(STYLE_CODES.map((s) => btn(mark(d.style === s, L.styleNames[STYLE_PRESET[s]]), `M:y:${s}`)));
+  if (d.mode === "reels" || d.mode === "viral") {
+    // with a reference the style buttons give way to one toggle «🎯 как в примере ✓» (off → the house styles again)
+    if (hasRef && d.style === "ref") rows.push([btn(mark(true, L.styleRef), "M:y:ref")]);
+    else rows.push([...STYLE_CODES.map((s) => btn(mark(d.style === s, L.styleNames[STYLE_PRESET[s]]), `M:y:${s}`)), ...(hasRef ? [btn(L.styleRef, "M:y:ref")] : [])]);
+  }
   rows.push([btn(L.btnStart, "M:go")]);
   return { inline_keyboard: rows };
 }

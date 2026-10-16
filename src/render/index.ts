@@ -13,6 +13,7 @@ import { loadPreset } from "../plan/presets.ts";
 import { mixSoundtrack } from "../audio/mix.ts";
 import { isMood, pickMusic, type Mood, type MusicTrack } from "../audio/music.ts";
 import { SFX_KINDS, type SfxCue } from "../audio/sfx.ts";
+import { styledPreset } from "../style/profile.ts";
 
 export const RenderReportSchema = z.object({
   renderer: z.string(),
@@ -86,7 +87,7 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
   const cutFile = path.join(dir, "cut.json");
   const cutReport = (await exists(cutFile)) ? await readJson(cutFile, CutReportSchema) : null;
   const meta = await loadJob(jobId);
-  const { preset } = await loadPreset(opts.preset ?? meta.preset ?? "bold_pop");
+  const { preset } = await styledPreset(jobId, (await loadPreset(opts.preset ?? meta.preset ?? "bold_pop")).preset);
   let track: MusicTrack | null | undefined; // undefined = not looked up yet
 
   for (const output of targets) {
@@ -136,7 +137,7 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
           await mixSoundtrack(
             plan
               ? { video: fin.output, out: tmp, duration: fin.duration, music: track.file, speech: false, musicOffset: plan.music_offset, musicLufs: plan.music_lufs, origGainDb: plan.orig_gain_db, duck: plan.duck, sfx: cues }
-              : { video: fin.output, out: tmp, duration: fin.duration, music: track.file, speech: true, sfx: cues },
+              : { video: fin.output, out: tmp, duration: fin.duration, music: track.file, speech: true, sfx: cues, ...(output.music_duck_db !== undefined ? { musicUnderSpeechDb: output.music_duck_db } : {}) },
           );
           await fs.rename(tmp, fin.output);
           // the mix normalises in one pass (dynamic loudnorm lands within ~1 LU): a linear trim brings a planned mix to the target
@@ -151,6 +152,12 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
           }
           musicNote = { music: track.file, music_attribution: track.attribution };
         }
+      }
+      if (!musicNote.music && cues.length) {
+        // effects without a music bed (reference style: whooshes on the punch-ins, no music in the reference)
+        const tmp = fin.output.replace(/\.mp4$/i, ".sfx.mp4");
+        await mixSoundtrack({ video: fin.output, out: tmp, duration: fin.duration, music: null, speech: true, sfx: cues });
+        await fs.rename(tmp, fin.output);
       }
       report.outputs.push({
         id: output.id,

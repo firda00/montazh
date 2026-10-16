@@ -94,7 +94,7 @@ const ru = {
   welcome: (credits: number, std: number, long: number, longMinutes: number) =>
     `Готово, вы зарегистрированы! Пробных кредитов: ${credits}. Бесплатно каждый день: ${std} обычн. задачи и ${long} длинная (видео дольше ${longMinutes} минут или хайлайты игры).\nВыберите, что сделать, — кнопки внизу.`,
   menuText: "Главное меню — выберите, что сделать:",
-  menu: { montage: "🎬 Монтаж из моих видео", make: "✨ Ролик по теме", highlights: "🏀 Хайлайты игры", avatar: "🧑 Аватар", settings: "⚙️ Настройки", balance: "💳 Баланс", help: "❓ Помощь" },
+  menu: { montage: "🎬 Монтаж из моих видео", ref: "🎯 Монтаж как в примере", make: "✨ Ролик по теме", highlights: "🏀 Хайлайты игры", avatar: "🧑 Аватар", settings: "⚙️ Настройки", balance: "💳 Баланс", help: "❓ Помощь" },
   needStart: "Сначала закончим регистрацию — это пара нажатий. /start",
   banned: "Доступ к боту ограничен. Если это ошибка — напишите администратору.",
   docMissing: "Текст пока недоступен.",
@@ -123,6 +123,16 @@ const ru = {
   unknownCommand: "Не знаю такой команды. /help — справка.",
   noJob: "Пока нет задач. Пришлите видео или выберите действие в меню.",
 
+  refAsk: (mb: number) => `Пришлите пример — рилс, который нравится, файлом (до ${mb} МБ) или ссылкой (Instagram, TikTok, YouTube Shorts). Я разберу его монтаж: темп, паузы, субтитры, наезды, звук и цвет — и смонтирую ваше видео так же. Сам пример в ваш ролик не попадёт.`,
+  refAnalyzing: "🔎 Разбираю монтаж примера… (обычно до минуты)",
+  refReady: (summary: string, cached: boolean) => `🎯 Стиль примера${cached ? " (уже знаком)" : ""}: ${summary}
+
+Теперь пришлите своё видео — одно или несколько. Смонтирую в этом стиле.`,
+  refLinkFailed: "Не получилось скачать ролик по ссылке (Instagram часто требует вход). Пришлите сам ролик файлом.",
+  refFailed: "Не получилось разобрать пример. Попробуйте другой ролик или пришлите его файлом.",
+  refNeedFileOrLink: "Жду пример: видеофайл или ссылку на рилс.",
+  refBusy: "Ещё разбираю предыдущий пример — минутку.",
+  styleRef: "🎯 Как в примере",
   montageAsk: (mb: number) => `Пришлите видео — одно или несколько (до ${mb} МБ каждое, можно альбомом). Потом выберите, что сделать.`,
   highlightsAsk: (mb: number) => `Пришлите видео игры или тренировки (до ${mb} МБ). Найду лучшие моменты, сделаю замедления и наложу музыку по битам.`,
   needVideo: "Сначала пришлите видео (как видео или файлом), потом напишите задачу.",
@@ -352,7 +362,7 @@ const uz: Strings = {
   welcome: (credits: number, std: number, long: number, longMinutes: number) =>
     `Tayyor, siz ro‘yxatdan o‘tdingiz! Sinov kreditlari: ${credits}. Har kuni bepul: ${std} ta oddiy vazifa va ${long} ta uzun vazifa (${longMinutes} daqiqadan uzun video yoki o‘yin xaylaytlari).\nNima qilishni tanlang — tugmalar pastda.`,
   menuText: "Asosiy menyu — nima qilamiz?",
-  menu: { montage: "🎬 Videolarimdan montaj", make: "✨ Mavzu bo‘yicha rolik", highlights: "🏀 O‘yin xaylaytlari", avatar: "🧑 Avatar", settings: "⚙️ Sozlamalar", balance: "💳 Balans", help: "❓ Yordam" },
+  menu: { montage: "🎬 Videolarimdan montaj", ref: "🎯 Namunadagidek montaj", make: "✨ Mavzu bo‘yicha rolik", highlights: "🏀 O‘yin xaylaytlari", avatar: "🧑 Avatar", settings: "⚙️ Sozlamalar", balance: "💳 Balans", help: "❓ Yordam" },
   needStart: "Avval ro‘yxatdan o‘tishni yakunlaylik — bir necha bosish xolos. /start",
   banned: "Botdan foydalanish cheklangan. Agar bu xato bo‘lsa — administratorga yozing.",
   docMissing: "Matn hozircha mavjud emas.",
@@ -381,6 +391,16 @@ const uz: Strings = {
   unknownCommand: "Bunday buyruqni bilmayman. /help — yordam.",
   noJob: "Hozircha vazifalar yo‘q. Video yuboring yoki menyudan amal tanlang.",
 
+  refAsk: (mb: number) => `Namuna yuboring — yoqqan rilsni fayl (${mb} MB gacha) yoki havola (Instagram, TikTok, YouTube Shorts) qilib. Uning montajini tahlil qilaman: temp, pauzalar, subtitrlar, yaqinlashtirishlar, tovush va rang — va videongizni xuddi shunday montaj qilaman. Namunaning o‘zi rolikka qo‘shilmaydi.`,
+  refAnalyzing: "🔎 Namuna montajini tahlil qilyapman… (odatda bir daqiqagacha)",
+  refReady: (summary: string, cached: boolean) => `🎯 Namuna uslubi${cached ? " (avval ko‘rilgan)" : ""}: ${summary}
+
+Endi o‘z videongizni yuboring — bitta yoki bir nechta. Shu uslubda montaj qilaman.`,
+  refLinkFailed: "Havola bo‘yicha rolikni yuklab bo‘lmadi (Instagram ko‘pincha kirishni talab qiladi). Rolikning o‘zini fayl qilib yuboring.",
+  refFailed: "Namunani tahlil qilib bo‘lmadi. Boshqa rolikni sinab ko‘ring yoki uni fayl qilib yuboring.",
+  refNeedFileOrLink: "Namunani kutyapman: video fayl yoki rilsga havola.",
+  refBusy: "Oldingi namunani hali tahlil qilyapman — bir daqiqa.",
+  styleRef: "🎯 Namunadagidek",
   montageAsk: (mb: number) => `Video yuboring — bitta yoki bir nechta (har biri ${mb} MB gacha, albom ham mumkin). Keyin nima qilishni tanlaysiz.`,
   highlightsAsk: (mb: number) => `O‘yin yoki mashg‘ulot videosini yuboring (${mb} MB gacha). Eng yaxshi lahzalarni topib, sekinlashtiraman va musiqani ritmga moslayman.`,
   needVideo: "Avval video yuboring (video yoki fayl sifatida), keyin vazifani yozing.",
@@ -605,7 +625,7 @@ const en: Strings = {
   welcome: (credits: number, std: number, long: number, longMinutes: number) =>
     `You’re all set! Trial credits: ${credits}. Free every day: ${std} standard jobs and ${long} long one (video over ${longMinutes} minutes or game highlights).\nPick what to do — buttons below.`,
   menuText: "Main menu — what shall we make?",
-  menu: { montage: "🎬 Edit my videos", make: "✨ Video on a topic", highlights: "🏀 Game highlights", avatar: "🧑 Avatar", settings: "⚙️ Settings", balance: "💳 Balance", help: "❓ Help" },
+  menu: { montage: "🎬 Edit my videos", ref: "🎯 Edit like an example", make: "✨ Video on a topic", highlights: "🏀 Game highlights", avatar: "🧑 Avatar", settings: "⚙️ Settings", balance: "💳 Balance", help: "❓ Help" },
   needStart: "Let’s finish signing up first — just a couple of taps. /start",
   banned: "Your access to the bot is restricted. If this is a mistake, contact the administrator.",
   docMissing: "This text is not available yet.",
@@ -634,6 +654,16 @@ const en: Strings = {
   unknownCommand: "I don’t know that command. /help — help.",
   noJob: "No jobs yet. Send a video or pick an action in the menu.",
 
+  refAsk: (mb: number) => `Send an example — a reel you like, as a file (up to ${mb} MB) or a link (Instagram, TikTok, YouTube Shorts). I’ll break down its editing — pace, pauses, captions, punch-ins, sound and colour — and edit your video the same way. The example itself never ends up in your video.`,
+  refAnalyzing: "🔎 Breaking down the example’s editing… (usually under a minute)",
+  refReady: (summary: string, cached: boolean) => `🎯 Example style${cached ? " (seen before)" : ""}: ${summary}
+
+Now send your own video — one or several. I’ll edit it in this style.`,
+  refLinkFailed: "Couldn’t download the video from the link (Instagram often requires a login). Please send the video itself as a file.",
+  refFailed: "Couldn’t analyse the example. Try another video or send it as a file.",
+  refNeedFileOrLink: "Waiting for the example: a video file or a link to a reel.",
+  refBusy: "Still analysing the previous example — one moment.",
+  styleRef: "🎯 Like the example",
   montageAsk: (mb: number) => `Send your video — one or several (up to ${mb} MB each, albums are fine). Then choose what to make.`,
   highlightsAsk: (mb: number) => `Send a game or training video (up to ${mb} MB). I’ll find the best moments, add slow motion and cut to the beat.`,
   needVideo: "Send a video first (as a video or a file), then type the task.",

@@ -38,7 +38,7 @@ async function boot(extra: Partial<BotOptions> = {}) {
 
 test("db: migrations table, users with credits that never go negative, lookup by @username, settings and sessions", async () => {
   const db = new BotDb(path.join(await tmp(), "vedit.db"));
-  assert.deepEqual(db.migrations(), [1]);
+  assert.deepEqual(db.migrations(), [1, 2]);
   const u = db.touchUser(42, { username: "Alisher", first_name: "Алишер" });
   assert.equal(u.onboarding, "lang");
   assert.equal(u.lang, "ru");
@@ -55,7 +55,7 @@ test("db: migrations table, users with credits that never go negative, lookup by
   // a second open of the same file does not re-run migrations
   db.close();
   const again = new BotDb(db.file);
-  assert.deepEqual(again.migrations(), [1]);
+  assert.deepEqual(again.migrations(), [1, 2]);
   assert.equal(again.getUser(42)?.credits, 0);
   again.close();
 });

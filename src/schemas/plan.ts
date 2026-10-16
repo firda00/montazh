@@ -13,6 +13,7 @@ export const DraftClipSchema = z.object({
   speed: z.number().optional().describe("playback speed; 1.0 on speech, 1.25–2.0 only on speech-free clips"),
   crop: z.enum(["center", "auto_face"]).optional().describe("auto_face keeps the speaker in frame for 9:16"),
   note: z.string().optional().describe("why this clip, one short sentence"),
+  punch_in: z.boolean().optional().describe("reference style only: a camera punch-in on this clip (key thought, number, emotion)"),
 });
 
 export const DraftTitleSchema = z.object({
@@ -212,6 +213,8 @@ export const DesignSpecSchema = z.object({
     uppercase: z.boolean().default(true),
     /** px, scaled like font_size */
     stroke_width: z.number().default(8),
+    /** opacity of the soft drop shadow under the letters */
+    shadow_opacity: z.number().min(0).max(1).default(0.55),
     /** how the spoken word is emphasised */
     word_animation: z.enum(["pop", "fill", "none"]).default("pop"),
     pop_scale: z.number().default(1.12),
@@ -260,6 +263,10 @@ export const DesignSpecSchema = z.object({
     cutout: z.enum(["off", "on", "auto"]).default("off"),
     /** how far the cut-out head may break above the seam, fraction of the height */
     pop_out: z.number().min(0).max(0.15).default(0.06),
+  }).prefault({}),
+  /** small graphic overlays (stage 22, reference style): a thin progress bar along the top edge */
+  overlays: z.object({
+    progress_bar: z.boolean().default(false),
   }).prefault({}),
   /** call-to-action card over the last seconds (overlay only: the cut and its audio are untouched) */
   outro: z.object({

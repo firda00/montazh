@@ -214,6 +214,23 @@ export const MODULES: ModuleDef[] = [
     },
   },
   {
+    id: "style",
+    stage: "understand",
+    title: "Монтаж по примеру (Style DNA)",
+    what: "рилс-пример → темп, джамп-каты, паразиты, субтитры, наезды, музыка, эффекты, цвет → правила планировщика, пресет оформления, чистка пауз, наезды, eq-цвет; кэш workspace/_cache/style",
+    selector: "vedit run … --like <файл|ссылка>; vedit style <пример>; бот: 🎯 Монтаж как в примере; VEDIT_STYLE_MODEL, VEDIT_STYLE_FPS, VEDIT_YTDLP",
+    backends: [
+      { id: "measure", title: "Замеры: склейки (ffmpeg scene + джамп-каты по трём полосам кадра), темп речи и паузы (whisper), громкость пауз, signalstats", deps: "ffmpeg; whisper.cpp", license: "свой код; LGPL-2.1+ (ffmpeg); MIT (whisper)" },
+      { id: "gemini-style", title: "Gemini API: пример ≤ 90 с, ≤ 960 px со звуком, 4 кадра/с, responseSchema = Style DNA, temperature 0.1", deps: "GEMINI_API_KEY; модели gemini-3.8-flash → … → 2.5-flash", license: "условия Gemini API (бесплатный уровень: данные могут использоваться Google)" },
+      { id: "yt-dlp", title: "Ссылки Instagram / TikTok / YouTube Shorts (по желанию; Instagram часто требует вход)", deps: "yt-dlp в PATH или VEDIT_YTDLP", license: "Unlicense" },
+    ],
+    cost: (e) => e.provider === "gemini-style",
+    probe: async (env) => {
+      const key = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
+      return { active: key ? "measure + gemini-style" : "measure", ready: true, note: key ? "" : "нет GEMINI_API_KEY — визуальный стиль по умолчанию, ритм и паузы по замерам" };
+    },
+  },
+  {
     id: "translate",
     stage: "design",
     title: "Перевод субтитров",

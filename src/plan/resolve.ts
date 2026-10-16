@@ -3,6 +3,7 @@ import { EdlSchema, type Edl, type OutputSchema, type PlanDraft, type PlanIssue 
 import { checkClipBoundaries } from "./validate.ts";
 import type { PlanContext } from "./context.ts";
 import { parseRef, resolveRef } from "./refs.ts";
+import { applyMotion, jumpCutClips } from "../style/jumpcut.ts";
 
 export interface ResolvedClip {
   /** index of the clip in the model's draft (messages use it, so skipped clips do not shift numbering) */
@@ -157,8 +158,30 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
       else seenRanges.set(key, o.id);
     }
 
+    // 3b. reference style: jump-cut cleanup (long pauses, standalone fillers) — the duration is what remains
+    let cleaned: ReturnType<typeof jumpCutClips> | null = null;
+    if (ctx.style?.cleanup.enabled && clips.length) {
+      const st = ctx.style;
+      // a split phrase whose next clip restarts on the word the previous one ended with ("p2.w2" twice): the word
+      // would play twice; consecutive clips that overlap by less than 1.5 s continue where the previous one ended
+      for (let k = 1; k < clips.length; k++) {
+        const a = clips[k - 1];
+        const b = clips[k];
+        if (b.start < a.end && b.end > a.end && a.end - b.start < 1.5 && b.start >= a.start) {
+          warn("overlap", `clip ${b.index} restarted inside clip ${a.index} (${r2(b.start)}s < ${r2(a.end)}s) → starts at ${r2(a.end)}s`, b.index);
+          b.start = a.end;
+        }
+      }
+      cleaned = jumpCutClips(
+        clips.map((c) => ({ src_start: c.start, src_end: c.end, speed: c.speed, crop: c.crop, punch: o.clips[c.index]?.punch_in === true })),
+        ctx.transcript,
+        { silenceMs: st.cleanup.silenceMs, removeFillers: st.cleanup.removeFillers, handleMs: st.cleanup.handleMs, maxPiece: st.cleanup.maxPiece },
+      );
+      if (!cleaned.clips.length) err("empty_clip", "after removing pauses and fillers nothing is left of this output", undefined, "pick phrases with speech");
+    }
+
     // 4. duration vs target
-    const duration = clips.reduce((s, c) => s + (c.end - c.start) / c.speed, 0);
+    const duration = cleaned ? cleaned.clips.reduce((s, c) => s + (c.src_end - c.src_start) / c.speed, 0) : clips.reduce((s, c) => s + (c.end - c.start) / c.speed, 0);
     // the brief's target applies to outputs of the requested kind; a differently shaped extra output sets its own
     const briefTarget = draft.brief.aspect === undefined || draft.brief.aspect === o.aspect ? draft.brief.target_duration_s : undefined;
     const target = o.target_duration ?? (existing ? undefined : briefTarget) ?? null;
@@ -171,8 +194,9 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
         const candidates = diff < 0
           ? ctx.phrases.filter((p) => p.start >= last.end - 0.05).slice(0, 3).map((p) => `${p.id} (${r2(p.end - p.start)}s)`)
           : clips.map((c) => `clip ${c.index} (${r2((c.end - c.start) / c.speed)}s)`).slice(-3);
-        err("duration_off", `output is ${r2(duration)}s, target ${target}s (${diff < 0 ? "too short" : "too long"} by ${r2(Math.abs(diff))}s)`, undefined, diff < 0 ? `add phrases, e.g. ${candidates.join(", ")}` : `remove or shorten ${candidates.join(", ")}`);
-      } else if (Math.abs(diff) > soft) warn("duration_off", `output is ${r2(duration)}s vs target ${target}s`);
+        const after = cleaned ? ` after the automatic jump-cut cleanup (${r2(cleaned.removedSeconds)}s of pauses/fillers removed)` : "";
+        err("duration_off", `output is ${r2(duration)}s${after}, target ${target}s (${diff < 0 ? "too short" : "too long"} by ${r2(Math.abs(diff))}s)`, undefined, diff < 0 ? `add phrases, e.g. ${candidates.join(", ")}` : `remove or shorten ${candidates.join(", ")}`);
+      } else if (Math.abs(diff) > soft) warn("duration_off", `output is ${r2(duration)}s vs target ${target}s${cleaned ? " (after cleanup)" : ""}`);
     }
 
     // 5. captions / titles (a carried-over output inherits its own previous defaults, a new one the preset's)
@@ -200,11 +224,16 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
 
     const out: ResolvedOutput = { id: o.id, aspect: o.aspect, errors, warnings, clips, duration_s: r2(duration), target_s: target, captions_language: captionsLanguage };
     if (errors.length === 0) {
+      // reference style: the cleaned pieces with punch-ins, effects on the cuts, the colour grade and the music ducking
+      const styled = cleaned && ctx.style ? applyMotion(cleaned.clips, ctx.style.zoom, ctx.style.audio.sfx, (t) => phraseIndexAt(ctx, t)) : null;
       out.output = {
         id: o.id,
         aspect: o.aspect,
         target_duration: target ?? undefined,
-        clips: clips.map((c) => ({ src_start: Number(c.start.toFixed(3)), src_end: Number(c.end.toFixed(3)), speed: c.speed, crop: c.crop })),
+        clips: styled ? styled.clips : clips.map((c) => ({ src_start: Number(c.start.toFixed(3)), src_end: Number(c.end.toFixed(3)), speed: c.speed, crop: c.crop })),
+        ...(styled && styled.sfx.length ? { sfx: styled.sfx } : {}),
+        ...(ctx.style?.grade ? { grade: ctx.style.grade } : {}),
+        ...(ctx.style ? { music_duck_db: ctx.style.audio.duckDb } : {}),
         // new output → preset; existing with captions already on → its own style; switched on by the edit → preset; still off → untouched
         captions: {
           enabled: o.captions.enabled,
@@ -240,6 +269,16 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
   }
   const issues = [...global, ...outputs.flatMap((o) => [...o.errors, ...o.warnings])];
   return { edl, outputs, issues, errors: issues.filter((i) => i.severity === "error"), warnings: issues.filter((i) => i.severity === "warning") };
+}
+
+/** index of the phrase that time t falls in (or the last one before it); -1 before the first phrase */
+function phraseIndexAt(ctx: PlanContext, t: number): number {
+  let idx = -1;
+  for (const p of ctx.phrases) {
+    if (p.start > t) break;
+    idx = p.index;
+  }
+  return idx;
 }
 
 function majorityLang(ctx: PlanContext) {
