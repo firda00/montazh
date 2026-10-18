@@ -278,7 +278,8 @@ test("a failing Bot API call inside an update does not kill the loop", async () 
   const { running } = await boot(tg, { callMethod: flaky, adminIds: [6], pipeline: async () => ({ jobId: "j", outputs: [] }) });
   tg.video(6, 6, "V");
   await waitFor(() => tg.messages(6).length === 1, "error reply");
-  assert.match(tg.messages(6)[0], /^✖ Telegram getFile: Bad Request/);
+  // the user is told to resend the file; the admin also sees the Telegram error
+  assert.match(tg.messages(6)[0], /^✖ Не получилось получить файл из Telegram[\s\S]*\n✖ Telegram getFile: Bad Request/);
   tg.video(6, 6, "V");
   await waitFor(() => tg.messages(6).at(-1) === MSG.videoSaved, "next update handled");
   await running.stop();

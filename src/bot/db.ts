@@ -277,6 +277,11 @@ export class BotDb {
     return this.all<{ user: number; data: string }>("SELECT user, data FROM sessions").map((r) => ({ user: r.user, data: JSON.parse(r.data) as T }));
   }
 
+  /** sessions changed since the ISO time (restart recovery) */
+  sessionsSince<T>(sinceIso: string): { user: number; data: T }[] {
+    return this.all<{ user: number; data: string }>("SELECT user, data FROM sessions WHERE updated_at >= ?", sinceIso).map((r) => ({ user: r.user, data: JSON.parse(r.data) as T }));
+  }
+
   getKv(key: string): string | undefined {
     return this.get<{ value: string }>("SELECT value FROM kv WHERE key = ?", key)?.value;
   }

@@ -197,6 +197,21 @@ if (( WITH_MATTE )); then
   fi
 fi
 
+# ── yt-dlp: videos by YouTube / Shorts / Instagram / TikTok / VK links (bot uploads and «🎯 как в примере») ──
+# the official zipapp (Unlicense; runs on python3) in /opt/vedit/bin, owned by vedit so the daily timer can `-U` it
+step "yt-dlp (ссылки YouTube / Instagram / TikTok)"
+YTDLP="$VEDIT_HOME/bin/yt-dlp"
+if [[ -x "$YTDLP" ]]; then
+  sudo -u vedit "$YTDLP" -U >/dev/null 2>&1 || true
+  ok "yt-dlp $("$YTDLP" --version 2>/dev/null || echo '?')"
+elif curl -fsSL -o "$YTDLP.new" https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp; then
+  chmod 755 "$YTDLP.new" && chown vedit:vedit "$YTDLP.new" && mv "$YTDLP.new" "$YTDLP"
+  ok "yt-dlp $("$YTDLP" --version 2>/dev/null || echo '?')"
+else
+  rm -f "$YTDLP.new"
+  warn "yt-dlp не скачался — ссылки YouTube/Instagram/TikTok не будут работать (Google Диск, Яндекс Диск, Dropbox работают без него)"
+fi
+
 # ── unattended-upgrades ──
 step "автообновления безопасности"
 cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
@@ -258,6 +273,7 @@ HYPERFRAMES_BROWSER_PATH=$CHROME_LINK
 HYPERFRAMES_NO_TELEMETRY=1
 PUPPETEER_SKIP_DOWNLOAD=1
 XDG_CACHE_HOME=$VEDIT_HOME/cache
+VEDIT_YTDLP=$VEDIT_HOME/bin/yt-dlp
 EOF
 chown root:vedit "$VEDIT_HOME/server.env"
 chmod 640 "$VEDIT_HOME/server.env"
@@ -309,6 +325,7 @@ Nice=10
 ExecStart=-/usr/bin/find $VEDIT_HOME/workspace -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}-[0-9a-f]+' -mtime +10 -exec rm -rf {} +
 ExecStart=-/usr/bin/find $VEDIT_HOME/workspace/_cache $VEDIT_HOME/cache -type f -mtime +14 -delete
 ExecStart=-/usr/bin/find $VEDIT_HOME/workspace/_cache -mindepth 1 -type d -empty -delete
+ExecStart=-$VEDIT_HOME/bin/yt-dlp -U --quiet
 EOF
 
 cat > /etc/systemd/system/vedit-cleanup.timer <<'EOF'

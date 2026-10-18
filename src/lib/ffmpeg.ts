@@ -46,6 +46,11 @@ export interface ProbeStream {
   height?: number;
   avg_frame_rate?: string;
   r_frame_rate?: string;
+  pix_fmt?: string;
+  color_transfer?: string;
+  color_primaries?: string;
+  color_space?: string;
+  disposition?: { attached_pic?: number };
   tags?: Record<string, string>;
   side_data_list?: { rotation?: number }[];
 }
@@ -80,3 +85,34 @@ export function ffmpegBuffer(args: string[]): Promise<Buffer> {
     });
   });
 }
+
+let filterList: Promise<string> | undefined;
+/** this ffmpeg build has the filter (zscale needs libzimg: the gyan.dev and Ubuntu builds have it) */
+export async function hasFilter(name: string): Promise<boolean> {
+  filterList ??= run(FFMPEG, ["-hide_banner", "-filters"]).then(
+    (r) => r.stdout,
+    () => "",
+  );
+  return (await filterList).split("\n").some((l) => l.trim().split(/\s+/)[1] === name);
+}
+
+/** HDR transfer (iPhone HLG / PQ): an 8-bit copy without tone-mapping looks flat and washed out */
+export const isHdr = (v: Pick<ProbeStream, "color_transfer">) => v.color_transfer === "smpte2084" || v.color_transfer === "arib-std-b67";
+
+/**
+ * Filter chain (ending with ",") that tone-maps an HDR stream to SDR BT.709 — empty for SDR. With zscale: linearise,
+ * BT.2020 → BT.709 primaries, mobius curve (keeps mid-tones closest to the SDR look), back to BT.709 limited range.
+ * Without zscale the HDR tags are at least replaced, so players and Chrome do not treat the 8-bit copy as HDR.
+ */
+export async function toneMapChain(v: Pick<ProbeStream, "color_transfer" | "color_space">): Promise<string> {
+  if (!isHdr(v)) return "";
+  if (!(await hasFilter("zscale"))) return "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709,";
+  const min = v.color_space === "bt2020c" ? "bt2020c" : "bt2020nc";
+  return `zscale=tin=${v.color_transfer}:pin=bt2020:min=${min}:t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=mobius:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p,`;
+}
+
+/** colour tags of an encode made from a tone-mapped source */
+export const BT709_TAGS = ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"];
+
+/** a real video stream (not the cover picture some phones and apps attach as a second "video" stream) */
+export const isVideoStream = (s: ProbeStream) => s.codec_type === "video" && !s.disposition?.attached_pic;

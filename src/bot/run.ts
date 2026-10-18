@@ -63,7 +63,8 @@ if (process.env.VEDIT_DOCTOR_ON_START !== "0") {
 }
 
 const apiBase = process.env.TELEGRAM_API_BASE?.trim() || undefined;
-if (apiBase) log(`Bot API: ${apiBase} (локальный сервер — лимиты файлов 2000 МБ)`);
+if (apiBase) log(`Bot API: ${apiBase} (локальный сервер --local — файлы до 2000 МБ)`);
+else log("Bot API: облако — файлы от пользователей до 20 МБ, больше — ссылкой (VEDIT_LINK_MAX_MB); до 2 ГБ: deploy/telegram-bot-api.sh");
 
 const running = await startBot({ token, allowedUserIds, adminIds: admins, apiBase, maxJobs, retentionDays, onLog: log });
 

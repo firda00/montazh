@@ -244,12 +244,13 @@ export const runFullPipeline: PipelineFn = async ({ source, sources, instruction
   const many = (sources ?? []).length > 1;
   // sports / action footage ("как мы играем в баскет", "броски", "трюки"): highlights mode, no speech plan
   const { highlightsIntent, wantsHighlights } = await import("../highlights/intent.ts");
-  // a reference style is a speech montage: never highlights
-  const intent = many || like ? null : highlightsIntent(instruction);
+  // a reference style is a speech montage: never highlights; several videos: only an explicit highlights request (🏀 on the card)
+  const asked = like ? null : highlightsIntent(instruction);
+  const intent = many && asked !== "strong" ? null : asked;
   const style = like ? await readJson(like, (await import("../style/profile.ts")).StyleProfileSchema) : null;
   if (intent === "strong") {
     try {
-      return await runHighlightsBot({ source, instruction, progress, onJob, signal, log });
+      return await runHighlightsBot({ source, sources: many ? sources : undefined, instruction, progress, onJob, signal, log });
     } catch (err) {
       if (!(err instanceof NoHighlightsError)) throw err;
       // talking-head or other non-game footage sent as "highlights": make a normal montage instead of failing
@@ -317,7 +318,7 @@ ${credits}` : ""}`, notes: p.report.warnings.slice(0, 3) };
 };
 
 /** Highlights for sports footage: events (Gemini) → best moments → slow motion, punch-ins, music on the beat. */
-async function runHighlightsBot(a: Pick<PipelineArgs, "source" | "instruction" | "progress" | "onJob" | "signal" | "log"> & { jobId?: string; media?: import("../schemas/index.ts").Media }): Promise<PipelineResult> {
+async function runHighlightsBot(a: Pick<PipelineArgs, "source" | "sources" | "instruction" | "progress" | "onJob" | "signal" | "log"> & { jobId?: string; media?: import("../schemas/index.ts").Media }): Promise<PipelineResult> {
   const { ingestLight } = await import("../ingest/index.ts");
   const { planHighlights } = await import("../highlights/index.ts");
   const { cut } = await import("../cut/index.ts");
@@ -326,12 +327,22 @@ async function runHighlightsBot(a: Pick<PipelineArgs, "source" | "instruction" |
   let jobId = a.jobId;
   let media = a.media;
   if (!jobId || !media) {
-    const job = await createJob(a.source, { prompt: a.instruction, preset: "sport_highlights" });
+    const many = (a.sources ?? []).length > 1;
+    const job = await createJob(many ? `combined:${a.sources!.length} videos` : a.source, { prompt: a.instruction, preset: "sport_highlights" });
     jobId = job.id;
     a.onJob(jobId);
     a.log(`job ${jobId} (highlights)`);
+    let input = a.source;
+    if (many) {
+      // several game videos (🏀 on a batch): one combined source, so every video is searched for moments
+      const { combineSources, SourcesSchema } = await import("../ingest/combine.ts");
+      await a.progress(`▸ склеиваю ${a.sources!.length} видео в один материал…`);
+      input = path.join(jobDir(jobId), "combined.mp4");
+      await writeJson(path.join(jobDir(jobId), "sources.json"), SourcesSchema, await combineSources(a.sources!, input));
+      checkCancel(a.signal);
+    }
     await a.progress("▸ подготовка видео…");
-    media = await runStep(jobId, "ingest", () => ingestLight(jobId!, a.source));
+    media = await runStep(jobId, "ingest", () => ingestLight(jobId!, input));
   } else await updateJobPreset(jobId, "sport_highlights");
   checkCancel(a.signal);
   await a.progress(`▸ ищу броски и лучшие моменты… (${Math.round(media.duration / 60)} мин видео)`);

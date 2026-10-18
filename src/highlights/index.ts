@@ -236,6 +236,11 @@ export async function planHighlights(jobId: string, media: Media, o: HighlightsO
       notes.push(`редактор не ответил, план по правилам: ${err instanceof Error ? err.message.split("\n")[0] : err}`);
     }
   }
+  // the editor dropped every moment: the rules' choice instead of an empty reel
+  if (!picks.length) {
+    notes.push("редактор убрал все моменты — план по правилам");
+    picks = sel.picks;
+  }
   if (!title) title = defaultTitle(sport, instruction);
 
   // 4. music and its beats
@@ -251,6 +256,8 @@ export async function planHighlights(jobId: string, media: Media, o: HighlightsO
 
   // 5. EDL
   const plan = buildHighlightEdl(picks, { aspect, target, hoops: ev.hoops, frame: { width: media.width, height: media.height }, beats, title, music: music ? { file: music.track.file, offset: music.offset } : undefined });
+  // nothing survived the timeline (too short moments, a few seconds of talking): the caller falls back to a speech montage
+  if (!plan.output.clips.length) throw new NoHighlightsError(ev.events.length);
   const duration = plan.timeline.length ? plan.timeline[plan.timeline.length - 1].end : 0;
 
   // 6. captions for the people talking (whisper on those source ranges only)

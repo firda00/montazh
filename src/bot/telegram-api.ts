@@ -14,8 +14,11 @@ export const CLOUD_LIMITS = { downloadBytes: 20 * MB, uploadBytes: 50 * MB } as 
 export const LOCAL_LIMITS = { downloadBytes: 2000 * MB, uploadBytes: 2000 * MB } as const;
 export type Limits = { downloadBytes: number; uploadBytes: number };
 
+/** a self-hosted server (TELEGRAM_API_BASE), run with --local: getFile returns a path on its disk, files up to 2000 MB */
+export const isLocalApi = (apiBase = DEFAULT_API_BASE) => apiBase.replace(/\/+$/, "") !== DEFAULT_API_BASE;
+
 export function limitsFor(apiBase = DEFAULT_API_BASE): Limits {
-  return apiBase.replace(/\/+$/, "") === DEFAULT_API_BASE ? { ...CLOUD_LIMITS } : { ...LOCAL_LIMITS };
+  return isLocalApi(apiBase) ? { ...LOCAL_LIMITS } : { ...CLOUD_LIMITS };
 }
 
 // ── types (only the fields the bot reads) ──────────────────────────────────────
@@ -38,6 +41,15 @@ export interface TgVideo {
   duration?: number;
   mime_type?: string;
   file_name?: string;
+  file_size?: number;
+}
+/** a round video message */
+export interface TgVideoNote {
+  file_id: string;
+  file_unique_id?: string;
+  /** diameter, px */
+  length?: number;
+  duration?: number;
   file_size?: number;
 }
 export interface TgDocument {
@@ -73,6 +85,10 @@ export interface TgMessage {
   /** set on every message of an album */
   media_group_id?: string;
   video?: TgVideo;
+  /** round video */
+  video_note?: TgVideoNote;
+  /** GIF / silent MP4 (Telegram fills `document` for it too) */
+  animation?: TgVideo;
   document?: TgDocument;
   /** sizes of one photo, smallest first */
   photo?: TgPhotoSize[];
@@ -220,12 +236,21 @@ export type DownloadFn = (token: string, file: TgFile, dest: string, opts?: Call
 export const downloadFile: DownloadFn = async (token, file, dest, opts = {}) => {
   if (!file.file_path) throw new TelegramError("getFile", "в ответе нет file_path (файл больше лимита?)");
   await fs.mkdir(path.dirname(dest), { recursive: true });
-  if (path.isAbsolute(file.file_path)) {
-    await fs.copyFile(file.file_path, dest);
-    return;
-  }
   const base = (opts.apiBase ?? DEFAULT_API_BASE).replace(/\/+$/, "");
-  const res = await (opts.fetch ?? fetch)(`${base}/file/bot${token}/${file.file_path}`, { signal: opts.signal });
+  let url = `${base}/file/bot${token}/${file.file_path}`;
+  if (path.isAbsolute(file.file_path)) {
+    // local server (--local): the file is already on this machine — copied (the server keeps its own copy)
+    try {
+      await fs.copyFile(file.file_path, dest);
+      return;
+    } catch (err) {
+      // the server runs where its paths are not ours (a container): its HTTP file route, if a proxy serves it
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "EACCES" && code !== "EPERM") throw err;
+      url = `${base}/file/bot${token}/${file.file_path.replace(/^[\\/]+/, "")}`;
+    }
+  }
+  const res = await (opts.fetch ?? fetch)(url, { signal: opts.signal });
   if (!res.ok || !res.body) throw new TelegramError("download", `HTTP ${res.status} ${res.statusText}`, res.status);
   const tmp = `${dest}.part`;
   await pipeline(Readable.fromWeb(res.body as unknown as WebReadableStream<Uint8Array>), createWriteStream(tmp));
@@ -244,6 +269,8 @@ export interface VideoMeta {
 /** The bot talks to Telegram only through this object — tests replace `callMethod` / `download`. */
 export interface BotApi {
   readonly limits: Limits;
+  /** a self-hosted Bot API server (TELEGRAM_API_BASE): files up to 2000 MB, read from its disk */
+  readonly local?: boolean;
   getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<TgUpdate[]>;
   getFile(fileId: string): Promise<TgFile>;
   download(file: TgFile, dest: string): Promise<void>;
@@ -278,6 +305,8 @@ export interface BotApiOptions {
 }
 
 const TEXT_LIMIT = 4096;
+/** getFile of a file over the Bot API download limit (20 MB in the cloud): "Bad Request: file is too big" */
+export const isFileTooBig = (err: unknown) => err instanceof TelegramError && /file is too big/i.test(err.description);
 /** "Bad Request: message is not modified" — the same text/keyboard again; harmless */
 export const isNotModified = (err: unknown) => err instanceof TelegramError && /message is not modified/i.test(err.description);
 const CAPTION_LIMIT = 1024;
@@ -295,6 +324,7 @@ export function makeBotApi(token: string, o: BotApiOptions = {}): BotApi {
   const limits: Limits = { ...limitsFor(o.apiBase), ...o.limits };
   return {
     limits,
+    local: isLocalApi(o.apiBase),
     getUpdates: (offset, timeoutSec, signal) =>
       call<TgUpdate[]>(token, "getUpdates", { offset, timeout: timeoutSec, allowed_updates: ["message", "callback_query"] }, { ...base, signal }),
     getFile: (fileId) => call<TgFile>(token, "getFile", { file_id: fileId }, base),

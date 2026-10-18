@@ -14,7 +14,8 @@ import { detectAspect, isAspect, type Aspect } from "../lib/aspect.ts";
 import { PlanError } from "../plan/backend/types.ts";
 import { CostSchema } from "../schemas/index.ts";
 import { getVoice, isCloud, NO_VOICE, piperVoiceFor, sampleVoiceFor, type VoiceDef } from "../voice/catalog.ts";
-import { makeBotApi, TelegramError, type BotApi, type CallMethod, type DownloadFn, type InlineKeyboard, type Limits, type ReplyMarkup, type TgCallbackQuery, type TgMessage, type TgUpdate, type TgUser } from "./telegram-api.ts";
+import { downloadLink, findLinks, LinkError, linkKey, linkMaxBytes, textWithoutLinks, type DownloadLinkOptions } from "../ingest/links.ts";
+import { isFileTooBig, makeBotApi, TelegramError, type BotApi, type CallMethod, type DownloadFn, type InlineKeyboard, type Limits, type ReplyMarkup, type TgCallbackQuery, type TgMessage, type TgUpdate, type TgUser } from "./telegram-api.ts";
 import { BotDb, isLang, type JobKind, type JobRow, type Lang, type UserRow } from "./db.ts";
 import { hasGoogleTtsKey, menuAction, STRINGS, t, voiceLabel, type MenuAction, type SendMode, type Strings } from "./i18n.ts";
 import { adminHandlers } from "./admin.ts";
@@ -103,6 +104,8 @@ export const SessionSchema = z.object({
   /** the analysis was just made and is not yet billed to a job */
   ref_fresh: z.boolean().optional(),
   broadcast: z.string().optional(),
+  /** what the user is doing (last menu choice or upload): a photo during a montage is not an avatar photo */
+  ctx: z.enum(["montage", "avatar", "make"]).optional(),
 });
 export type Session = z.infer<typeof SessionSchema>;
 
@@ -166,14 +169,34 @@ export function videoCaption(o: PipelineOutput, reasoning?: string) {
   return reasoning ? `${head}\n«${excerpt(reasoning, 300)}»` : head;
 }
 
-function isVideoMessage(m: TgMessage) {
+/** video file extensions accepted as documents (case-insensitive: iPhone sends IMG_0001.MOV) */
+export const VIDEO_FILE_EXT = /\.(mp4|mov|m4v|mkv|webm|avi|3gp|3g2|mts|m2ts|ts|mpg|mpeg|wmv|flv|hevc|qt)$/i;
+
+/** a video in any form Telegram sends it: video, round video note, animation (GIF/silent MP4), or a file —
+ *  video/* mime, a video extension, or application/octet-stream without a telling extension (checked by ffprobe later) */
+export function isVideoMessage(m: TgMessage) {
   if (m.video) return { fileId: m.video.file_id, size: m.video.file_size, duration: m.video.duration, fileUniqueId: m.video.file_unique_id };
+  if (m.video_note) return { fileId: m.video_note.file_id, size: m.video_note.file_size, duration: m.video_note.duration, fileUniqueId: m.video_note.file_unique_id };
+  if (m.animation) return { fileId: m.animation.file_id, size: m.animation.file_size, duration: m.animation.duration, fileUniqueId: m.animation.file_unique_id };
   const d = m.document;
-  if (d && (d.mime_type?.startsWith("video/") || /\.(mp4|mov|m4v|mkv|webm|avi)$/i.test(d.file_name ?? ""))) return { fileId: d.file_id, size: d.file_size, duration: undefined, fileUniqueId: d.file_unique_id };
+  if (!d) return null;
+  const name = d.file_name ?? "";
+  const mime = (d.mime_type ?? "").toLowerCase();
+  const octet = mime === "application/octet-stream" || mime === "";
+  if (mime.startsWith("video/") || VIDEO_FILE_EXT.test(name) || (octet && !/\.[A-Za-z0-9]{1,5}$/.test(name))) return { fileId: d.file_id, size: d.file_size, duration: undefined, fileUniqueId: d.file_unique_id };
   return null;
 }
 
 const safeName = (s: string) => s.replace(/[^A-Za-z0-9_-]/g, "_");
+
+/** words sent next to a link read as a montage task ("2 рилса по 20 секунд"), not as small talk ("вот видео") */
+export function looksLikeTask(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 3) return false;
+  if (/^\/viral\b/i.test(t)) return true;
+  if (/(рилс|ролик|reels?\b|shorts?|шортс|секунд|сек\b|second|минут|minute|монтаж|смонтир|сделай|склей|нарежь|обреж|хайлайт|highlight|вирус|viral|субтитр|subtit|caption|формат|9:16|16:9|1:1|rils|rolik|montaj|qilib|qil\b|soniya|kesib|make\b|edit\b|cut\b)/i.test(t)) return true;
+  return t.split(/\s+/).length >= 5;
+}
 
 /** "<title-or-job>_<output>.mp4": a readable file name for a reel sent as a document */
 export function outputFileName(result: Pick<PipelineResult, "jobId" | "title">, outputId: string): string {
@@ -200,13 +223,20 @@ async function defaultVoiceSample(voiceId: string, dest: string): Promise<string
   return voiceSample(voiceId, dest);
 }
 
-async function defaultProbeDuration(file: string): Promise<number | undefined> {
+export interface UploadProbe {
+  /** a real video stream; false: readable media without video (audio, an image…); undefined: ffprobe could not read it */
+  video?: boolean;
+  duration?: number;
+}
+
+async function defaultProbeUpload(file: string): Promise<UploadProbe> {
   try {
-    const { ffprobe } = await import("../lib/ffmpeg.ts");
-    const d = Number((await ffprobe(file)).format.duration ?? NaN);
-    return Number.isFinite(d) ? d : undefined;
+    const { ffprobe, isVideoStream } = await import("../lib/ffmpeg.ts");
+    const p = await ffprobe(file);
+    const d = Number(p.format.duration ?? NaN);
+    return { video: p.streams.some(isVideoStream), duration: Number.isFinite(d) && d > 0 ? d : undefined };
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -318,8 +348,10 @@ export interface BotOptions {
   shrinkVideo?: (file: string, limitBytes: number) => Promise<string>;
   /** «🎯 Монтаж как в примере»: reference → Style DNA (default src/style/extract.ts; tests inject a stub) */
   styleExtract?: (input: ExtractInput, o: { cache: StyleCache; onLog: (l: string) => void }) => Promise<ExtractResult>;
-  /** duration of an uploaded file without Telegram metadata, s (default ffprobe) */
-  probeDuration?: (file: string) => Promise<number | undefined>;
+  /** an uploaded file: has a video stream (undefined: unreadable) and its duration, s (default ffprobe) */
+  probeUpload?: (file: string) => Promise<UploadProbe>;
+  /** video by link (Google Drive, Yandex Disk, Dropbox, direct, yt-dlp): size cap (default VEDIT_LINK_MAX_MB, 2048 MB) and test hooks */
+  links?: Partial<Pick<DownloadLinkOptions, "fetch" | "ytdlp" | "idleMs" | "totalMs" | "progressMs">> & { maxBytes?: number };
   /** long-polling timeout, seconds (default 30) */
   pollTimeout?: number;
   /** how long to wait for the rest of an album before acting (ms, default 4000) */
@@ -390,7 +422,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   const avatarImportFn = o.avatarImport ?? runAvatarImport;
   const voiceSampleFn = o.voiceSample ?? defaultVoiceSample;
   const shrinkFn = o.shrinkVideo ?? shrinkForTelegram;
-  const probeDuration = o.probeDuration ?? defaultProbeDuration;
+  const probeUpload = o.probeUpload ?? defaultProbeUpload;
+  const linkMax = o.links?.maxBytes ?? linkMaxBytes(env);
   const styleFn =
     o.styleExtract ??
     (async (input: ExtractInput, x: { cache: StyleCache; onLog: (l: string) => void }) => (await import("../style/extract.ts")).extractStyle(input, { cache: x.cache, onLog: x.onLog, deleteInput: true }));
@@ -878,10 +911,12 @@ export async function createBot(o: BotOptions): Promise<Bot> {
 
   // ── uploads ──
   const uploadLimit = (uid: number) => (isAdmin(uid) ? api.limits.downloadBytes : Math.min(api.limits.downloadBytes, plan().uploadMb * 1024 * 1024));
+  const MBn = (n: number) => Math.round(n / 1024 / 1024);
   async function tooLargeReply(uid: number, chatId: number, size: number) {
     const L = T(uid);
-    const mb = (n: number) => Math.round(n / 1024 / 1024);
-    await say(chatId, [L.tooLarge(mb(size), mb(uploadLimit(uid))), isAdmin(uid) ? L.tooLargeAdmin : ""].filter(Boolean).join("\n"));
+    const limit = uploadLimit(uid);
+    // the user is told what to do: a link (Google Drive / Yandex Disk / Dropbox / YouTube) or a compressed copy
+    await say(chatId, [L.tooLarge(MBn(size), MBn(limit), limit >= api.limits.downloadBytes), isAdmin(uid) && !api.local ? L.tooLargeAdmin : ""].filter(Boolean).join("\n"));
   }
   const uploadDir = (uid: number) => path.join(usersDir, String(uid), "uploads");
 
@@ -915,49 +950,263 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     patchSess(uid, { draft: d, card: id });
   }
 
-  // uploads are debounced per album and per user: a burst of separate files gets one card, after the last one
-  const albums = new Map<string, { caption?: string; timer?: ReturnType<typeof setTimeout>; release?: () => void }>();
-  const albumDelayMs = o.albumDelayMs ?? 4000;
-
-  async function onVideo(uid: number, m: TgMessage, v: { fileId: string; size?: number; duration?: number }) {
-    const chatId = m.chat.id;
-    if (v.size !== undefined && v.size > uploadLimit(uid)) return tooLargeReply(uid, chatId, v.size);
-    await action(chatId, "typing");
-    const file = await api.getFile(v.fileId);
-    if (file.file_size !== undefined && file.file_size > uploadLimit(uid)) return tooLargeReply(uid, chatId, file.file_size);
-    const dest = path.join(uploadDir(uid), `${safeName(v.fileId)}.mp4`);
-    if (!(await exists(dest))) await api.download(file, dest);
+  /** a downloaded file joins the open batch (or starts a new one after a run) */
+  function addToBatch(uid: number, dest: string, seconds?: number) {
     const s = sess(uid);
     const batch = s.batch_closed ? [dest] : [...(s.sources ?? []).filter((f) => f !== dest), dest];
-    // tiny files cannot be long videos: skip ffprobe for them
-    const seconds = v.duration ?? ((file.file_size ?? v.size ?? 0) >= 1024 * 1024 ? await probeDuration(dest) : undefined);
-    patchSess(uid, { source: dest, sources: batch, batch_closed: false, ...(s.batch_closed ? { card: undefined } : {}), durations: { ...(s.batch_closed ? {} : s.durations), ...(seconds ? { [dest]: seconds } : {}) } });
+    patchSess(uid, {
+      source: dest,
+      sources: batch,
+      batch_closed: false,
+      ctx: "montage",
+      ...(s.batch_closed ? { card: undefined } : {}),
+      durations: { ...(s.batch_closed ? {} : s.durations), ...(seconds ? { [dest]: seconds } : {}) },
+    });
     log(`[${uid}] видео сохранено: ${dest} (в подборке ${batch.length})`);
-    const caption = m.caption?.trim();
-    // an album arrives as separate messages, and so do several files sent one after another: act once, after the last one
-    const act = async (text?: string) => {
-      // video + instruction in the caption runs straight away; otherwise one option card for the whole burst
-      if (text && !text.startsWith("/")) await startRun(uid, chatId, text);
-      else if (text && /^\/viral\b/i.test(text)) await startRun(uid, chatId, VIRAL_INSTRUCTION);
-      else await montageCard(uid, chatId, sess(uid).sources.length);
+  }
+
+  /**
+   * Uploads run in the background, one after another per user (a 2 GB link or the local Bot API server must not
+   * hold the polling loop, and other users keep being served). Messages that arrive while a user's uploads are
+   * still downloading wait for them ("video, then «сделай рилс»" must see the video). The card (or the run of a
+   * caption) comes once, `albumDelayMs` after the last upload of a burst is in — not after each file.
+   */
+  interface UploadState {
+    chain: Promise<void>;
+    /** uploads received, not yet finished */
+    pending: number;
+    /** files added in this burst */
+    added: number;
+    chatId: number;
+    caption?: string;
+    timer?: ReturnType<typeof setTimeout>;
+    release?: () => void;
+    /** the link download in progress (🛑 and /cancel abort it) */
+    dl?: AbortController;
+  }
+  const uploads = new Map<number, UploadState>();
+  const albumDelayMs = o.albumDelayMs ?? 4000;
+  const upState = (uid: number, chatId: number) => {
+    let st = uploads.get(uid);
+    if (!st) uploads.set(uid, (st = { chain: Promise.resolve(), pending: 0, added: 0, chatId }));
+    st.chatId = chatId;
+    return st;
+  };
+  const uploadsPending = (uid: number) => (uploads.get(uid)?.pending ?? 0) > 0;
+  /** stops the burst timer (a new file came in) — the caption and the count of the burst are kept */
+  const disarm = (st: UploadState) => {
+    if (st.timer) clearTimeout(st.timer);
+    st.timer = undefined;
+    st.release?.(); // the superseded timer must not keep idle() waiting
+    st.release = undefined;
+  };
+
+  /** after the burst: a caption with a task runs it, otherwise one option card for all the files */
+  async function afterBurst(uid: number, chatId: number, caption?: string) {
+    const s = sess(uid);
+    // a run already took this batch (a text task or ▶️ waited for the uploads and went first)
+    if (s.batch_closed || !s.sources.length) return;
+    if (caption && !caption.startsWith("/")) await startRun(uid, chatId, caption);
+    else if (caption && /^\/viral\b/i.test(caption)) await startRun(uid, chatId, VIRAL_INSTRUCTION);
+    else await montageCard(uid, chatId, s.sources.length);
+  }
+
+  /** the burst is in: act now (no debounce) or albumDelayMs later, unless another file comes first */
+  async function settle(uid: number, st: UploadState) {
+    const take = () => {
+      const cap = st.caption;
+      const added = st.added;
+      st.caption = undefined;
+      st.added = 0;
+      return { cap, added };
     };
-    if (albumDelayMs <= 0 && !m.media_group_id) return act(caption); // no debounce (tests)
-    const group = m.media_group_id ?? `u:${uid}`;
-    const g = albums.get(group) ?? {};
-    if (caption) g.caption = caption;
-    if (g.timer) clearTimeout(g.timer);
-    g.release?.(); // the superseded timer's pending promise must not keep idle() waiting
+    // nothing new (too big, not a video, a failed link): the error was already said
+    if (!st.added) return void take();
+    if (albumDelayMs <= 0) return afterBurst(uid, st.chatId, take().cap); // no debounce (tests)
+    disarm(st);
     let release!: () => void;
-    const done = new Promise<void>((r) => (release = r));
-    g.release = release;
-    track(done);
-    g.timer = setTimeout(() => {
-      albums.delete(group);
-      const task = act(g.caption).catch((err) => log(`[${uid}] подборка: ${errMsg(err)}`));
+    track(new Promise<void>((r) => (release = r)));
+    st.release = release;
+    st.timer = setTimeout(() => {
+      st.timer = undefined;
+      st.release = undefined;
+      const task = afterBurst(uid, st.chatId, take().cap).catch((err) => log(`[${uid}] подборка: ${errMsg(err)}`));
       track(task);
       void task.finally(release);
     }, albumDelayMs);
-    albums.set(group, g);
+  }
+
+  /** queues an upload task (returns true when it added a file); resolves when it ran (tests await it) */
+  function queueUpload(uid: number, chatId: number, caption: string | undefined, task: () => Promise<boolean>): Promise<void> {
+    const st = upState(uid, chatId);
+    st.pending++;
+    // a new file of the burst: the card waits for it too (the caption is kept for the whole burst)
+    disarm(st);
+    if (caption) st.caption = caption;
+    const run = st.chain.then(async () => {
+      try {
+        if (await task()) st.added++;
+      } catch (err) {
+        log(`[${uid}] загрузка: ${err instanceof Error ? (err.stack ?? err.message) : err}`);
+        await say(chatId, isAdmin(uid) ? `${T(uid).uploadFailed}\n${errorText(err)}` : T(uid).uploadFailed);
+      } finally {
+        st.pending--;
+      }
+      if (st.pending === 0) await settle(uid, st);
+    });
+    st.chain = run;
+    track(run);
+    return run;
+  }
+
+  /** runs `fn` after this user's uploads in flight (or now, when there are none) */
+  function afterUploads(uid: number, fn: () => Promise<unknown>): Promise<void> {
+    const st = uploads.get(uid);
+    if (!st?.pending) return fn().then(() => undefined);
+    const run = st.chain.then(() => fn()).then(
+      () => undefined,
+      async (err) => {
+        log(`[${uid}] после загрузки: ${err instanceof Error ? (err.stack ?? err.message) : err}`);
+        await say(st.chatId, isAdmin(uid) ? errorText(err) : `✖ ${T(uid).failed}`);
+      },
+    );
+    st.chain = run;
+    track(run);
+    return run;
+  }
+
+  /** a Telegram file (video, video note, animation, video document) → the batch; false when refused */
+  async function onVideo(uid: number, m: TgMessage, v: { fileId: string; size?: number; duration?: number }): Promise<boolean> {
+    const chatId = m.chat.id;
+    const L = T(uid);
+    const limit = uploadLimit(uid);
+    if (v.size !== undefined && v.size > limit) return void (await tooLargeReply(uid, chatId, v.size)), false;
+    await action(chatId, "typing");
+    let file;
+    try {
+      file = await api.getFile(v.fileId);
+    } catch (err) {
+      // no size in the message and over the Bot API limit: Telegram refuses getFile
+      if (isFileTooBig(err)) return void (await tooLargeReply(uid, chatId, v.size ?? 0)), false;
+      throw err;
+    }
+    if (file.file_size !== undefined && file.file_size > limit) return void (await tooLargeReply(uid, chatId, file.file_size)), false;
+    const dest = path.join(uploadDir(uid), `${safeName(v.fileId)}.mp4`);
+    if (!(await exists(dest))) {
+      try {
+        await api.download(file, dest);
+      } catch (err) {
+        log(`[${uid}] файл не скачан: ${errMsg(err)}`);
+        await fs.rm(dest, { force: true }).catch(() => {});
+        await say(chatId, isAdmin(uid) ? `${L.uploadFailed}\n${errorText(err)}` : L.uploadFailed);
+        return false;
+      }
+    }
+    // tiny files cannot be real videos (test doubles): no ffprobe for them
+    const size = file.file_size ?? v.size ?? (await fs.stat(dest).catch(() => ({ size: 0 }))).size;
+    const probe = size >= 4096 ? await probeUpload(dest) : {};
+    if (probe.video === false) {
+      log(`[${uid}] не видео: ${dest}`);
+      await fs.rm(dest, { force: true }).catch(() => {});
+      await say(chatId, L.notVideo);
+      return false;
+    }
+    addToBatch(uid, dest, v.duration ?? probe.duration);
+    return true;
+  }
+
+  /** files already downloaded from this link (the same link twice is not downloaded again) */
+  async function linkFiles(dir: string, key: string): Promise<string[]> {
+    const names = await fs.readdir(dir).catch(() => [] as string[]);
+    return names
+      .filter((n) => (n.startsWith(`${key}.`) || n.startsWith(`${key}_`)) && !n.endsWith(".part"))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+      .map((n) => path.join(dir, n));
+  }
+
+  function linkErrorText(uid: number, err: unknown): string {
+    const L = T(uid);
+    let text = L.linkFailed;
+    if (err instanceof LinkError) {
+      const by: Partial<Record<LinkError["code"], string>> = {
+        too_big: L.linkTooBig(err.bytes ? MBn(err.bytes) : 0, MBn(linkMax)),
+        private: L.linkPrivate,
+        folder: L.linkFolder,
+        not_video: L.linkNotVideo,
+        empty: L.linkNotVideo,
+        no_ytdlp: L.linkNoYtdlp,
+        timeout: L.linkTimeout,
+        cancelled: L.linkCancelled,
+      };
+      text = by[err.code] ?? L.linkFailed;
+    }
+    // admins see the technical reason too
+    return isAdmin(uid) && !(err instanceof LinkError && err.code === "cancelled") ? `${text}\n(${errMsg(err)})` : text;
+  }
+
+  /** links in a message → downloaded videos in the batch; false when nothing was added */
+  async function onLinks(uid: number, chatId: number, urls: string[]): Promise<boolean> {
+    const L = T(uid);
+    const st = upState(uid, chatId);
+    const dir = uploadDir(uid);
+    let added = 0;
+    for (const url of urls.slice(0, 5)) {
+      const key = linkKey(url);
+      let files = await linkFiles(dir, key);
+      if (!files.length) {
+        const ac = new AbortController();
+        st.dl = ac;
+        const cancelKbd = encodeKb({ inline_keyboard: [[{ text: L.btnCancelDownload, callback_data: "XD" }]] });
+        const statusId = await say(chatId, L.linkStart, cancelKbd);
+        let shown = "";
+        let lastEdit = 0;
+        const editEvery = o.links?.progressMs ?? 3000;
+        const durations = new Map<string, number>();
+        log(`[${uid}] ссылка: ${url}`);
+        try {
+          const got = await downloadLink(url, dir, key, {
+            maxBytes: linkMax,
+            signal: ac.signal,
+            fetch: o.links?.fetch,
+            ytdlp: o.links?.ytdlp,
+            idleMs: o.links?.idleMs,
+            totalMs: o.links?.totalMs,
+            progressMs: Math.min(editEvery, 2000),
+            log: (l) => log(`[${uid}] ${l}`),
+            // strict for links: a page or an archive is refused here, not in the middle of a montage
+            probe: async (f) => {
+              const p = await probeUpload(f);
+              if (p.duration) durations.set(f, p.duration);
+              return p.video === true;
+            },
+            onProgress: (bytes, total) => {
+              const text = L.linkProgress(MBn(bytes), total ? MBn(total) : 0);
+              if (!statusId || text === shown || Date.now() - lastEdit < editEvery) return;
+              shown = text;
+              lastEdit = Date.now();
+              void edit(chatId, statusId, text, cancelKbd);
+            },
+          });
+          files = got.map((f) => f.file);
+          log(`[${uid}] по ссылке скачано: ${got.map((f) => `${path.basename(f.file)} ${MBn(f.bytes)} МБ`).join(", ")}`);
+          if (statusId) await edit(chatId, statusId, L.linkDone(got.length, MBn(got.reduce((s, f) => s + f.bytes, 0))));
+        } catch (err) {
+          log(`[${uid}] ссылка не скачана: ${errMsg(err)}`);
+          const text = linkErrorText(uid, err);
+          if (statusId) await edit(chatId, statusId, text);
+          else await say(chatId, text);
+          continue;
+        } finally {
+          if (st.dl === ac) st.dl = undefined;
+        }
+        for (const f of files) addToBatch(uid, f, durations.get(f));
+      } else {
+        // downloaded before: only the durations are needed
+        for (const f of files) addToBatch(uid, f, (await probeUpload(f)).duration);
+      }
+      added += files.length;
+    }
+    return added > 0;
   }
 
   // ── «🎯 Монтаж как в примере»: reference → Style DNA (cached by file_unique_id / link / content) ──
@@ -1174,20 +1423,21 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const mb = Math.round(uploadLimit(uid) / 1024 / 1024);
     patchSess(uid, { awaiting: undefined });
     switch (a) {
+      // a new batch gets a new option card (the old card may be far up the chat)
       case "montage":
-        patchSess(uid, { intent: undefined, sources: [], batch_closed: false, ref: undefined, ref_fresh: undefined });
+        patchSess(uid, { intent: undefined, sources: [], batch_closed: false, ref: undefined, ref_fresh: undefined, card: undefined, draft: undefined, ctx: "montage" });
         return void (await say(chatId, L.montageAsk(mb)));
       case "ref":
-        patchSess(uid, { awaiting: "ref", intent: undefined, sources: [], batch_closed: false, card: undefined, draft: undefined });
+        patchSess(uid, { awaiting: "ref", intent: undefined, sources: [], batch_closed: false, card: undefined, draft: undefined, ctx: "montage" });
         return void (await say(chatId, L.refAsk(mb)));
       case "highlights":
-        patchSess(uid, { intent: "hl", sources: [], batch_closed: false });
+        patchSess(uid, { intent: "hl", sources: [], batch_closed: false, card: undefined, draft: undefined, ctx: "montage" });
         return void (await say(chatId, L.highlightsAsk(mb)));
       case "make":
-        patchSess(uid, { awaiting: "topic" });
+        patchSess(uid, { awaiting: "topic", ctx: "make" });
         return void (await say(chatId, L.makeAskTopic));
       case "avatar":
-        patchSess(uid, { awaiting: "avatar" });
+        patchSess(uid, { awaiting: "avatar", ctx: "avatar" });
         return void (await say(chatId, L.avatarMenu, encodeKb({ inline_keyboard: [[{ text: L.btnAvatarReset, callback_data: "AV:reset" }]] })));
       case "settings": {
         const v = settingsView(uid);
@@ -1260,21 +1510,40 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   });
 
   // ── messages ──
+  /** background work of an update: awaited only without debounce (tests), the polling loop does not wait for it */
+  const bg = (p: Promise<void>) => (albumDelayMs <= 0 ? p : undefined);
+
   async function handleMessage(user: UserRow, m: TgMessage) {
     const uid = user.tg_id;
     const chatId = m.chat.id;
     const L = t(user.lang);
+    const s = sess(uid);
+    // avatar_result.zip before the video check (an octet-stream zip is not a video)
+    if (m.document && isAvatarResult(m.document.file_name)) return uploadsPending(uid) ? bg(afterUploads(uid, () => onAvatarResult(uid, m, m.document!))) : onAvatarResult(uid, m, m.document);
     const video = isVideoMessage(m);
-    if (video && sess(uid).awaiting === "ref") return onReference(uid, chatId, { video, name: m.document?.file_name });
-    if (video) return onVideo(uid, m, video);
-    if (m.document && isAvatarResult(m.document.file_name)) return onAvatarResult(uid, m, m.document);
-    if (m.photo?.length) return onAvatarMedia(uid, m, "photo", m.photo[m.photo.length - 1], ".jpg");
-    if (m.document?.mime_type?.startsWith("image/")) return onAvatarMedia(uid, m, "photo", m.document, path.extname(m.document.file_name ?? "") || ".jpg");
+    if (video && s.awaiting === "ref") return onReference(uid, chatId, { video, name: m.document?.file_name });
+    if (video) return bg(queueUpload(uid, chatId, m.caption?.trim() || undefined, () => onVideo(uid, m, video)));
+    const image = m.photo?.length ? m.photo[m.photo.length - 1] : m.document?.mime_type?.startsWith("image/") ? m.document : undefined;
+    if (image) {
+      // a photo in the middle of a montage is not meant for the avatar: say what to send instead of saving it silently
+      if (s.ctx === "montage" && s.awaiting !== "avatar" && !/^\/avatar\b/i.test(m.caption ?? "")) return void (await say(chatId, L.photoInMontage));
+      return onAvatarMedia(uid, m, "photo", image, m.photo?.length ? ".jpg" : path.extname(m.document?.file_name ?? "") || ".jpg");
+    }
     if (m.voice) return onAvatarMedia(uid, m, "voice", m.voice, ".ogg");
     if (m.audio) return onAvatarMedia(uid, m, "voice", m.audio, path.extname(m.audio.file_name ?? "") || ".mp3");
     if (m.document) return void (await say(chatId, L.notVideo));
     const text = m.text?.trim();
     if (!text) return;
+    // a message while this user's uploads are still downloading waits for them ("video, then «2 рилса»" must see
+    // the video) — except the controls
+    if (uploadsPending(uid) && !/^\/(cancel|status|start|menu|help)\b/i.test(text)) return bg(afterUploads(uid, () => handleText(user, m, text)));
+    return handleText(user, m, text);
+  }
+
+  async function handleText(user: UserRow, m: TgMessage, text: string) {
+    const uid = user.tg_id;
+    const chatId = m.chat.id;
+    const L = t(user.lang);
 
     const cmd = /^\/([a-z_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(text);
     if (cmd) {
@@ -1292,7 +1561,10 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         case "cancel": {
           const mine = queue.jobsOf(uid);
           const ids = [...mine.running, ...mine.waiting];
-          if (!ids.length) return void (await say(chatId, L.nothingToCancel));
+          // a link download in progress stops too
+          const dl = uploads.get(uid)?.dl;
+          if (dl) dl.abort();
+          if (!ids.length) return void (dl ? undefined : await say(chatId, L.nothingToCancel));
           await say(chatId, L.cancelling);
           for (const id of ids) await cancelJob(id);
           return;
@@ -1352,6 +1624,13 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     if (awaiting === "topic") return makeCardFor(uid, chatId, text);
     if (awaiting === "avatar") return startAvatar(uid, chatId, text);
     if (awaiting?.startsWith("edit:")) return applyEdit(uid, chatId, awaiting.slice(5), text);
+    // a link to a video (Google Drive, Yandex Disk, Dropbox, YouTube…) is an upload, like a file; words next to it
+    // that read as a task run once it is downloaded, like a caption
+    const links = findLinks(text);
+    if (links.length) {
+      const rest = textWithoutLinks(text);
+      return bg(queueUpload(uid, chatId, looksLikeTask(rest) ? rest : undefined, () => onLinks(uid, chatId, links)));
+    }
     return startRun(uid, chatId, text);
   }
 
@@ -1430,8 +1709,20 @@ export async function createBot(o: BotOptions): Promise<Bot> {
           break;
         }
         case "M":
+          // ▶️ while videos are still downloading: started right after them
+          if (a === "go" && uploadsPending(uid)) {
+            toast = L.uploadsPending;
+            await bg(afterUploads(uid, () => montageCallback(uid, chatId, msgId, a)));
+            break;
+          }
           toast = await montageCallback(uid, chatId, msgId, a, b === undefined ? undefined : [b, c].filter(Boolean).join(":"));
           break;
+        case "XD": {
+          const dl = uploads.get(uid)?.dl;
+          if (dl) dl.abort();
+          toast = dl ? L.linkCancelled : L.nothingToCancel;
+          break;
+        }
         case "K":
           toast = await makeCallback(uid, chatId, msgId, a, [b, c].filter(Boolean).join(":"));
           break;
@@ -1523,12 +1814,15 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const s = sess(uid);
     const d: MontageDraft = s.draft ?? draftFor(uid, s.sources.length);
     if (op === "go") {
+      // a second tap on ▶️ (or ▶️ on an older card): no second job with the same videos
+      if (msgId && s.card !== msgId) return L.cardStale;
       const hl = d.mode === "hl" || d.mode === "pp";
       const ref = d.style === "ref" && !hl ? s.ref : undefined;
-      const job = await startRun(uid, chatId, draftInstruction(d), { preset: hl || ref ? undefined : STYLE_PRESET[d.style], highlights: hl, single: hl, like: ref ?? null });
+      // 🏀 on a batch: every video goes into the highlights (combined), not only the last one
+      const job = await startRun(uid, chatId, draftInstruction(d), { preset: hl || ref ? undefined : STYLE_PRESET[d.style], highlights: hl, like: ref ?? null });
       // the card keeps its buttons when the job was not accepted (limit, full queue) — the user can retry
       if (job) {
-        patchSess(uid, { draft: undefined, intent: undefined });
+        patchSess(uid, { draft: undefined, intent: undefined, card: undefined });
         if (msgId) await editMarkup(chatId, msgId, undefined);
       }
       return undefined;
@@ -1675,6 +1969,14 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     log(`задача ${job.id} снова в очереди после перезапуска`);
   }
 
+  // a batch whose option card was still waiting for the end of the burst when the bot stopped: the card now
+  for (const { user: uid, data } of db.sessionsSince<unknown>(new Date(Date.now() - 6 * 3_600_000).toISOString())) {
+    const s = SessionSchema.safeParse(data);
+    if (!s.success || !s.data.sources.length || s.data.batch_closed || s.data.card || db.getUser(uid)?.onboarding !== "done") continue;
+    log(`[${uid}] подборка из ${s.data.sources.length} видео без карточки после перезапуска — отправляю карточку`);
+    track(montageCard(uid, uid, s.data.sources.length).catch((err) => log(`⚠ карточка ${uid}: ${errMsg(err)}`)));
+  }
+
   // ── retention ──
   const retention = (now?: number) => runRetention({ db, usersDir, jobsRoot: WORKSPACE_ROOT, days: retentionDays, now });
   const timers: ReturnType<typeof setTimeout>[] = [];
@@ -1726,6 +2028,11 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     close() {
       for (const tm of timers) clearTimeout(tm);
       for (const c of cards.values()) if (c.timer) clearTimeout(c.timer);
+      // burst timers and link downloads (an open batch gets its card again after the next start)
+      for (const st of uploads.values()) {
+        disarm(st);
+        st.dl?.abort();
+      }
       db.close();
     },
   };

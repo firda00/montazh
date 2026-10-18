@@ -15,6 +15,7 @@ image API, понимание кадра — Gemini API, одна тяжёлая
 | `deploy.sh` | ноутбук, Git Bash | заливает коммит на сервер и перезапускает бота (при первом запуске сам готовит сервер) |
 | `setup-ubuntu.sh` | сервер, `sudo` | подготовка свежей Ubuntu: swap, пакеты, Node 24, Chrome, пользователь `vedit`, автообновления, файрвол, systemd |
 | `remote-update.sh` | сервер, `sudo` (его вызывает `deploy.sh`) | checkout, `npm ci`, whisper.cpp, Piper, `.env`, `vedit doctor`, рестарт, логи |
+| `telegram-bot-api.sh` | сервер, `sudo` (по желанию) | локальный Bot API: файлы до 2 ГБ (нужны api_id/api_hash владельца, см. ниже) |
 | `build-whisper.sh` | сервер (или любой Linux) | сборка whisper.cpp v1.9.5 из исходников (`-DGGML_NATIVE=ON`) + модель large-v3-turbo q5_0 |
 
 ## Первый деплой
@@ -137,6 +138,27 @@ x64 — значит работает быстрый режим захвата �
 `PRODUCER_HEADLESS_SHELL_PATH`). Обе заданы в `server.env` на `/opt/vedit/bin/chrome-headless-shell`. Если задана только
 `VEDIT_CHROME`/`CHROME_PATH`/`PUPPETEER_EXECUTABLE_PATH`, vedit сам передаёт её HyperFrames как `HYPERFRAMES_BROWSER_PATH`
 (`src/lib/chrome.ts`).
+
+## Видео больше 20 МБ: ссылки и локальный Bot API
+
+Облачный Bot API отдаёт боту файлы только до 20 МБ. Без настройки бот принимает **ссылки** (Google Диск, Яндекс Диск,
+Dropbox, прямые); YouTube / Instagram / TikTok — через `yt-dlp`, который `setup-ubuntu.sh` кладёт в
+`/opt/vedit/bin/yt-dlp` (`VEDIT_YTDLP` в `server.env`, обновляется таймером `vedit-cleanup` каждый день).
+
+Файлы до 2 ГБ прямо в Telegram — локальный сервер Bot API (`deploy/telegram-bot-api.sh`):
+
+1. Владелец создаёт **api_id / api_hash** на https://my.telegram.org → «API development tools» (это ключи аккаунта,
+   не бота; никому не передавать).
+2. `ssh … ; sudo TELEGRAM_API_ID=… TELEGRAM_API_HASH=… bash /opt/vedit/app/deploy/telegram-bot-api.sh` — сборка из
+   исходников (1 OCPU: 30–60 мин, `-j 1`), `telegram-bot-api.service` (пользователь `vedit`, `--local`, только
+   `127.0.0.1:8081`, данные `/opt/vedit/tg-bot-api`, их чистка через 2 дня — `telegram-bot-api-cleanup.timer`),
+   drop-in `vedit-bot.service.d/bot-api.conf` (бот стартует после сервера и читает `/opt/vedit/bot-api.env`).
+3. `sudo bash /opt/vedit/app/deploy/telegram-bot-api.sh --switch` — `logOut` бота в облаке (облако потом ~10 минут не
+   принимает бота), `TELEGRAM_API_BASE=http://127.0.0.1:8081` в `/opt/vedit/bot-api.env`, рестарт. В логе бота:
+   `Bot API: http://127.0.0.1:8081 (локальный сервер …)`.
+
+Назад в облако: `curl -s http://127.0.0.1:8081/bot<TOKEN>/logOut; sudo rm /opt/vedit/bot-api.env; sudo systemctl restart vedit-bot`.
+`setup-ubuntu.sh` эти файлы не трогает (он переписывает только `server.env` и сам юнит).
 
 ## Если что-то не так
 

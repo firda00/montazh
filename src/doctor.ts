@@ -123,6 +123,11 @@ export async function runDoctor(opts: { env?: NodeJS.ProcessEnv; bot?: boolean; 
   if (opts.bot) {
     add("telegram", "TELEGRAM_BOT_TOKEN", has("TELEGRAM_BOT_TOKEN"), true, has("TELEGRAM_BOT_TOKEN") ? "" : "токен от @BotFather в .env");
     add("admins", "TELEGRAM_ADMIN_IDS / TELEGRAM_ALLOWED_USERS", has("TELEGRAM_ADMIN_IDS") || has("TELEGRAM_ALLOWED_USERS"), false, has("TELEGRAM_ALLOWED_USERS") ? "закрытая бета (белый список)" : "открытая регистрация");
+    // files from users: 20 MB in the cloud (bigger by link), 2000 MB with a local Bot API server
+    add("bot-api", "Bot API: файлы от пользователей", true, false, has("TELEGRAM_API_BASE") ? `локальный сервер ${env.TELEGRAM_API_BASE} — до 2000 МБ` : "облако — до 20 МБ, больше ссылкой (до 2 ГБ: deploy/telegram-bot-api.sh)");
+    const { ytdlpAvailable, ytdlpBin } = await import("./ingest/links.ts");
+    const yt = await ytdlpAvailable(env);
+    add("yt-dlp", "yt-dlp (видео по ссылкам YouTube / Instagram / TikTok)", yt, false, yt ? ytdlpBin(env) : "нет (необязательно: Google Диск, Яндекс Диск, Dropbox и прямые ссылки работают без него; VEDIT_YTDLP)");
   }
   if (!server.on) {
     const agy = await findAgy(env);

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { ffmpeg, ffprobe, parseRate } from "../lib/ffmpeg.ts";
+import { BT709_TAGS, ffmpeg, ffprobe, isHdr, isVideoStream, parseRate, toneMapChain } from "../lib/ffmpeg.ts";
 import { exists, jobDir, writeJson } from "../lib/workspace.ts";
 import { MediaSchema, type Media } from "../schemas/index.ts";
 
@@ -34,7 +34,7 @@ export async function ingest(jobId: string, sourcePath: string): Promise<Media> 
   if (!(await exists(sourcePath))) throw new Error(`source video not found: ${sourcePath}`);
   const dir = jobDir(jobId);
   const probe = await ffprobe(sourcePath);
-  const v = probe.streams.find((s) => s.codec_type === "video");
+  const v = probe.streams.find(isVideoStream);
   const a = probe.streams.find((s) => s.codec_type === "audio");
   if (!v || !v.width || !v.height) throw new Error("source has no video stream");
 
@@ -47,15 +47,18 @@ export async function ingest(jobId: string, sourcePath: string): Promise<Media> 
   const displayW = rotated ? v.height : v.width;
   const displayH = rotated ? v.width : v.height;
   const { width, height, vf } = normalizeFilter(displayW, displayH);
+  // iPhone HDR (HLG / PQ, 10-bit): tone-mapped to SDR BT.709 before scaling — otherwise flat colours and HDR tags on 8-bit
+  const toneMap = await toneMapChain(v);
 
   const normalized = path.join(dir, "normalized.mp4");
   const args = ["-i", sourcePath];
   if (!a) args.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
   args.push(
-    "-map", "0:v:0",
+    "-map", "0:V:0",
     "-map", a ? "0:a:0" : "1:a:0",
-    "-vf", vf,
+    "-vf", toneMap + vf,
     "-c:v", "libx264", "-preset", "veryfast", "-crf", String(X264_CRF),
+    ...(toneMap ? BT709_TAGS : []),
     "-g", String(TARGET_FPS), "-keyint_min", String(TARGET_FPS),
     "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
     "-t", String(duration),
@@ -102,11 +105,12 @@ export async function ingest(jobId: string, sourcePath: string): Promise<Media> 
 export async function ingestLight(jobId: string, sourcePath: string): Promise<Media> {
   if (!(await exists(sourcePath))) throw new Error(`source video not found: ${sourcePath}`);
   const probe = await ffprobe(sourcePath);
-  const v = probe.streams.find((s) => s.codec_type === "video");
+  const v = probe.streams.find(isVideoStream);
   const a = probe.streams.find((s) => s.codec_type === "audio");
   const rotation = Math.abs(v?.side_data_list?.find((d) => d.rotation !== undefined)?.rotation ?? Number(v?.tags?.rotate ?? 0));
   const duration = Number(probe.format.duration);
-  const ok = v && v.width && v.height && a && rotation === 0 && /^(h264|hevc)$/.test(v.codec_name ?? "") && Number.isFinite(duration) && Math.max(v.width, v.height) <= 3840;
+  // HDR needs the tone-mapping of the full ingest
+  const ok = v && v.width && v.height && a && rotation === 0 && !isHdr(v) && /^(h264|hevc)$/.test(v.codec_name ?? "") && Number.isFinite(duration) && Math.max(v.width, v.height) <= 3840;
   if (!ok) return ingest(jobId, sourcePath);
   const src = path.resolve(sourcePath);
   return writeJson(path.join(jobDir(jobId), "media.json"), MediaSchema, {
