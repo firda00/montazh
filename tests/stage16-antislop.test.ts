@@ -46,7 +46,7 @@ const CLEAN = {
   title: "Арабика по 301 центу",
   language: "ru",
   beats: [
-    { text: "Арабика на бирже ICE — 301,88 цента за фунт", emphasis: "301,88 цента", icon: "trending-up", seconds: 5, voiceover: "Четырнадцатого октября арабика на бирже ICE стоила почти триста два цента за фунт." },
+    { text: "Арабика на ICE — 301,88 цента за фунт", emphasis: "301,88 цента", icon: "trending-up", seconds: 3, voiceover: "Арабика на бирже ICE — почти триста два цента за фунт." },
     { text: "Колумбия собрала на 15% меньше кофе", emphasis: "15%", icon: "cloud-rain", seconds: 5, voiceover: "Колумбия собрала на пятнадцать процентов меньше, экспорт упал на двенадцать." },
     { text: "Кофе навынос в России — 233 рубля", emphasis: "233 рубля", icon: "coffee", seconds: 5, voiceover: "Средний чек за кофе с собой в России вырос до двухсот тридцати трёх рублей." },
     { text: "Автоматы продают на 25% больше", emphasis: "25%", icon: "coins", seconds: 5, voiceover: "А кофе из автоматов по сто двадцать восемь рублей продаётся на четверть лучше." },
@@ -141,7 +141,8 @@ test("photos: ranking prefers CC0/PDM and the frame's shape; screenshots, graphi
   assert.match(rejectReason(OV({ width: 6000, height: 1500 }) as never, f)!, /aspect/);
   assert.match(rejectReason(OV({ filetype: "png", width: 1920, height: 1080 }) as never, frameFor("16:9"))!, /screenshot/);
   const ranked = rankPhotos([OV({ id: "cc0-other", license: "cc0", title: "Rock hyrax on a machine" }), OV({ id: "by-wide" }), OV({ id: "cc0-wide", license: "cc0", license_version: "1.0" })] as never, f, "coffee cherries");
-  assert.deepEqual(ranked.map((r) => r.id), ["cc0-wide", "by-wide", "cc0-other"], "relevant first, then public domain over CC BY");
+  // stage 25: a result without half of the query words is dropped (it used to rank last and still win when alone)
+  assert.deepEqual(ranked.map((r) => r.id), ["cc0-wide", "by-wide"], "relevant only, public domain over CC BY");
   const shape = rankPhotos([OV({ id: "by-wide" }), OV({ id: "by-tall", width: 2000, height: 3400 })] as never, f, "coffee cherries");
   assert.equal(shape[0].id, "by-tall", "the shape closer to 9:16 wins at equal relevance");
   assert.deepEqual(queryVariants("Coffee cherries harvest, Colombia!", "coffee"), ["coffee cherries harvest colombia", "coffee cherries harvest", "coffee cherries", "cherries harvest colombia", "cherries harvest"]);

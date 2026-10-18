@@ -85,6 +85,12 @@ export interface PhotoSearchResult {
 const NOT_A_PHOTO = /\b(screen ?shots?|screen ?caps?|logos?|icons?|diagrams?|charts?|graphs?|infographics?|maps?|posters?|flyers?|banners?|clip ?art|vectors?|illustrations?|drawings?|cartoons?|renders?|rendering|3d model|ai[- ]generated|midjourney|stable diffusion|dall-?e|watermark|memes?|text|signs?|fonts?|typography|patterns?|textures?|wallpapers?|cans?|labels?|packag\w*|advert\w*|brand\w*|logo\w*|storefront|shop front|front|menu|billboard|book cover|cover art)\b/i;
 /** titles of statistics maps and charts (OWID-style "<indicator>, <year>") */
 const DATA_GRAPHIC = /,\s*(1[89]|20)\d\d\s*$|\b(production|consumption|exports?|imports?|statistics|per capita|by country|share of|percentage|gdp|population|rate)\b/i;
+/**
+ * Officials and public figures at events (stage 25: «business meeting investors» returned «Ukrainian President … meets
+ * with Italian Prime Minister» for an AI-funding beat). The director never searches for specific real people, so a photo
+ * of a politician or a royal is always off-topic and misleading.
+ */
+const PUBLIC_FIGURES = /\b(president|prime minister|minister|chancellor|senator|congress\w*|parliament\w*|ambassador|embassy|summit|official visit|state visit|meets with|meeting with|king|queen|prince|princess|pope|governor|mayor|zelensk\w*|putin|trump|biden|obama|xi jinping|macron|scholz|erdo[gğ]an|modi|netanyahu|meloni|lukashenk\w*|mirziyoyev)\b/i;
 /** exact screen resolutions: a PNG of one of these is almost surely a screenshot */
 const SCREEN_SIZES = new Set(["1920x1080", "1366x768", "1280x720", "1440x900", "1536x864", "2560x1440", "1280x800", "1024x768", "3840x2160", "2880x1800"]);
 
@@ -92,7 +98,16 @@ const SCREEN_SIZES = new Set(["1920x1080", "1366x768", "1280x720", "1440x900", "
 export const coverScale = (w: number, h: number, f: Frame) => Math.max(f.w / w, f.h / h);
 
 /** A photo picked by an earlier run that today's title rules would refuse (re-renders search again). */
-export const creditRejected = (c: { title: string }) => NOT_A_PHOTO.test(c.title ?? "") || DATA_GRAPHIC.test(c.title ?? "");
+export const creditRejected = (c: { title: string; query?: string }) =>
+  NOT_A_PHOTO.test(c.title ?? "") || DATA_GRAPHIC.test(c.title ?? "") || PUBLIC_FIGURES.test(c.title ?? "") || (!!c.query && !titleRelevant(c.title ?? "", c.query));
+
+/** At least half of the query words appear in the text (a plural «s» ignored). */
+export function titleRelevant(text: string, query: string): boolean {
+  const qw = query.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+  if (!qw.length) return true;
+  const t = text.toLowerCase();
+  return qw.filter((w) => t.includes(w.replace(/s$/, ""))).length >= Math.ceil(qw.length / 2);
+}
 
 /** Why a result is not usable (null = usable). Dimensions may be unknown before download. */
 export function rejectReason(r: PhotoResult, f: Frame): string | null {
@@ -103,6 +118,7 @@ export function rejectReason(r: PhotoResult, f: Frame): string | null {
   if (NOT_A_PHOTO.test(r.title ?? "")) return "not a photo (title)";
   // data maps / charts uploaded from Our World in Data & co.: "Green coffee production, 2022", "… per capita"
   if (DATA_GRAPHIC.test(r.title ?? "")) return "not a photo (data graphic)";
+  if (PUBLIC_FIGURES.test(r.title ?? "")) return "a public figure / official event";
   if ((r.tags ?? []).filter((t) => NOT_A_PHOTO.test(t.name)).length >= 2) return "not a photo (tags)";
   if (r.width && r.height) {
     const a = r.width / r.height;
@@ -139,8 +155,11 @@ export function rankPhotos(rs: PhotoResult[], f: Frame, query = ""): PhotoResult
     const flowery = (r.title ?? "").length > 80 ? -1.5 : 0;
     return lic + fit + res + png + flowery;
   };
+  // stage 25: at least half of the query words must be in the title/tags («stock trading screens» returned a 1955
+  // Karmann Ghia, «tech office open space» a police booth); a narrower query variant asks for fewer words
+  const relevant = (r: PhotoResult) => titleRelevant(`${r.title ?? ""} ${(r.tags ?? []).map((t) => t.name).join(" ")}`, query);
   return rs
-    .filter((r) => rejectReason(r, f) === null)
+    .filter((r) => rejectReason(r, f) === null && relevant(r))
     .map((r) => ({ r, s: score(r) }))
     .sort((a, b) => b.s - a.s || a.r.id.localeCompare(b.r.id))
     .map((x) => x.r);

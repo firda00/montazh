@@ -10,6 +10,7 @@ import { selectVisionProvider, type AnalysisChunk, type VisionChoice } from "./v
 import { transcribe, type TimestampMethod } from "./whisper.ts";
 import { findAsrPython, labelSpeakers, transcribeFaster, type AsrChoice } from "./asr.ts";
 import { loadImportedAsr } from "./asr-import.ts";
+import { asrFixEnabled, detectLanguage, fixTranscript, tidyTranscript } from "./asrfix.ts";
 
 export const UnderstandReportSchema = z.object({
   transcriber: z
@@ -25,6 +26,8 @@ export const UnderstandReportSchema = z.object({
       wall_seconds: z.number(),
     })
     .nullable(),
+  /** stage 25: the correction pass over the transcript (words replaced, timings kept) */
+  asr_fix: z.object({ model: z.string(), changes: z.number().int(), usd: z.number(), cached: z.boolean(), examples: z.array(z.string()) }).nullable().default(null),
   vision: z.object({ provider: z.string(), note: z.string() }),
   speakers: z.object({ engine: z.string(), count: z.number().int(), wall_seconds: z.number() }).nullable(),
   shots: z.number().int(),
@@ -48,6 +51,13 @@ export interface UnderstandOptions {
   /** label phrases with speakers (needs the sidecar); default on when it is installed (env VEDIT_DIARIZE=0 disables) */
   diarize?: boolean;
   numSpeakers?: number;
+  /**
+   * stage 25: what the video is about (the user's instruction, an avatar script): names and terms in it help the
+   * correction pass (and whisper's prompt with VEDIT_WHISPER_PROMPT=on)
+   */
+  hint?: string;
+  /** the post-correction pass of names/brands/terms (default: VEDIT_ASR_FIX, auto = on with a Gemini key) */
+  asrFix?: boolean;
   onLog?: (line: string) => void;
 }
 
@@ -148,7 +158,7 @@ export async function understand(jobId: string, media: Media, opts: UnderstandOp
       const r =
         asr.engine === "faster-whisper"
           ? await transcribeFaster(media.audio_path, media.duration, dir, { threads: opts.threads, language: opts.language, python: asr.python!, onLog: opts.onLog })
-          : await transcribe(media.audio_path, media.duration, dir, { threads: opts.threads, language: opts.language, method: opts.method });
+          : await transcribe(media.audio_path, media.duration, dir, { threads: opts.threads, language: opts.language, method: opts.method, prompt: process.env.VEDIT_WHISPER_PROMPT?.trim().toLowerCase() === "on" || process.env.VEDIT_WHISPER_PROMPT?.trim().toLowerCase() === "carry" ? opts.hint : undefined });
       transcript = r.transcript;
       transcriber = {
         engine: asr.engine,
@@ -188,6 +198,25 @@ export async function understand(jobId: string, media: Media, opts: UnderstandOp
     }
   } else {
     warnings.push("no audio track — transcript is empty");
+  }
+  // stage 25: words as the captions will show them — per-phrase language (mixed ru/uz/en), obvious mishearings of
+  // names and terms fixed by one cheap pass (timings untouched), caption hygiene. The raw transcript is kept.
+  let asrFix: UnderstandReport["asr_fix"] = null;
+  if (transcript.segments.length) {
+    await writeJson(path.join(dir, "transcript.raw.json"), TranscriptSchema, transcript);
+    transcript = { ...transcript, segments: transcript.segments.map((s) => ({ ...s, lang: detectLanguage(s.text, s.lang ?? transcript.language) })) };
+    if (opts.asrFix ?? asrFixEnabled()) {
+      try {
+        const f = await fixTranscript(transcript, { hint: opts.hint, onLog: opts.onLog });
+        transcript = f.transcript;
+        asrFix = { model: f.model, changes: f.changes.length, usd: Math.round(f.usd * 1e5) / 1e5, cached: f.cached, examples: f.changes.slice(0, 8).map((c) => `${c.from} → ${c.to}`) };
+        opts.onLog?.(`speech fix (${f.model}${f.cached ? ", cache" : ""}): ${f.changes.length} words${f.changes.length ? ` — ${asrFix.examples.slice(0, 3).join("; ")}` : ""}`);
+        if (!f.cached) await addCost(jobId, { step: "understand", provider: "gemini (asr fix)", model: f.model, units: { phrases: transcript.segments.length, requests: f.requests, changes: f.changes.length }, usd: f.usd });
+      } catch (err) {
+        warnings.push(`speech fix skipped: ${err instanceof Error ? err.message.split("\n")[0].slice(0, 200) : String(err)}`);
+      }
+    }
+    transcript = tidyTranscript(transcript);
   }
   await writeJson(path.join(dir, "transcript.json"), TranscriptSchema, transcript);
 
@@ -233,6 +262,7 @@ export async function understand(jobId: string, media: Media, opts: UnderstandOp
 
   const report = await writeJson(path.join(dir, "understand.json"), UnderstandReportSchema, {
     transcriber,
+    asr_fix: asrFix,
     vision: { provider: provider.name, note },
     speakers: speakersReport,
     shots: shots.length,

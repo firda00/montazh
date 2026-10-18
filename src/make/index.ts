@@ -21,13 +21,15 @@ import { creditRejected, findPhotos, photoCreditLine, type PhotoCredit, type Pho
 import { composeScenes, FPS, type BeatSpeech, type ComposedScenes } from "./scenes.ts";
 import { detectAspect, frameFor, stripAspectWords, type Aspect, type Frame } from "../lib/aspect.ts";
 import { installFonts } from "./fonts.ts";
+import { presenterBox, presenterClip, presenterSource, type PresenterBox } from "./presenter.ts";
 import { fitText } from "./fit.ts";
 import { mixSoundtrack } from "../audio/mix.ts";
 import { isMood, pickMusic, type Mood, type MusicTrack } from "../audio/music.ts";
+import { bedStart, detectBeats } from "../audio/beats.ts";
 import type { SfxCue } from "../audio/sfx.ts";
 import { NO_VOICE } from "../voice/catalog.ts";
 import type { SentenceSynth } from "../voice/piper.ts";
-import { makeVoiceover, ttsUsd, type CaptionCue, type VoiceoverResult } from "../voice/voiceover.ts";
+import { layVoiceover, makeVoiceover, snapBeatsToMusic, speechSeconds, ttsUsd, type CaptionCue, type VoiceoverResult } from "../voice/voiceover.ts";
 
 /**
  * MAKE: a topic → a vertical video built from nothing (text, generated images, motion; music optional).
@@ -63,6 +65,17 @@ export const MakeReportSchema = z.object({
   photo_credits: z.array(z.string()).default([]),
   /** banned phrases the cliché check found in the first draft of the script */
   cliches_fixed: z.number().int().default(0),
+  /** stage 25: the presenter bundle made for Colab, and whether a presenter video is in this render */
+  presenter_bundle: z.string().nullable().default(null),
+  presenter_job: z.string().nullable().default(null),
+  presenter_video: z.string().nullable().default(null),
+  /** pacing problems (narration over budget, long or late hook) fixed by the rewrite */
+  pacing_fixed: z.number().int().default(0),
+  /** seconds of the hook beat (stage 25: 2–3 s) */
+  hook_seconds: z.number().default(0),
+  /** music bed: tempo and how many scene cuts landed on its beats */
+  music_bpm: z.number().nullable().default(null),
+  cuts_on_beat: z.number().int().default(0),
   usd: z.number(),
   wall_seconds: z.number(),
   render_seconds: z.number(),
@@ -112,6 +125,13 @@ export interface MakeOptions {
   aspect?: Aspect;
   /** the user's whole instruction (format words, CTA requests); default: the topic */
   instruction?: string;
+  /**
+   * stage 25: a presenter bundle for Colab — the narration on the video's timeline + a portrait (a photo path, or true:
+   * a generated one) → workspace/<avatar job>/avatar_job.zip; the video itself is made as usual
+   */
+  presenter?: boolean | string;
+  /** stage 25: the animated presenter (avatar_result.zip or avatar.mp4) laid in the bottom corner (use with fromJob) */
+  presenterVideo?: string;
   /** test hook: skip the real render and write this file as the output */
   fakeRender?: (projectDir: string, outFile: string) => Promise<void>;
   onEvent?: (line: string) => void;
@@ -160,10 +180,15 @@ export function speechByBeat(vo: Pick<VoiceoverResult, "beats" | "words">, beats
   });
 }
 
-export async function writeDirectorProject(script: Script, design: Design, images: Record<number, string>, dir: string, o: { gsapFile?: string; captions?: CaptionCue[]; frame?: Frame; speech?: (BeatSpeech | null)[] } = {}): Promise<ComposedScenes & { entry: string; overflow: string[] }> {
+export async function writeDirectorProject(script: Script, design: Design, images: Record<number, string>, dir: string, o: { gsapFile?: string; captions?: CaptionCue[]; frame?: Frame; speech?: (BeatSpeech | null)[]; presenter?: { file: string; box: PresenterBox } } = {}): Promise<ComposedScenes & { entry: string; overflow: string[] }> {
   const frame = o.frame ?? frameFor("9:16");
   await fs.mkdir(path.join(dir, "assets", "img"), { recursive: true });
   await linkOrCopy(o.gsapFile ?? DEFAULT_GSAP, path.join(dir, "assets", "gsap.min.js"));
+  let presenter: { src: string; box: PresenterBox } | undefined;
+  if (o.presenter) {
+    await linkOrCopy(o.presenter.file, path.join(dir, "assets", "presenter.webm"));
+    presenter = { src: "assets/presenter.webm", box: o.presenter.box };
+  }
   const rel: Record<number, string> = {};
   for (const [beat, file] of Object.entries(images)) {
     const r = `assets/img/${path.basename(file)}`;
@@ -175,7 +200,7 @@ export async function writeDirectorProject(script: Script, design: Design, image
   const fontFaces = await installFonts(dir, [...fontIds]);
   const entry = path.join(dir, "index.html");
   // pass 1: default sizes → measure in Chrome → pass 2 with the fitted sizes
-  const base = { images: rel, fontFaces, gsapRel: "assets/gsap.min.js", captions: o.captions, frame, speech: o.speech };
+  const base = { images: rel, fontFaces, gsapRel: "assets/gsap.min.js", captions: o.captions, frame, speech: o.speech, presenter };
   let composed = composeScenes(script, design, base);
   await fs.writeFile(entry, composed.html);
   const fit = await fitText(entry, { width: frame.w, height: frame.h });
@@ -223,6 +248,8 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
   const frame = frameFor(aspect);
   const topicClean = stripAspectWords(asked) || asked;
   const language = opts.language ?? "ru";
+  // stage 25: 35–45 s reels; 40 s unless asked (the 65 s videos were too long)
+  const seconds = opts.seconds ?? 40;
   const warnings: string[] = [];
   const say = (l: string) => opts.onEvent?.(l);
   const job = await createJob(`make:${topicClean.slice(0, 80)}`, { prompt: asked });
@@ -260,18 +287,22 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
   say("▸ сценарий…");
   let s: { script: Script; usd: number; provider: string; model: string; usage: { input_tokens: number; output_tokens: number }; estimate: boolean };
   let clichesFixed = 0;
+  let pacingFixed = 0;
   if (opts.scriptFile) {
     const script = await readJson(path.resolve(opts.scriptFile), ScriptSchema);
     s = { script, usd: 0, provider: "file", model: "saved", usage: { input_tokens: 0, output_tokens: 0 }, estimate: false };
     await runStep(job.id, "plan", async () => script);
   } else {
     const llm = opts.llm ?? selectStructuredLlm();
-    const w = await runStep(job.id, "plan", () => writeScript(topicClean, llm, { language, seconds: opts.seconds, audience: opts.audience, trendsText: trendsData ? trendsText(trendsData) : undefined, model: opts.model, instruction }));
+    const w = await runStep(job.id, "plan", () => writeScript(topicClean, llm, { language, seconds, audience: opts.audience, trendsText: trendsData ? trendsText(trendsData) : undefined, model: opts.model, instruction }));
     s = w;
     clichesFixed = w.cliches.length - w.remaining.length;
+    pacingFixed = w.pacing.length - w.pacingLeft.length;
     if (w.cliches.length) say(`  клише в черновике: ${w.cliches.length} (${[...new Set(w.cliches.map((c) => c.rule))].join(", ")}) → переписано, осталось ${w.remaining.length}`);
+    if (w.pacing.length) say(`  темп черновика: ${[...new Set(w.pacing.map((c) => c.rule))].join(", ")} → переписано, осталось ${w.pacingLeft.length}`);
     if (w.remaining.length) warnings.push(`в сценарии остались клише: ${describeFindings(w.remaining).split("\n").slice(0, 3).join("; ")}`);
-    await addCost(job.id, { step: "plan", provider: s.provider === "anthropic" ? "anthropic" : s.provider, model: s.model, units: { ...s.usage, calls: w.cliches.length ? 2 : 1, estimate: s.estimate ? 1 : 0 }, usd: s.usd });
+    if (w.pacingLeft.length) warnings.push(`сценарий длиннее нормы: ${describeFindings(w.pacingLeft).split("\n").slice(0, 2).join("; ")}`);
+    await addCost(job.id, { step: "plan", provider: s.provider === "anthropic" ? "anthropic" : s.provider, model: s.model, units: { ...s.usage, calls: w.cliches.length || w.pacing.length ? 2 : 1, estimate: s.estimate ? 1 : 0 }, usd: s.usd });
   }
   await writeJson(path.join(dir, "script.json"), ScriptSchema, s.script);
   say(`  «${s.script.title}», ${s.script.beats.length} битов, ${scriptDuration(s.script)}s${s.usd ? `, ≈$${s.usd.toFixed(3)}` : ""}`);
@@ -299,6 +330,14 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
   let usd = s.usd;
   let composed: { duration: number; cues?: SfxCue[] };
   let mood: Mood = "upbeat";
+  // music is chosen before the composition (director path) so the cuts can land on its beats
+  const want = (opts.music ?? "auto").trim();
+  let track: MusicTrack | null = null;
+  let musicPicked = false;
+  let musicOffset = 0;
+  let musicBpm: number | null = null;
+  let cutsOnBeat = 0;
+  let presenterVideo: string | null = null;
   let imagesUsed: string[] = [];
   let credits: PhotoCredit[] = [];
   if (opts.director === false) {
@@ -352,7 +391,7 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
         const old = path.join(reuseImgDir, `scene_${w.beat}.jpg`);
         const oldCredit = oldCredits.find((x) => x.beat === w.beat);
         if (oldCredit && creditRejected(oldCredit)) {
-          say(`  фото ${w.beat}: «${oldCredit.title}» больше не проходит отбор (карта/график) — ищу заново`);
+          say(`  фото ${w.beat}: «${oldCredit.title}» больше не проходит отбор (не фото, публичное лицо или не по запросу) — ищу заново`);
           todo.push(w);
           continue;
         }
@@ -397,10 +436,54 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     credits.sort((a, b) => a.beat - b.beat);
     await fs.writeFile(path.join(dir, "credits.json"), JSON.stringify(credits, null, 1));
 
+    // music before the composition: an energetic bed, started on a downbeat, scene cuts moved onto its beats
+    say("▸ музыка…");
+    track = await chooseMusic(want, mood, topicClean, scriptDuration(s.script) + 2, warnings);
+    musicPicked = true;
+    if (track) {
+      try {
+        const probe = await ffprobe(track.file);
+        const trackSeconds = Number(probe.format.duration) || 0;
+        const bed = await bedStart(track.file, trackSeconds, scriptDuration(s.script));
+        musicOffset = bed.offset;
+        musicBpm = bed.bpm;
+        if (vo && bed.bpm) {
+          const grid = await detectBeats(track.file, { offset: bed.offset, seconds: scriptDuration(s.script) + 3 });
+          if (grid.strength >= 0.08 && grid.beats.length >= 4) {
+            const snap = snapBeatsToMusic(s.script, speechSeconds(vo), grid.beats);
+            cutsOnBeat = snap.snapped;
+            vo = await layVoiceover(vo, snap.script);
+            s = { ...s, script: vo.script };
+            await writeJson(path.join(dir, "script.json"), ScriptSchema, s.script);
+          }
+        }
+        say(`  «${track.title}»${track.creator ? ` — ${track.creator}` : ""}${bed.bpm ? `, ${bed.bpm} BPM, старт ${bed.offset.toFixed(1)} с` : ""}${vo ? `, склеек на долю: ${cutsOnBeat}/${s.script.beats.length - 1}` : ""}`);
+      } catch (err) {
+        warnings.push(`сетка битов музыки не посчитана: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      }
+    }
+
+    // the animated presenter (after Colab): a circle with alpha in the bottom corner, as long as the video
+    let presenter: { file: string; box: PresenterBox } | undefined;
+    if (opts.presenterVideo) {
+      try {
+        const box = presenterBox(frame);
+        const src = await presenterSource(opts.presenterVideo, path.join(dir, "make", "presenter"));
+        const file = path.join(dir, "make", "presenter", "presenter.webm");
+        const { drift } = await presenterClip(src, scriptDuration(s.script), file, box.size);
+        if (drift > 0.3) warnings.push(`ведущий ${drift.toFixed(2)} с не совпадает с длиной ролика — губы могут разойтись с голосом (озвучка должна быть той же, что ушла в Colab)`);
+        presenter = { file, box };
+        presenterVideo = path.resolve(opts.presenterVideo);
+        say(`  ведущий: ${path.basename(opts.presenterVideo)} → круг ${box.size} px в нижнем углу`);
+      } catch (err) {
+        warnings.push(`ведущий не добавлен: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      }
+    }
+
     say("▸ композиция…");
     const speech = vo ? speechByBeat(vo, s.script.beats.length) : undefined;
     composed = await runStep(job.id, "design", async () => {
-      const c = await writeDirectorProject(s.script, design!, images, projectDir, { captions: vo && opts.voiceCaptions ? vo.captions : undefined, frame, speech });
+      const c = await writeDirectorProject(s.script, design!, images, projectDir, { captions: vo && opts.voiceCaptions ? vo.captions : undefined, frame, speech, presenter });
       if (c.overflow.length) warnings.push(`текст не влез даже на минимальном размере: ${c.overflow.join(", ")}`);
       warnings.push(...(await lintProject(projectDir)));
       return c;
@@ -422,19 +505,9 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
   // 5. soundtrack: music (file / mood / director's mood) + sound effects on the motion
   say("▸ звук…");
   const output = path.join(dir, "output_make.mp4");
-  const want = (opts.music ?? "auto").trim();
-  let track: MusicTrack | null = null;
-  if (want !== "none") {
-    if (want !== "auto" && !isMood(want)) {
-      if (!(await exists(want))) throw new Error(`музыка не найдена: ${want} (файл, настроение ${["upbeat", "chill", "dramatic", "inspiring", "tech", "funky", "emotional"].join("/")}, auto или none)`);
-      track = { file: path.resolve(want), title: path.parse(want).name, creator: "", license: "own", source: "file", url: "", attribution: "" };
-    } else {
-      track = await pickMusic(want === "auto" ? mood : (want as Mood), topicClean, { minSeconds: composed.duration });
-      if (!track) warnings.push("музыка не найдена (нет assets/music и нет доступа к Openverse) — ролик без музыки");
-    }
-  }
-  const cues = opts.sfx === false ? [] : (composed.cues ?? []);
-  const mixed = await mixSoundtrack({ video: rendered, out: output, duration: composed.duration, music: track?.file ?? null, speech: false, voice: vo?.track ?? null, sfx: cues });
+  if (!musicPicked) track = await chooseMusic(want, mood, topicClean, composed.duration, warnings);
+  const cues = opts.sfx === false ? [] : [...(composed.cues ?? []), ...(vo ? accentCues(s.script) : [])];
+  const mixed = await mixSoundtrack({ video: rendered, out: output, duration: composed.duration, music: track?.file ?? null, musicOffset: musicOffset || undefined, speech: false, voice: vo?.track ?? null, sfx: cues });
   const voiceNote = vo ? `; голос ${vo.voice.id} поверх (музыка и эффекты приглушаются под речью)` : "";
   if (track) say(`  музыка: «${track.title}»${track.creator ? ` — ${track.creator}` : ""} (${track.license}, ${track.source}); эффектов ${mixed.cues}${voiceNote}`);
   else say(`  эффектов ${mixed.cues}${voiceNote}`);
@@ -444,6 +517,26 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
   await ffmpeg(["-ss", String(Math.min(1.2, composed.duration / 2)), "-i", output, "-frames:v", "1", "-q:v", "3", preview]).catch(() => {});
   const probe = await ffprobe(output);
   const duration = Number(probe.format.duration) || composed.duration;
+
+  // the presenter bundle: the narration exactly as it sits on this video's timeline → Colab animates a face to it
+  let presenterBundle: { jobId: string; bundle: string } | null = null;
+  if (opts.presenter && !opts.presenterVideo) {
+    if (!vo) warnings.push("ведущий нужен голос: --presenter работает вместе с --voice");
+    else {
+      say("▸ ведущий: задание для Colab…");
+      try {
+        const { exportAvatarJob, colabSteps } = await import("../avatar/export.ts");
+        const r = await exportAvatarJob({ speech: vo.track, photo: typeof opts.presenter === "string" ? opts.presenter : undefined, language, mode: "avatar", sourceLabel: `make-presenter:${job.id}`, onEvent: (l) => say(`  ${l.trim()}`) });
+        presenterBundle = { jobId: r.jobId, bundle: r.bundle };
+        warnings.push(...r.warnings);
+        say(`  ${r.bundle} (${(r.bytes / 1e6).toFixed(1)} МБ)`);
+        for (const l of colabSteps(r.jobId, path.basename(r.bundle))) say(`    ${l}`);
+        say(`    затем: vedit make "${topicClean}" --from ${job.id} --presenter-video avatar_result.zip${aspect !== "9:16" ? ` --aspect ${aspect}` : ""}`);
+      } catch (err) {
+        warnings.push(`задание для ведущего не собрано: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      }
+    }
+  }
 
   const report = await writeJson(path.join(dir, "make.json"), MakeReportSchema, {
     topic: topicClean,
@@ -465,12 +558,66 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     images: [...new Set(imagesUsed)].join("+") || "none",
     photo_credits: credits.map((c) => photoCreditLine(c)),
     cliches_fixed: clichesFixed,
+    presenter_bundle: presenterBundle?.bundle ?? null,
+    presenter_job: presenterBundle?.jobId ?? null,
+    presenter_video: presenterVideo,
+    pacing_fixed: pacingFixed,
+    hook_seconds: s.script.beats[0]?.seconds ?? 0,
+    music_bpm: musicBpm,
+    cuts_on_beat: cutsOnBeat,
     usd,
     wall_seconds: (Date.now() - t0) / 1000,
     render_seconds: renderSeconds,
     warnings,
   });
   return { ...report, jobId: job.id, script: s.script, trendsData };
+}
+
+/**
+ * The music bed: a file, a mood, or the director's mood ("auto"); null for "none" or when nothing is reachable.
+ * Mood picks are checked for a clear, quick enough beat (a narrator over a beatless ambient loop sounded flat).
+ */
+async function chooseMusic(want: string, mood: Mood, topic: string, minSeconds: number, warnings: string[]): Promise<MusicTrack | null> {
+  if (want === "none") return null;
+  if (want !== "auto" && !isMood(want)) {
+    if (!(await exists(want))) throw new Error(`музыка не найдена: ${want} (файл, настроение ${["upbeat", "chill", "dramatic", "inspiring", "tech", "funky", "emotional"].join("/")}, auto или none)`);
+    return { file: path.resolve(want), title: path.parse(want).name, creator: "", license: "own", source: "file", url: "", attribution: "" };
+  }
+  const m = want === "auto" ? mood : (want as Mood);
+  const energetic = m !== "chill" && m !== "emotional";
+  const track = await pickMusic(m, topic, {
+    minSeconds,
+    check: energetic
+      ? async (file) => {
+          const probe = await ffprobe(file);
+          const bed = await bedStart(file, Number(probe.format.duration) || 0, minSeconds);
+          return !!bed.bpm && bed.bpm >= 85 && bed.bpm <= 180 && bed.strength >= 0.12;
+        }
+      : undefined,
+  });
+  if (!track) warnings.push("музыка не найдена (нет assets/music и нет доступа к Openverse) — ролик без музыки");
+  return track;
+}
+
+/**
+ * Sound accents of a voiced make (stage 25): a riser into the pattern interrupt at the second scene and a hit on it,
+ * a riser into the last scene (the payoff) and a hit on it. The mixer thins cues that pile up.
+ */
+export function accentCues(script: Script): SfxCue[] {
+  const starts: number[] = [];
+  let frame = 0;
+  for (const b of script.beats) {
+    starts.push(frame / FPS);
+    frame += Math.max(1, Math.round(b.seconds * FPS));
+  }
+  const cues: SfxCue[] = [];
+  const hitAt = (t: number) => {
+    if (t >= 1.3) cues.push({ t: Math.round((t - 1.2) * 1000) / 1000, kind: "riser", gain: -6 });
+    cues.push({ t, kind: "impact", gain: -4 });
+  };
+  if (starts.length > 1) hitAt(starts[1]);
+  if (starts.length > 3) hitAt(starts.at(-1)!);
+  return cues;
 }
 
 /** The most common keyword of the photo queries ("coffee"): appended to fallback searches. */

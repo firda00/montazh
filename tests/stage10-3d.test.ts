@@ -63,7 +63,8 @@ test("normalizeDesign keeps valid 3D scenes and downgrades the ones without data
 
   const twice = { identity, scenes: [0, 1, 2, 3].map((b) => scene({ beat: b, layout: "orbit_title", headline: `Заголовок ${b}` })) };
   const t = normalizeDesign(twice, script);
-  assert.deepEqual(t.design.scenes.map((s) => s.layout), ["orbit_title", "headline", "orbit_title", "headline"], "never the same 3D layout twice in a row");
+  // stage 25: each typographic/3D device once per video; the repeats become headlines (never two in a row)
+  assert.deepEqual(t.design.scenes.map((s) => s.layout), ["orbit_title", "headline", "quote", "headline"], "a 3D layout appears once per video");
 });
 
 test("composeScenes: 3D scenes are deterministic, timeline-driven, fit-ready and cue sound", () => {

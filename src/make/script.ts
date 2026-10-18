@@ -6,6 +6,9 @@ import { fill, loadPrompt } from "../lib/prompts.ts";
 import { zodToApiSchema } from "../plan/schema-sanitize.ts";
 import { ICONS_DIR } from "./icons.ts";
 import { describeFindings, findCliches, wantsCta, type SlopFinding } from "./slop.ts";
+import { pronounce } from "../voice/pronounce.ts";
+import { languageCode } from "../voice/catalog.ts";
+export type { SlopFinding };
 
 /** A beat is one screen: a sentence, an icon, how long it stays. */
 export const BeatSchema = z.object({
@@ -45,6 +48,70 @@ export interface ScriptOptions {
   model?: string;
   /** the user's instruction (CTA allowed only when it asks for one); default: the topic */
   instruction?: string;
+}
+
+/**
+ * Pacing of a voiced script (stage 25). The 65 s videos came from ~25-word narrations per beat; reels that hold attention
+ * are 35–45 s with a 2–3 s hook. Budget: the fast narrator says ~3 words a second; every beat also costs ~0.45 s of
+ * lead-in and tail around its speech.
+ */
+export const VOICE_WPS = 3.0;
+/** the hook's narration: at most this many words, and its number/name within the first HOOK_FACT_WITHIN words */
+export const HOOK_MAX_WORDS = 10;
+export const HOOK_FACT_WITHIN = 5;
+/** on-screen words of the hook (it is read in under two seconds) */
+export const HOOK_TEXT_MAX_WORDS = 7;
+/** any other beat's narration */
+export const BEAT_MAX_WORDS = 20;
+
+/** Words the whole narration may have for a target length. */
+export function narrationBudget(seconds: number, beats: number): number {
+  return Math.max(30, Math.round((seconds - 0.45 * beats) * VOICE_WPS));
+}
+
+export const countWords = (t: string) => t.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).length;
+/** words as the narrator says them: «965 миллиардов» is four spoken words, «OpenAI» two (Оупен Эй-Ай) */
+export function spokenWords(t: string, language = "ru"): number {
+  try {
+    return countWords(pronounce(t, languageCode(language), { expandAcronyms: false }));
+  } catch {
+    return countWords(t);
+  }
+}
+const NUMBER_WORD = /^[«"(]?(\d|сто|двести|триста|четыреста|пятьсот|тысяч|миллион|миллиард|триллион|полтора|полторы|половин|вдвое|втрое|вчетверо|дважды|трижды|один|одна|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|двадцать|тридцать|сорок|пятьдесят|шестьдесят|семьдесят|восемьдесят|девяносто)/i;
+/** a number (digits or words) or a name (a capitalised word that does not start a sentence, or any Latin name) among the first n words */
+export function factWithin(line: string, n: number): boolean {
+  const words = line.split(/\s+/).filter(Boolean).slice(0, n);
+  return words.some((w, k) => NUMBER_WORD.test(w) || /^[«"(]?[A-Z]/.test(w) || (k > 0 && !/[.!?…:]$/.test(words[k - 1]) && /^[«"(]?[\p{Lu}][\p{L}-]{1,}/u.test(w)));
+}
+
+/**
+ * Length and hook checks of a script: the narration over its word budget, a long beat, a hook that is long or states
+ * its fact late. Same shape as the cliché findings, so one rewrite pass fixes both.
+ */
+export function pacingFindings(script: Script, seconds: number): SlopFinding[] {
+  const out: SlopFinding[] = [];
+  const voiced = script.beats.some((b) => b.voiceover?.trim());
+  const hook = script.beats[0];
+  if (hook) {
+    const tw = countWords(hook.text);
+    if (tw > HOOK_TEXT_MAX_WORDS) out.push({ beat: 0, field: "text", rule: "hook_text_long", why: `the hook's on-screen line has ${tw} words: at most ${HOOK_TEXT_MAX_WORDS}, it is read in under two seconds`, match: hook.text });
+    if (voiced && hook.voiceover) {
+      const vw = spokenWords(hook.voiceover, script.language);
+      if (vw > HOOK_MAX_WORDS) out.push({ beat: 0, field: "voiceover", rule: "hook_long", why: `the hook's narration has ${vw} words: at most ${HOOK_MAX_WORDS} (2–3 seconds), the shortest beat of the video`, match: hook.voiceover });
+      if (!factWithin(hook.voiceover, HOOK_FACT_WITHIN)) out.push({ beat: 0, field: "voiceover", rule: "hook_late_fact", why: `the hook must say its number or name within the first ${HOOK_FACT_WITHIN} words, with no warm-up`, match: hook.voiceover.split(/\s+/).slice(0, 6).join(" ") });
+    }
+  }
+  if (!voiced) return out;
+  script.beats.forEach((b, i) => {
+    if (i === 0 || !b.voiceover) return;
+    const n = spokenWords(b.voiceover, script.language);
+    if (n > BEAT_MAX_WORDS) out.push({ beat: i, field: "voiceover", rule: "beat_long", why: `the narration has ${n} words: at most ${BEAT_MAX_WORDS}, one sentence`, match: b.voiceover });
+  });
+  const total = script.beats.reduce((n, b) => n + spokenWords(b.voiceover?.trim() || b.text, script.language), 0);
+  const budget = narrationBudget(seconds, script.beats.length);
+  if (total > budget * 1.1) out.push({ beat: -1, field: "voiceover", rule: "narration_long", why: `the whole narration is ${total} words; the budget for a ${seconds}-second video is ${budget}: cut every beat down to its one fact`, match: `${total} words` });
+  return out;
 }
 
 /** Beats for a target length: ~5 s per beat, 4..8. */
@@ -98,6 +165,10 @@ export interface ScriptResult {
   estimate: boolean;
   /** banned phrases the cliché check found in the first draft (rewritten once) */
   cliches: SlopFinding[];
+  /** pacing problems of the first draft (narration over budget, long or late hook), fixed in the same rewrite */
+  pacing: SlopFinding[];
+  /** pacing problems left after the rewrite */
+  pacingLeft: SlopFinding[];
   /** what is still there after the rewrite (reported as a warning) */
   remaining: SlopFinding[];
 }
@@ -113,6 +184,9 @@ export async function writeScript(topic: string, llm: StructuredFn, opts: Script
     language: lang,
     seconds,
     beats: beatsFor(seconds),
+    words: narrationBudget(seconds, beatsFor(seconds)),
+    hook_words: HOOK_MAX_WORDS,
+    beat_words: BEAT_MAX_WORDS,
     audience: opts.audience ?? "people scrolling Reels/Shorts on their phone",
     cta,
     trends: opts.trendsText ? `\n${opts.trendsText}\n` : "",
@@ -124,10 +198,12 @@ export async function writeScript(topic: string, llm: StructuredFn, opts: Script
   let usd = res.usd;
   const usage = { input_tokens: res.usage.input_tokens, output_tokens: res.usage.output_tokens };
   const cliches = findCliches(script, { allowCta });
+  const pacing = pacingFindings(script, seconds);
   let remaining = cliches;
-  if (cliches.length) {
-    // enforced, not just suggested: one rewrite with the findings spelled out
-    const fix = fill(loadPrompt("make.script.rewrite"), { topic, language: lang, cta, problems: describeFindings(cliches), script: JSON.stringify(script, null, 1) });
+  let pacingLeft = pacing;
+  if (cliches.length || pacing.length) {
+    // enforced, not just suggested: one rewrite with the findings spelled out (clichés and pacing together)
+    const fix = fill(loadPrompt("make.script.rewrite"), { topic, language: lang, cta, words: narrationBudget(seconds, script.beats.length), problems: describeFindings([...cliches, ...pacing]), script: JSON.stringify(script, null, 1) });
     try {
       const again = await llm({ system, prompt: fix, schema, model: opts.model, effort: "medium", maxTokens: 4000 });
       usd += again.usd;
@@ -135,16 +211,18 @@ export async function writeScript(topic: string, llm: StructuredFn, opts: Script
       usage.output_tokens += again.usage.output_tokens;
       const rewritten = await normalizeScript(again.data, { language });
       const left = findCliches(rewritten, { allowCta });
-      // keep the rewrite unless it made things worse
-      if (left.length <= cliches.length) {
+      const leftPacing = pacingFindings(rewritten, seconds);
+      // keep the rewrite unless it made things worse (clichés weigh more than pacing)
+      if (left.length <= cliches.length && left.length * 3 + leftPacing.length <= cliches.length * 3 + pacing.length) {
         script = rewritten;
         remaining = left;
+        pacingLeft = leftPacing;
       }
     } catch {
       /* the first draft stands; the findings are reported */
     }
   }
-  return { script, usd, usage, model: res.model, provider: res.provider, estimate: res.estimate, cliches, remaining };
+  return { script, usd, usage, model: res.model, provider: res.provider, estimate: res.estimate, cliches, remaining, pacing, pacingLeft };
 }
 
 export function scriptDuration(s: Script): number {

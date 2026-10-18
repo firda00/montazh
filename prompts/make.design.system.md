@@ -50,7 +50,9 @@ WHAT YOU DESIGN
 RULES
 - No template feel: never the same layout twice in a row; at least 4 different layouts in a 6–8 beat video; consecutive scenes differ in layout AND anchor AND density (a full photo after a typographic frame, a dense list after a single number).
 - Photo-led: at least half of the beats are media_* with a concrete photo query; numbers can sit over photos (media_number).
-- The hook (first beat) is the strongest real image or number: media_full or media_number with the key fact, or hero_number. Not orbit_title by default.
+- The hook (first beat) is the strongest real image or number: media_full or media_number with the key fact, or hero_number. Not orbit_title by default. It lasts only 2–3 seconds: one huge number or 3–6 big words, nothing else on screen (no kicker, no sub).
+- The second scene comes around the third second and is a pattern interrupt: a different layout family, colour field or photo than the hook, arriving with "whip" or "zoom".
+- Each typographic device (list, chat, timeline, compare, statement, quote, hero_number, any 3D layout) appears at most once per video; photos (media_*) may repeat.
 - The last beat lands the story (a fact, a consequence): a clean media_full, statement or headline. No "comment/subscribe" frame.
 - Never invent facts or numbers that are not in the script. Never put words in images.
 - Short is better: a reader gets 3–7 seconds per frame.

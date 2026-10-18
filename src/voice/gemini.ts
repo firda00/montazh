@@ -18,20 +18,37 @@ import { WORKSPACE_ROOT } from "../lib/workspace.ts";
  *       → candidates[0].content.parts[].inlineData.data (3.8: a full RIFF WAV, mimeType audio/wav; 2.5: raw audio/L16)
  *       The 3.8 model speaks a "Say as …:" prefix out loud, so the style is only prefixed for 2.5 models.
  * Models (pricing page 2026-10: all four have a free tier; free-tier data may be used by Google, paid tier not):
- *   gemini-3.8-flash-tts → gemini-3.1-flash-tts-preview → gemini-2.5-flash-preview-tts → gemini-3.8-flash-lite-tts
+ *   gemini-3.8-flash-tts → gemini-3.1-flash-tts-preview → gemini-3.8-flash-lite-tts → gemini-2.5-flash-preview-tts
+ *   (stage 25: on the same 8-beat narration lite got every brand right, WER 0.9 %, while 2.5-preview said «Клоуд»,
+ *   «Энтропик», «крошлый», WER 6.0 %, so lite goes before 2.5)
  *   VEDIT_GEMINI_TTS_MODEL (one id or a comma list) goes first. 404 → next model, 429 → backoff then next model.
  * Russian is in the supported-language table of the 3.8 models; the language is detected from the text.
  * Results are cached by hash(text + voice + style + model) in workspace/_cache/tts/gemini/.
  */
 
-export const GEMINI_TTS_MODELS = ["gemini-3.8-flash-tts", "gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts", "gemini-3.8-flash-lite-tts"] as const;
+export const GEMINI_TTS_MODELS = ["gemini-3.8-flash-tts", "gemini-3.1-flash-tts-preview", "gemini-3.8-flash-lite-tts", "gemini-2.5-flash-preview-tts"] as const;
 export const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 export const GEMINI_TTS_RATE = 24000;
 export const GEMINI_TTS_CACHE = path.join(WORKSPACE_ROOT, "_cache", "tts", "gemini");
 
-/** One style for the whole narration, so every beat sounds like the same take. */
+/**
+ * One style for the whole narration (VEDIT_GEMINI_TTS_STYLE overrides). Stage 25 compared three on the same three
+ * beats (one take each, whisper + a Gemini listening check): the documentary narrator (DOC_NARRATOR_STYLE) took 28.0 s,
+ * an "energetic tech-reels" prompt 25.9 s, this news-explainer prompt 18.7 s with the lowest whisper error (1.3 %)
+ * and naturalness 9/10 — the reels narrator the owner asked for.
+ */
 export const NARRATOR_STYLE =
+  "a confident fast-paced Russian news explainer: crisp, urgent and energetic but natural, punch the numbers, no drawn-out vowels, minimal pauses inside sentences";
+/** the stage-17 documentary narrator: calmer and ~1.5× slower (VEDIT_GEMINI_TTS_STYLE=doc) */
+export const DOC_NARRATOR_STYLE =
   "a lively, confident documentary narrator: clear diction, natural brisk pace, warm and engaged, light emphasis on numbers and names, never theatrical";
+
+/** The narration style: VEDIT_GEMINI_TTS_STYLE ("doc" = DOC_NARRATOR_STYLE, any other text is the style itself) or NARRATOR_STYLE. */
+export function narratorStyle(env: NodeJS.ProcessEnv = process.env): string {
+  const v = env.VEDIT_GEMINI_TTS_STYLE?.trim();
+  if (!v) return NARRATOR_STYLE;
+  return /^doc(umentary)?$/i.test(v) ? DOC_NARRATOR_STYLE : v;
+}
 
 export const GEMINI_KEY_HELP = [
   "Нет ключа Gemini API (GEMINI_API_KEY), поэтому голос Gemini недоступен.",
@@ -227,7 +244,7 @@ export async function geminiTts(text: string, voiceName: string, o: GeminiTtsOpt
   const key = o.key ?? geminiApiKey();
   if (!key) throw new GeminiTtsError(GEMINI_KEY_HELP, 401, true);
   const models = o.models ?? geminiTtsModels();
-  const style = o.style ?? NARRATOR_STYLE;
+  const style = o.style ?? narratorStyle();
   const cacheDir = o.cacheDir === undefined ? GEMINI_TTS_CACHE : o.cacheDir;
   const doFetch = o.fetch ?? globalThis.fetch;
   const sleep = o.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));

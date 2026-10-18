@@ -12,7 +12,7 @@ process.env.VEDIT_WORKSPACE = await fs.mkdtemp(path.join(os.tmpdir(), "vedit-voi
 const { VOICES, getVoice, requireVoice, piperVoiceFor, formatVoices, NO_VOICE } = await import("../src/voice/catalog.ts");
 const { normalizeForTts, numberToWords, ordinalToWords, pluralIndex, splitSentences, stripMarkup } = await import("../src/voice/normalize.ts");
 const { synthesize, setSentenceSynth, wavBytes } = await import("../src/voice/piper.ts");
-const { fitBeatsToSpeech, beatStarts, layVoiceTrack, captionCues, narrationLines, resolveMakeVoice, VOICE_LEAD, VOICE_TAIL } = await import("../src/voice/voiceover.ts");
+const { fitBeatsToSpeech, beatStarts, layVoiceTrack, captionCues, narrationLines, resolveMakeVoice, VOICE_LEAD, VOICE_TAIL, HOOK_LEAD } = await import("../src/voice/voiceover.ts");
 const { buildMixGraph, mixSoundtrack } = await import("../src/audio/mix.ts");
 const { ScriptSchema, normalizeScript } = await import("../src/make/script.ts");
 const { make } = await import("../src/make/index.ts");
@@ -80,7 +80,7 @@ test("normalisation: numbers with agreement, years, $, %, ×3, abbreviations; em
   assert.equal(ru("Почему кофе дорожает в 2026? 🔥☕"), "Почему кофе дорожает в две тысячи двадцать шестом году?");
   assert.equal(ru("к 2030 году"), "к две тысячи тридцатому году");
   assert.equal(ru("Цена выросла на 30%, потом на 21% и 1,5%."), "Цена выросла на тридцать процентов, потом на двадцать один процент и полтора процента.");
-  assert.equal(ru("Рынок — $5 млн, т.е. 2,5 млрд руб."), "Рынок — пять миллионов долларов, то есть две целых пять десятых миллиарда рублей.");
+  assert.equal(ru("Рынок — $5 млн, т.е. 2,5 млрд руб."), "Рынок — пять миллионов долларов, то есть два с половиной миллиарда рублей.");
   assert.equal(ru("Продажи выросли ×3."), "Продажи выросли в три раза.");
   assert.equal(ru("Это 22 $ и 100 ₽"), "Это двадцать два доллара и сто рублей");
   assert.equal(ru("21 тысяча чашек и 2 минуты"), "двадцать одна тысяча чашек и две минуты");
@@ -128,7 +128,8 @@ const SCRIPT = ScriptSchema.parse({
 test("voiceover timing: beats stretch to the speech on the frame grid, speech laid at scene starts, captions follow it", () => {
   assert.deepEqual(narrationLines(SCRIPT), ["За год чашка кофе подорожала почти на треть.", "Засуха в Бразилии.", "Хочешь дешевле? Бери зерно, а не капсулы."]);
   const fitted = fitBeatsToSpeech(SCRIPT, [4.2, 0.9, 30]);
-  assert.equal(fitted.beats[0].seconds, Math.ceil((VOICE_LEAD + 4.2 + VOICE_TAIL) * 30) / 30);
+  // stage 25: the hook speaks at once (HOOK_LEAD), other beats after VOICE_LEAD
+  assert.equal(fitted.beats[0].seconds, Math.ceil((HOOK_LEAD + 4.2 + VOICE_TAIL) * 30) / 30);
   assert.equal(fitted.beats[1].seconds, 2, "short speech: at least 2 s");
   assert.equal(fitted.beats[2].seconds, 15, "capped");
   assert.equal(fitBeatsToSpeech(SCRIPT, [0, 0, 0]).beats[1].seconds, 4, "no speech: unchanged");
@@ -220,7 +221,7 @@ test("make --voice: narration synthesised, beats stretched to it, voice track mi
   const dir = jobDir(r.jobId);
   const saved = await readJson(path.join(dir, "script.json"), ScriptSchema);
   const speech0 = Math.round(RATE * 0.06 * "За год чашка кофе подорожала почти на треть.".length) / RATE;
-  assert.equal(saved.beats[0].seconds, Math.ceil((VOICE_LEAD + speech0 + VOICE_TAIL) * 30 - 1e-6) / 30, "beat 1 follows its speech");
+  assert.equal(saved.beats[0].seconds, Math.ceil((HOOK_LEAD + speech0 + VOICE_TAIL) * 30 - 1e-6) / 30, "beat 1 (the hook) follows its speech, no lead-in");
   const vj = JSON.parse(await fs.readFile(path.join(dir, "make", "voice", "voice.json"), "utf8"));
   assert.equal(vj.voice, "denis");
   assert.equal(vj.beats.length, 3);
@@ -229,6 +230,41 @@ test("make --voice: narration synthesised, beats stretched to it, voice track mi
   assert.ok(Math.abs(Number(track.format.duration) - total) < 0.02, `voice track ${track.format.duration} vs video ${total}`);
   const lay = JSON.parse(await fs.readFile(path.join(dir, "make", "project", "layout.json"), "utf8"));
   assert.ok(Math.abs(lay.frame.duration - total) < 0.02, "the composition is as long as the voiced script");
+});
+
+test("make --voice --presenter: the narration as it sits on the video's timeline goes into an avatar bundle for Colab", async () => {
+  const raw = {
+    title: "Кофе",
+    language: "ru",
+    beats: [
+      { text: "Арабика 300 центов", emphasis: "", icon: "coffee", seconds: 3, voiceover: "Арабика стоит триста центов." },
+      { text: "Засуха в Бразилии", emphasis: "", icon: "cloud-sun", seconds: 3, voiceover: "Засуха в Бразилии." },
+      { text: "Цена растёт", emphasis: "", icon: "trending-up", seconds: 3, voiceover: "Цена растёт." },
+    ],
+    hashtags: [],
+  };
+  const llm: StructuredFn = async () => ({ data: raw, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, thinking_tokens: 0 }, usd: 0, estimate: false, model: "mock", provider: "mock" });
+  const photo = await face();
+  const r = await make("кофе", {
+    llm,
+    trends: false,
+    director: false,
+    music: "none",
+    voice: "denis",
+    presenter: photo,
+    fakeRender: async (_dir, out) => {
+      await ffmpeg(["-f", "lavfi", "-i", "color=c=black:size=270x480:rate=30:duration=2", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", out]);
+    },
+  });
+  assert.ok(r.presenter_bundle && r.presenter_job, JSON.stringify(r.warnings));
+  const files = await readZip(r.presenter_bundle!);
+  assert.ok(files.has("speech_in.wav") && files.has("portrait.png") && files.has("script.json"));
+  const speech = path.join(tmp, "pres_speech.wav");
+  await fs.writeFile(speech, files.get("speech_in.wav")!);
+  const voiceTrack = await ffprobe(path.join(jobDir(r.jobId), "make", "voice", "voice.wav"));
+  assert.ok(Math.abs(Number((await ffprobe(speech)).format.duration) - Number(voiceTrack.format.duration)) < 0.05, "the whole timeline track, pauses included");
+  const script = AvatarScriptSchema.parse(JSON.parse(files.get("script.json")!.toString("utf8")));
+  assert.equal(script.speech, "speech_in.wav");
 });
 
 async function face() {

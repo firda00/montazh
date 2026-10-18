@@ -48,7 +48,7 @@ export interface AvatarImportResult {
 }
 
 /** Files of a result zip or folder; tolerates one top-level folder inside the zip. */
-async function resultFiles(source: string): Promise<Map<string, Buffer>> {
+export async function resultFiles(source: string): Promise<Map<string, Buffer>> {
   const st = await fs.stat(source).catch(() => null);
   if (!st) throw new AvatarImportError(`не найден ${source}`, "bundle");
   let files: Map<string, Buffer>;
@@ -202,7 +202,7 @@ export async function runAvatarMontage(jobId: string, o: AvatarMontageOptions = 
 
   await progress(`▸ анализ речи… (${media.duration.toFixed(0)} с)`);
   const language = state?.language ?? (state?.meta?.language || undefined);
-  const u = await runStep(jobId, "understand", () => understand(jobId, media, { language, vision: o.vision, asr: o.asr, diarize: false, onLog: (l) => say(`    ${l}`) }));
+  const u = await runStep(jobId, "understand", () => understand(jobId, media, { language, vision: o.vision, asr: o.asr, diarize: false, hint: state?.lines.length ? state.lines.join(" ").slice(0, 2000) : undefined, onLog: (l) => say(`    ${l}`) }));
   if (!u.transcript.segments.length) {
     throw new AvatarImportError(`речь в avatar.mp4 не распознана — монтировать не по чему${u.warnings.length ? ` (${u.warnings[0].split("\n")[0].slice(0, 200)})` : ""}; повторите: vedit avatar import ${jobId} <архив>`, "video");
   }

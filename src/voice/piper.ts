@@ -10,7 +10,7 @@ import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { fileURLToPath } from "node:url";
 import { ffmpeg } from "../lib/ffmpeg.ts";
 import { piperVoiceFor, requireVoice, type VoiceDef } from "./catalog.ts";
-import { GEMINI_KEY_HELP, geminiApiKey, geminiTts, GeminiTtsError, NARRATOR_STYLE, type GeminiTtsOptions } from "./gemini.ts";
+import { GEMINI_KEY_HELP, geminiApiKey, geminiTts, GeminiTtsError, narratorStyle, type GeminiTtsOptions } from "./gemini.ts";
 import { bcp47, CLOUD_KEY_HELP, cloudApiKey, cloudTts, type CloudTtsOptions } from "./cloudtts.ts";
 
 /** What to tell the user when no Google TTS key exists (either source works). */
@@ -37,6 +37,9 @@ export function cloudBackend(voice: VoiceDef, o: Pick<SynthOptions, "gemini" | "
   return null;
 }
 import { normalizeForTts, splitSentences, stripMarkup } from "./normalize.ts";
+import { pronounce, type PronounceOptions } from "./pronounce.ts";
+import { splitTake } from "./take.ts";
+import { alignTake } from "./align.ts";
 
 /**
  * Local Piper TTS (rhasspy/piper 2023.11.14-2, MIT; CPU, ~0.1× real time on an i7).
@@ -95,6 +98,19 @@ export interface SynthOptions {
   tailMs?: number;
   /** text normalisation (numbers → words…); default on */
   normalize?: boolean;
+  /** language of the text (ru, uz, en…; default: the voice's language) — Gemini voices speak whatever they are given */
+  language?: string;
+  /**
+   * pronunciation layer (pronounce.ts: brand names as a Russian narrator says them, numbers with case agreement,
+   * stress marks where the engine honours them); default on for every engine. false: the old behaviour
+   * (Piper — normalizeForTts, Gemini/Cloud — markup stripped only). An object tunes it (extra terms, latin mode).
+   */
+  pronounce?: false | PronounceOptions;
+  /**
+   * Gemini/Cloud Gemini-TTS: "single" (default) speaks all lines in one request and cuts the take at the paragraph
+   * pauses (falls back to "line" when the cut is implausible); "line": one request per line. VEDIT_TTS_TAKE=line.
+   */
+  take?: "single" | "line";
   synth?: SentenceSynth;
   /** parallel piper processes (default 3; Gemini requests: 1, VEDIT_GEMINI_TTS_CONCURRENCY up to 2) */
   concurrency?: number;
@@ -381,7 +397,7 @@ export async function synthesize(text: string | string[], voiceId: string, outWa
   const jobs: { line: number; text: string; spoken: string }[] = [];
   lines.forEach((line, i) => {
     for (const sent of splitSentences(line)) {
-      const spoken = o.normalize === false ? sent : normalizeForTts(sent, voice.language);
+      const spoken = o.normalize === false ? sent : o.pronounce === false ? normalizeForTts(sent, voice.language) : pronounce(sent, o.language ?? voice.language, { latin: "translit", ...o.pronounce });
       if (/[\p{L}\p{N}]/u.test(spoken)) jobs.push({ line: i, text: sent, spoken });
     }
   });
@@ -438,37 +454,70 @@ export function splitLineTimes(spoken: string[], start: number, end: number): { 
   });
 }
 
+/** added to the style of a one-take narration: the paragraph pauses are where the take is cut into beats */
+export const TAKE_STYLE = "each paragraph is one beat of a short video: leave a clear half-second pause between paragraphs, keep the same energy throughout";
+
+/** pronunciation defaults for the Google voices (see the stage 25 measurements in README) */
+export const CLOUD_PRONOUNCE: PronounceOptions = { latin: "translit", expandAcronyms: false, stress: process.env.VEDIT_TTS_STRESS === "1" };
+
 /**
- * Gemini / Chirp voice (Gemini API or Cloud TTS): one API request per line (a beat is one take, so its sentences keep one intonation, and the
- * request count stays low for the free tier), the same style for every line, lines joined with the line pause.
+ * Gemini / Chirp voice (Gemini API or Cloud TTS). Stage 25: the whole narration is ONE request (a paragraph per line,
+ * cut back into lines at the paragraph pauses by take.ts — one intonation, and 1 of the 10 daily free-tier requests of
+ * gemini-3.8-flash-tts instead of 7); when the cut is implausible, or for Chirp, one request per line (a line is one
+ * take, so its sentences keep one intonation). The same style everywhere, lines joined with the line pause.
  * Sentence times inside a line are proportional to their spoken length.
  */
 async function synthesizeCloud(lines: string[], voice: VoiceDef, outWav: string, o: SynthOptions, kind: CloudKind): Promise<SynthResult> {
   const name = voice.gemini?.voiceName;
   if (!name) throw new Error(`голос ${voice.id}: нет имени голоса Gemini`);
   const languageCode = bcp47(voice.language);
-  const style = o.gemini?.style ?? process.env.VEDIT_GEMINI_TTS_STYLE ?? NARRATOR_STYLE;
+  const style = o.gemini?.style ?? narratorStyle();
   const sentenceJobs = lines.map((line) =>
     splitSentences(line)
-      // Gemini reads numbers, dates and currencies itself, in the right case (Piper needs them spelled out):
-      // only markup/emoji/hashtags are stripped unless normalisation is asked for explicitly
-      .map((sent) => ({ text: sent, spoken: o.normalize === true ? normalizeForTts(sent, voice.language) : stripMarkup(sent) }))
+      // the pronunciation layer: brands the Russian way, numbers spelled with agreement (Gemini read «Anthropic» as
+      // «Энсропик», «Nvidia» as «Нвидиа» and «3.5 Sonnet» as «три с половиной» before it, stage 25)
+      .map((sent) => ({ text: sent, spoken: o.pronounce === false ? (o.normalize === true ? normalizeForTts(sent, voice.language) : stripMarkup(sent)) : pronounce(sent, o.language ?? voice.language, { ...CLOUD_PRONOUNCE, ...o.pronounce }) }))
       .filter((j) => /[\p{L}\p{N}]/u.test(j.spoken)),
   );
   if (!sentenceJobs.some((j) => j.length)) throw new Error("нечего озвучивать: текст пустой");
   const conc = Math.max(1, Math.min(2, o.concurrency ?? (Number(process.env.VEDIT_GEMINI_TTS_CONCURRENCY) || 1)));
   const models = new Set<string>();
   let cached = 0;
-  const pieces = await mapLimit(sentenceJobs, conc, async (jobs) => {
-    if (!jobs.length) return null;
-    const text = jobs.map((j) => j.spoken).join(" ");
-    const onEvent = o.cloud?.onEvent ?? o.gemini?.onEvent ?? o.onEvent;
+  let requests = 0;
+  const onEvent = o.cloud?.onEvent ?? o.gemini?.onEvent ?? o.onEvent;
+  const speak = async (text: string, st: string) => {
+    requests++;
     const r =
       kind === "gemini-api"
-        ? await geminiTts(text, name, { ...o.gemini, style, onEvent })
-        : await cloudTts(text, { kind: kind === "cloud-chirp3" ? "chirp3" : "gemini", voiceName: name, languageCode }, { ...o.cloud, prompt: o.cloud?.prompt ?? style, onEvent });
+        ? await geminiTts(text, name, { ...o.gemini, style: st, onEvent })
+        : await cloudTts(text, { kind: kind === "cloud-chirp3" ? "chirp3" : "gemini", voiceName: name, languageCode }, { ...o.cloud, prompt: o.cloud?.prompt ?? st, onEvent });
     models.add(r.model);
     if (r.cached) cached++;
+    return r;
+  };
+  const spokenLines = sentenceJobs.map((jobs) => jobs.map((j) => j.spoken).join(" "));
+  const withSpeech = spokenLines.map((t, i) => (t ? i : -1)).filter((i) => i >= 0);
+  let pieces: (PcmClip | null)[] | null = null;
+  // one take for the whole narration (one request, one intonation), cut back into lines at the paragraph pauses;
+  // Chirp 3 HD has no style prompt and is billed per character anyway — it keeps one request per line
+  const take = o.take ?? (process.env.VEDIT_TTS_TAKE === "line" ? "line" : "single");
+  if (take === "single" && kind !== "cloud-chirp3" && withSpeech.length >= 2) {
+    const r = await speak(withSpeech.map((i) => spokenLines[i]).join("\n\n"), `${style}; ${TAKE_STYLE}`);
+    // where the paragraphs end: by the words whisper hears (align.ts), else by the pauses (take.ts)
+    const aligned = await alignTake(r.pcm, r.rate, withSpeech.map((i) => spokenLines[i]), { language: o.language ?? voice.language }).catch(() => null);
+    const spans = aligned ?? splitTake(r.pcm, r.rate, withSpeech.map((i) => sentenceJobs[i].map((j) => j.spoken.replace(/[^\p{L}\p{N}]/gu, "").length + 4)));
+    if (spans) onEvent?.(`  дубль разрезан на биты ${aligned ? "по словам (whisper)" : "по паузам"}`);
+    if (spans) {
+      const out: (PcmClip | null)[] = lines.map(() => null);
+      withSpeech.forEach((li, k) => {
+        out[li] = trimSilence({ pcm: r.pcm.slice(Math.round(spans[k].start * r.rate), Math.round(spans[k].end * r.rate)), rate: r.rate }, 300, 60);
+      });
+      pieces = out;
+    } else onEvent?.(`  озвучка одним дублем не разрезалась на биты по паузам — читаю по битам`);
+  }
+  pieces ??= await mapLimit(sentenceJobs, conc, async (jobs) => {
+    if (!jobs.length) return null;
+    const r = await speak(jobs.map((j) => j.spoken).join(" "), style);
     return trimSilence({ pcm: r.pcm, rate: r.rate }, 300, 60);
   });
   const rate = pieces.find((p) => p)?.rate ?? 24000;
@@ -503,7 +552,7 @@ async function synthesizeCloud(lines: string[], voice: VoiceDef, outWav: string,
   const duration = r3(pcm.length / rate);
   const model = [...models].join(", ");
   const engine = kind === "gemini-api" ? "gemini" : "cloud";
-  o.onEvent?.(`  голос ${voice.id} (${engine === "gemini" ? "Gemini API" : "Cloud TTS"} ${model}): ${sentenceJobs.filter((j) => j.length).length} запросов${cached ? ` (${cached} из кэша)` : ""}, ${duration.toFixed(1)} с`);
+  o.onEvent?.(`  голос ${voice.id} (${engine === "gemini" ? "Gemini API" : "Cloud TTS"} ${model}): ${requests} ${requests === 1 ? "запрос (весь текст одним дублем)" : "запросов"}${cached ? ` (${cached} из кэша)` : ""}, ${duration.toFixed(1)} с`);
   return { file: outWav, voice: voice.id, duration, sampleRate: rate, lines: lineTimings, sentences, clips, engine, model, warnings: [] };
 }
 

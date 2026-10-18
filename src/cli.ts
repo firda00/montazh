@@ -342,7 +342,7 @@ withRenderOptions(
     let scenes: Scenes | undefined;
     if (!opts.skipUnderstand) {
       console.log("▸ understand");
-      const r = await runStep(job.id, "understand", () => understand(job.id, media, { language: opts.language, vision: opts.vision, asr: opts.asr, diarize: opts.diarize, numSpeakers: opts.speakers, onLog: (l) => console.log(`    ${l}`) }));
+      const r = await runStep(job.id, "understand", () => understand(job.id, media, { language: opts.language, vision: opts.vision, asr: opts.asr, diarize: opts.diarize, numSpeakers: opts.speakers, hint: opts.prompt, onLog: (l) => console.log(`    ${l}`) }));
       printUnderstand(r);
       transcript = r.transcript;
       scenes = r.scenes;
@@ -520,7 +520,7 @@ program
         console.log(`  Gemini: ${ev.usage.requests} запрос(ов), ${ev.usage.input_tokens}/${ev.usage.output_tokens} токенов, ${ev.wall_seconds.toFixed(0)} с`);
         return;
       }
-      const r = await runStep(jobId, "understand", () => understand(jobId, media, { ...opts, numSpeakers: opts.speakers, onLog: (l) => console.log(`    ${l}`) }));
+      const r = await runStep(jobId, "understand", () => understand(jobId, media, { ...opts, numSpeakers: opts.speakers, hint: job.prompt ?? undefined, onLog: (l) => console.log(`    ${l}`) }));
       printUnderstand(r);
     } catch (err) {
       fail(err);
@@ -718,7 +718,7 @@ program
   .description("ролик по теме из ничего: тренды (Antigravity) → сценарий (Claude) → иконки и моушн-графика (HyperFrames) → MP4")
   .argument("<topic>", "тема ролика")
   .option("--lang <code>", "язык: ru | uz | en", "ru")
-  .option("--seconds <n>", "целевая длина, с", (v) => Number(v), 35)
+  .option("--seconds <n>", "целевая длина, с (по умолчанию 40: рилс 35–45 с)", (v) => Number(v), 40)
   .option("--audience <text>", "для кого ролик")
   .option("--no-trends", "без исследования трендов")
   .option("--music <m>", "музыка: auto (по настроению от арт-директора) | upbeat|chill|dramatic|inspiring|tech|funky|emotional | файл | none", "auto")
@@ -734,7 +734,9 @@ program
   .option("--voice <id>", "озвучка голосом из каталога (vedit voices), например gemini_charon или denis; auto (по умолчанию) — Gemini Charon при ключе Google, иначе Piper dmitri; none — без голоса", "auto")
   .option("--voice-captions", "субтитры озвучки поверх сцен (по умолчанию нет: текст уже на экране)")
   .option("--voice-speed <x>", "темп голоса: 0.8 — быстрее, 1.2 — медленнее", (v) => Number(v))
-  .action(async (topic: string, opts: { lang: string; seconds: number; audience?: string; trends: boolean; music?: string; sfx: boolean; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: string | boolean; aspect: string; voice: string; voiceCaptions?: boolean; voiceSpeed?: number }) => {
+  .option("--presenter [photo]", "ведущий-аватар: задание для Colab (озвучка ролика + портрет: фото или сгенерированный)")
+  .option("--presenter-video <file>", "готовый ведущий из Colab (avatar_result.zip или avatar.mp4) в нижнем углу; вместе с --from")
+  .action(async (topic: string, opts: { lang: string; seconds: number; audience?: string; trends: boolean; music?: string; sfx: boolean; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: string | boolean; aspect: string; voice: string; voiceCaptions?: boolean; voiceSpeed?: number; presenter?: boolean | string; presenterVideo?: string }) => {
     try {
       if (!["draft", "looks", "delivery"].includes(opts.quality)) throw new Error("--quality: ожидается draft | looks | delivery");
       if (!Number.isFinite(opts.seconds) || opts.seconds < 15 || opts.seconds > 90) throw new Error("--seconds: ожидается 15–90");
@@ -745,7 +747,7 @@ program
       const { requireVoice, NO_VOICE, AUTO_VOICE } = await import("./voice/catalog.ts");
       if (!NO_VOICE.test(opts.voice) && !AUTO_VOICE.test(opts.voice)) requireVoice(opts.voice);
       const { make, creditsText } = await import("./make/index.ts");
-      const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, sfx: opts.sfx, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images as boolean | "photo" | "ai" | "none", aspect: isAspect(opts.aspect) ? opts.aspect : undefined, voice: opts.voice, voiceCaptions: opts.voiceCaptions, voiceLengthScale: opts.voiceSpeed, onEvent: (l) => console.log(l) });
+      const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, sfx: opts.sfx, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images as boolean | "photo" | "ai" | "none", aspect: isAspect(opts.aspect) ? opts.aspect : undefined, voice: opts.voice, voiceCaptions: opts.voiceCaptions, voiceLengthScale: opts.voiceSpeed, presenter: opts.presenter, presenterVideo: opts.presenterVideo, onEvent: (l) => console.log(l) });
       console.log(`\n✔ ${r.output} (${r.aspect} ${r.width}×${r.height}, ${r.duration.toFixed(1)} с, ${r.beats} битов${r.voice ? `, голос ${r.voice}` : ""}, рендер ${r.render_seconds.toFixed(0)} с${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""})`);
       if (r.script.hashtags.length) console.log(`  #${r.script.hashtags.join(" #")}`);
       const credits = creditsText(r);

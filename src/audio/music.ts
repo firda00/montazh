@@ -20,8 +20,12 @@ export const MUSIC_CACHE = path.join(WORKSPACE_ROOT, "_cache", "music");
 export const MOODS = ["upbeat", "chill", "dramatic", "inspiring", "tech", "funky", "emotional", "sport"] as const;
 export type Mood = (typeof MOODS)[number];
 
-/** titles that betray the wrong energy for a mood (a "chill hip hop beat" is not a sports bed) */
-export const MOOD_EXCLUDE: Partial<Record<Mood, RegExp>> = { sport: /chill|calm|relax|lo-?fi|sleep|ambient|meditat|piano|soft|sad|romantic/i, upbeat: /sleep|meditat|sad/i };
+/**
+ * Titles that betray the wrong energy for a mood (a "chill hip hop beat" is not a sports bed; stage 25: an
+ * "Ambient electronic music 001" loop under a fast narrator made the OpenAI make sound flat).
+ */
+const LOW_ENERGY = /chill|calm|relax|lo-?fi|sleep|ambient|meditat|drone|soundscape|atmospher|pad\b|piano|soft|sad|romantic|lullaby|slow/i;
+export const MOOD_EXCLUDE: Partial<Record<Mood, RegExp>> = { sport: LOW_ENERGY, upbeat: LOW_ENERGY, tech: LOW_ENERGY, funky: LOW_ENERGY, inspiring: /sleep|meditat|sad|drone/i };
 
 /** search terms per mood (English, what music on Jamendo/Freesound is tagged with) */
 export const MOOD_QUERIES: Record<Mood, string[]> = {
@@ -29,7 +33,7 @@ export const MOOD_QUERIES: Record<Mood, string[]> = {
   chill: ["lofi", "chill", "lounge"],
   dramatic: ["cinematic", "epic", "dramatic"],
   inspiring: ["inspiring", "uplifting", "motivational"],
-  tech: ["electronic", "synthwave", "future"],
+  tech: ["energetic electronic", "electronic upbeat", "synthwave", "tech house"],
   funky: ["funk", "groove", "funky"],
   emotional: ["piano", "emotional", "ambient piano"],
   sport: ["energetic hip hop", "trap beat", "hype hip hop", "sport energetic", "workout"],
@@ -86,6 +90,12 @@ export interface OpenverseOptions {
   minSeconds?: number;
   /** only tracks at least minSeconds long (a looped bed would break a beat-cut edit) */
   strictLength?: boolean;
+  /**
+   * a check of the downloaded file (e.g. "has a clear beat"): the first of the top candidates that passes wins,
+   * at most `checkTries` downloads (default 3); when none passes, the first downloaded one is used
+   */
+  check?: (file: string) => Promise<boolean>;
+  checkTries?: number;
 }
 
 /** Ranks results: full songs from Jamendo first, then long loops; skips SFX-length clips. */
@@ -117,23 +127,31 @@ async function fromOpenverse(mood: Mood, seed: string, o: OpenverseOptions = {})
     }
     const ranked = rankResults(results, minSeconds).filter((r) => !MOOD_EXCLUDE[mood]?.test(r.title) && (!o.strictLength || (r.duration ?? 0) / 1000 >= minSeconds));
     if (!ranked.length) continue;
-    // stable choice among the top few, so the same topic gets the same track
-    const pick = hashPick(ranked.slice(0, 5), seed);
-    const ext = /format=mp3|\.mp3/i.test(pick.url) ? ".mp3" : path.extname(new URL(pick.url).pathname) || ".mp3";
-    const file = path.join(cache, `${pick.id}${ext}`);
-    try {
-      await fs.access(file);
-    } catch {
+    // stable choice among the top few, so the same topic gets the same track; with a check, the next ones in that order
+    const top = ranked.slice(0, 5);
+    const first = top.indexOf(hashPick(top, seed));
+    const order = top.map((_, k) => top[(first + k) % top.length]).slice(0, o.check ? Math.max(1, o.checkTries ?? 3) : 1);
+    let fallback: MusicTrack | null = null;
+    for (const pick of order) {
+      const ext = /format=mp3|\.mp3/i.test(pick.url) ? ".mp3" : path.extname(new URL(pick.url).pathname) || ".mp3";
+      const file = path.join(cache, `${pick.id}${ext}`);
       try {
-        const res = await f(pick.url, { signal: AbortSignal.timeout(60_000) });
-        if (!res.ok) continue;
-        await fs.mkdir(cache, { recursive: true });
-        await fs.writeFile(file, Buffer.from(await res.arrayBuffer()));
+        await fs.access(file);
       } catch {
-        continue;
+        try {
+          const res = await f(pick.url, { signal: AbortSignal.timeout(60_000) });
+          if (!res.ok) continue;
+          await fs.mkdir(cache, { recursive: true });
+          await fs.writeFile(file, Buffer.from(await res.arrayBuffer()));
+        } catch {
+          continue;
+        }
       }
+      const track: MusicTrack = { file, title: pick.title, creator: pick.creator ?? "", license: `${pick.license} ${pick.license_version ?? ""}`.trim(), source: pick.source, url: pick.foreign_landing_url ?? "", attribution: attributionFor(pick), duration: (pick.duration ?? 0) / 1000 };
+      if (!o.check || (await o.check(file).catch(() => false))) return track;
+      fallback ??= track;
     }
-    return { file, title: pick.title, creator: pick.creator ?? "", license: `${pick.license} ${pick.license_version ?? ""}`.trim(), source: pick.source, url: pick.foreign_landing_url ?? "", attribution: attributionFor(pick), duration: (pick.duration ?? 0) / 1000 };
+    if (fallback) return fallback;
   }
   return null;
 }

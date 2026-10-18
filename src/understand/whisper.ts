@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { ffmpeg, runProcess } from "../lib/ffmpeg.ts";
 import { exists } from "../lib/workspace.ts";
 import type { Transcript } from "../schemas/index.ts";
+import { termsFrom, whisperPrompt } from "./asrfix.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const VENDOR = path.join(ROOT, "vendor", "whisper");
@@ -247,9 +248,14 @@ export interface TranscribeOptions {
    * sidecar is installed (tools/asr/.venv); null = none, the chunk is skipped with a warning
    */
   fasterFallback?: ChunkFallback | null;
+  /**
+   * stage 25: a hint (the user's instruction, a glossary) whose names and terms go to whisper as its initial prompt
+   * (--prompt), together with the names already heard in earlier chunks. VEDIT_WHISPER_PROMPT=off disables both.
+   */
+  prompt?: string;
 }
 
-export type WhisperCliRunner = (wav: string, outBase: string, o: { threads: number; language: string; preset: string | null }) => Promise<void>;
+export type WhisperCliRunner = (wav: string, outBase: string, o: { threads: number; language: string; preset: string | null; prompt?: string; model?: string }) => Promise<void>;
 /** Transcribes one chunk WAV; times in the result are relative to the chunk start. */
 export type ChunkFallback = (wav: string, duration: number, outDir: string, o: { language?: string; threads: number }) => Promise<TranscribeResult>;
 
@@ -260,6 +266,8 @@ export interface ChunkRecord extends Span {
   wall_seconds: number;
   /** set when the chunk did not come from whisper.cpp */
   engine?: "faster-whisper";
+  /** the initial prompt whisper got for this chunk */
+  prompt?: string;
 }
 
 export interface TranscribeResult {
@@ -305,12 +313,20 @@ export async function transcribe(audioPath: string, duration: number, outDir: st
   const cli = opts.runCli ?? runWhisperCli;
   // resolved on the first chunk that needs it
   let fallbackFn: Promise<ChunkFallback | null> | undefined;
+  // vocabulary prompt: the hint's terms + names heard so far (a name spelled right once stays right)
+  // VEDIT_WHISPER_PROMPT: "off" — no prompt; "carry" — also the names heard in earlier chunks (measured on a podcast:
+  // it mostly repeats whisper's own spellings and makes it imitate the comma list, so it is opt-in)
+  const promptMode = process.env.VEDIT_WHISPER_PROMPT?.trim().toLowerCase() ?? "";
+  const usePrompt = promptMode !== "off";
+  const carry = promptMode === "carry";
+  const heard: string[] = [];
   for (const [index, span] of spans.entries()) {
     const wav = path.join(workDir, `chunk_${index}.wav`);
     const base = path.join(workDir, `chunk_${index}`);
     await ffmpeg(["-ss", span.start.toFixed(3), "-t", (span.end - span.start).toFixed(3), "-i", audioPath, "-c:a", "pcm_s16le", wav]);
     const tc = Date.now();
-    const cliOpts = { threads, language: opts.language ?? "auto", preset };
+    const prompt = usePrompt && (opts.prompt || (carry && heard.length)) ? whisperPrompt(opts.prompt ?? "", carry ? heard : []) : "";
+    const cliOpts = { threads, language: opts.language ?? "auto", preset, ...(prompt ? { prompt } : {}) };
     let cliError: string | null = null;
     let fallback: TranscribeResult | null = null;
     let fallbackError: string | null = null;
@@ -357,7 +373,8 @@ export async function transcribe(audioPath: string, duration: number, outDir: st
     const dropped = raw.transcription.filter((s) => isHallucination(s.text));
     for (const d of dropped) warnings.push(`chunk ${index}: dropped likely hallucination "${d.text.trim()}"`);
     segments.push(...part.segments);
-    chunks.push({ index, ...span, json: `${base}.json`, language: raw.result.language, wall_seconds: (Date.now() - tc) / 1000 });
+    for (const s of part.segments) heard.push(...termsFrom(s.text));
+    chunks.push({ index, ...span, json: `${base}.json`, language: raw.result.language, wall_seconds: (Date.now() - tc) / 1000, ...(prompt ? { prompt } : {}) });
   }
   await fs.writeFile(path.join(workDir, "chunks.json"), JSON.stringify({ method, chunks }, null, 2));
 
@@ -398,9 +415,10 @@ export const runWhisperCli: WhisperCliRunner = async (wav, outBase, o) => {
   // whisper.cpp (Windows build) aborts with 0xC0000409 when a *model* path contains
   // non-ASCII characters; audio/output paths are fine. So the process runs inside the
   // model's directory and gets the model by file name.
-  const cwd = path.dirname(WHISPER_MODEL);
+  const model = o.model ?? WHISPER_MODEL;
+  const cwd = path.dirname(model);
   const args = [
-    "-m", path.basename(WHISPER_MODEL),
+    "-m", path.basename(model),
     "-f", path.resolve(wav),
     "-l", o.language,
     "-t", String(o.threads),
@@ -409,5 +427,6 @@ export const runWhisperCli: WhisperCliRunner = async (wav, outBase, o) => {
     "-of", path.resolve(outBase),
   ];
   if (o.preset) args.push("-dtw", o.preset);
+  if (o.prompt) args.push("--prompt", o.prompt);
   await runProcess(WHISPER_BIN, args, { cwd });
 };

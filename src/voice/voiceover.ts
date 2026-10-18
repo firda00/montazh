@@ -2,10 +2,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Script } from "../make/script.ts";
 import { AUTO_VOICE, autoVoice, getVoice, languageCode, piperVoiceFor, requireVoice, VOICES, type VoiceDef } from "./catalog.ts";
-import { geminiApiKey, NARRATOR_STYLE, type GeminiTtsOptions } from "./gemini.ts";
+import { geminiApiKey, narratorStyle, type GeminiTtsOptions } from "./gemini.ts";
 import { cloudApiKey, type CloudTtsOptions } from "./cloudtts.ts";
 import { concatPcm, synthesize, writeWav, type PcmClip, type SentenceSynth, type SynthResult } from "./piper.ts";
-import { normalizeForTts } from "./normalize.ts";
+import { pronounce } from "./pronounce.ts";
 
 /**
  * Voiceover for `make`: every beat's spoken line (beat.voiceover, else its on-screen text) is synthesised
@@ -16,6 +16,10 @@ import { normalizeForTts } from "./normalize.ts";
 const FPS = 30;
 /** speech starts this long after the scene cut (the headline is already moving) */
 export const VOICE_LEAD = 0.25;
+/** the hook speaks at once: no silent first frames (stage 25) */
+export const HOOK_LEAD = 0.05;
+/** lead of beat i (the hook's is HOOK_LEAD) */
+export const leadOf = (i: number, lead = VOICE_LEAD) => (i === 0 ? Math.min(lead, HOOK_LEAD) : lead);
 /** and the scene holds this long after the last word (short: the next beat cuts in on the voice) */
 export const VOICE_TAIL = 0.35;
 /** narration defaults for make: a touch faster than Piper's 1.0, livelier noise, varied per sentence */
@@ -52,6 +56,9 @@ export interface VoiceoverResult {
   /** word-level times (proportional to the spoken length of each word inside its sentence) */
   words: SpokenWord[];
   warnings: string[];
+  /** what relayVoiceover needs to lay the same speech on new beat timings (music-snapped cuts) */
+  synth: Pick<SynthResult, "clips" | "lines" | "sentences" | "engine" | "model">;
+  dir: string;
 }
 
 /** What the narrator says on each beat. */
@@ -62,7 +69,6 @@ const r3 = (n: number) => Math.round(n * 1000) / 1000;
 
 /** Beat durations from speech lengths: lead + speech + tail on the frame grid, at least `min`, at most BEAT_MAX. */
 export function fitBeatsToSpeech(script: Script, speech: number[], o: { lead?: number; tail?: number; min?: number } = {}): Script {
-  const lead = o.lead ?? VOICE_LEAD;
   const tail = o.tail ?? VOICE_TAIL;
   const min = o.min ?? 2;
   return {
@@ -70,9 +76,45 @@ export function fitBeatsToSpeech(script: Script, speech: number[], o: { lead?: n
     beats: script.beats.map((b, i) => {
       const s = speech[i] ?? 0;
       if (!(s > 0)) return b;
-      return { ...b, seconds: Math.min(BEAT_MAX, Math.max(min, ceilFrame(lead + s + tail))) };
+      // the hook may be shorter than other beats: it only has to hold its own words
+      return { ...b, seconds: Math.min(BEAT_MAX, Math.max(i === 0 ? 1.2 : min, ceilFrame(leadOf(i, o.lead) + s + tail))) };
     }),
   };
+}
+
+/**
+ * Cuts on the music (stage 25): every scene boundary moves to the nearest beat of the bed, as long as the scene still
+ * holds its speech (+ 0.12 s) and does not grow by more than `maxGrow` s. `beats` are seconds on the video timeline.
+ * Returns the script with new durations and how many cuts landed on a beat.
+ */
+export function snapBeatsToMusic(script: Script, speech: number[], beats: number[], o: { maxGrow?: number; maxShrink?: number; lead?: number } = {}): { script: Script; snapped: number } {
+  const maxGrow = o.maxGrow ?? 0.45;
+  const maxShrink = o.maxShrink ?? 0.3;
+  const out = script.beats.map((b) => ({ ...b }));
+  let frame = 0;
+  let snapped = 0;
+  for (let i = 0; i < out.length; i++) {
+    const start = frame / FPS;
+    const frames = Math.max(1, Math.round(out[i].seconds * FPS));
+    if (i < out.length - 1 && beats.length) {
+      const end = start + frames / FPS;
+      const minEnd = start + leadOf(i, o.lead) + (speech[i] ?? 0) + 0.12;
+      let best: number | null = null;
+      for (const t of beats) {
+        if (t < Math.max(minEnd, end - maxShrink) || t > end + maxGrow) continue;
+        if (best === null || Math.abs(t - end) < Math.abs(best - end)) best = t;
+      }
+      if (best !== null) {
+        const f = Math.max(1, Math.round((best - start) * FPS));
+        out[i].seconds = f / FPS;
+        frame += f;
+        snapped++;
+        continue;
+      }
+    }
+    frame += frames;
+  }
+  return { script: { ...script, beats: out }, snapped };
 }
 
 /** Beat start times exactly as the composers place them (frame-rounded running sum). */
@@ -87,7 +129,7 @@ export function beatStarts(script: Script): { start: number; duration: number }[
 }
 
 /** Places each beat's speech at its scene start + lead (never overlapping the previous beat's speech). */
-export function layVoiceTrack(clips: PcmClip[], starts: { start: number }[], duration: number, lead = VOICE_LEAD): { pcm: Int16Array; rate: number; at: number[] } {
+export function layVoiceTrack(clips: PcmClip[], starts: { start: number }[], duration: number, lead: number | number[] = VOICE_LEAD): { pcm: Int16Array; rate: number; at: number[] } {
   const rate = clips.find((c) => c.pcm.length)?.rate ?? 22050;
   const total = Math.ceil(duration * rate);
   const parts: Int16Array[] = [];
@@ -95,7 +137,7 @@ export function layVoiceTrack(clips: PcmClip[], starts: { start: number }[], dur
   const at: number[] = [];
   let pos = 0;
   clips.forEach((c, i) => {
-    const want = Math.round((starts[i].start + lead) * rate);
+    const want = Math.round((starts[i].start + (Array.isArray(lead) ? (lead[i] ?? VOICE_LEAD) : lead)) * rate);
     const from = Math.max(want, pos + (i ? Math.round(rate * 0.1) : 0));
     at.push(from / rate);
     gaps.push(from - pos);
@@ -147,7 +189,7 @@ export function speechWords(sentences: { line: number; text: string; start: numb
     const weight = words.map((w) => {
       let spoken = w;
       try {
-        spoken = normalizeForTts(w, language);
+        spoken = pronounce(w, language, { expandAcronyms: false });
       } catch {}
       return spoken.replace(/[^\p{L}\p{N}]/gu, "").length + 1.5;
     });
@@ -170,8 +212,9 @@ export function ttsUsd(engine: string, model: string | undefined, speechSeconds:
 }
 
 /** Gemini style for the narration: the narrator style plus a pace hint from --voice-speed (Piper length_scale semantics). */
-export function geminiStyle(lengthScale?: number): string {
-  const base = process.env.VEDIT_GEMINI_TTS_STYLE || NARRATOR_STYLE;
+export function geminiStyle(lengthScale?: number, language = "ru"): string {
+  // the tested wording names Russian; other narrations get the same delivery without the language
+  const base = language.toLowerCase().startsWith("ru") ? narratorStyle() : narratorStyle().replace(/\bRussian /, "");
   if (lengthScale === undefined || Math.abs(lengthScale - 1) < 0.05) return base;
   return `${base}; ${lengthScale < 1 ? "noticeably faster pace than usual" : "slower, unhurried pace"}`;
 }
@@ -213,7 +256,8 @@ export async function makeVoiceover(script: Script, voiceId: string, dir: string
     lengthScale: o.lengthScale ?? NARRATION.lengthScale,
     ...(lively ? { noiseScale: NARRATION.noiseScale, noiseW: NARRATION.noiseW, vary: true, sentencePauseMs: NARRATION.sentencePauseMs } : {}),
     synth: o.synth,
-    gemini: { ...o.gemini, style: o.gemini?.style ?? geminiStyle(o.lengthScale) },
+    language: languageCode(script.language),
+    gemini: { ...o.gemini, style: o.gemini?.style ?? geminiStyle(o.lengthScale, script.language) },
     // Chirp 3 HD has no style prompt, only pace: a touch brisker than 1.0 for narration (or 1 / --voice-speed)
     cloud: { ...o.cloud, speakingRate: o.cloud?.speakingRate ?? (o.lengthScale ? Math.round((1 / o.lengthScale) * 100) / 100 : 1.05) },
     onEvent: o.onEvent,
@@ -224,14 +268,28 @@ export async function makeVoiceover(script: Script, voiceId: string, dir: string
   const fitted = fitBeatsToSpeech(script, speech);
   const long = speech.map((s, i) => (VOICE_LEAD + s + VOICE_TAIL > BEAT_MAX ? i : -1)).filter((i) => i >= 0);
   if (long.length) warnings.push(`речь битов ${long.map((i) => i + 1).join(", ")} длиннее ${BEAT_MAX} с — сократите voiceover`);
-  const starts = beatStarts(fitted);
+  return layVoiceover({ voice: spoke, engine: synth.engine, model: synth.model, synth, dir, warnings }, fitted);
+}
+
+/** Speech seconds of every beat of a voiceover. */
+export const speechSeconds = (vo: Pick<VoiceoverResult, "synth">) => vo.synth.clips.map((c) => c.pcm.length / c.rate);
+
+/**
+ * Lays the synthesised speech on the timeline of `script` (its beat durations), writes voice.wav / voice.json and
+ * returns the voiceover for it. Used after synthesis and again when the cuts move onto the music's beats.
+ */
+export async function layVoiceover(vo: Pick<VoiceoverResult, "voice" | "engine" | "model" | "synth" | "dir" | "warnings">, script: Script): Promise<VoiceoverResult> {
+  const { synth, dir, voice: spoke } = vo;
+  const lines = narrationLines(script);
+  const starts = beatStarts(script);
   const duration = starts.length ? starts.at(-1)!.start + starts.at(-1)!.duration : 0;
-  const laid = layVoiceTrack(synth.clips, starts, duration);
+  const laid = layVoiceTrack(synth.clips, starts, duration, starts.map((_, i) => leadOf(i)));
   const track = path.join(dir, "voice.wav");
   await writeWav(track, laid.pcm, laid.rate);
   const beats = synth.clips.map((c, i) => ({ beat: i, start: r3(laid.at[i]), end: r3(laid.at[i] + c.pcm.length / c.rate), text: lines[i] }));
   const captions = captionCues(synth.sentences, synth.lines.map((l) => l.start), laid.at);
-  const words = speechWords(synth.sentences, synth.lines.map((l) => l.start), laid.at, spoke.language);
-  await fs.writeFile(path.join(dir, "voice.json"), JSON.stringify({ voice: spoke.id, license: spoke.license, engine: synth.engine, model: synth.model, duration: r3(duration), beats, sentences: synth.sentences, captions, words, warnings }, null, 1));
-  return { voice: spoke, engine: synth.engine, model: synth.model, script: fitted, track, duration: r3(duration), beats, captions, words, warnings };
+  const words = speechWords(synth.sentences, synth.lines.map((l) => l.start), laid.at, languageCode(script.language));
+  const warnings = vo.warnings;
+  await fs.writeFile(path.join(dir, "voice.json"), JSON.stringify({ voice: spoke.id, license: spoke.license, engine: vo.engine, model: vo.model, duration: r3(duration), beats, sentences: synth.sentences, captions, words, warnings }, null, 1));
+  return { voice: spoke, engine: vo.engine, model: vo.model, script, track, duration: r3(duration), beats, captions, words, warnings, synth, dir };
 }

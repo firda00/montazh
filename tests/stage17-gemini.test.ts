@@ -197,7 +197,8 @@ test("catalogue: 2 male + 2 female Russian Gemini voices with Piper fallbacks, a
   assert.match(formatVoices(), /gemini_kore\s+жен\s+ru\s+gemini\s+Gemini\/Cloud TTS/);
   assert.match(formatVoices(), /chirp_orus\s+муж\s+ru\s+chirp3\s+Cloud TTS/);
   assert.match(GEMINI_KEY_HELP, /aistudio\.google\.com[\s\S]*Get API key[\s\S]*GEMINI_API_KEY=.*\.env/);
-  assert.match(geminiStyle(), /documentary narrator/);
+  assert.match(geminiStyle(), /news explainer/);
+  assert.doesNotMatch(geminiStyle(undefined, "en"), /Russian/);
   assert.match(geminiStyle(0.85), /faster/);
 });
 
@@ -206,7 +207,7 @@ test("synthesize with a Gemini voice: one request per line, same style each time
   const f = stubFetch((c) => [200, interactionsAudio(0.4 + textOf(c).length / 40)]);
   const out = path.join(tmp, "g.wav");
   const lines = ["Арабика стоит $7500 за тонну. Это рекорд.", "", "Робуста — до 5300 долларов!"];
-  const r = await synthesize(lines, "gemini_charon", out, { gemini: { key: "k", fetch: f.fn, cacheDir: null, style: "S", sleep: noSleep } });
+  const r = await synthesize(lines, "gemini_charon", out, { take: "line", gemini: { key: "k", fetch: f.fn, cacheDir: null, style: "S", sleep: noSleep } });
   assert.equal(r.engine, "gemini");
   assert.equal(r.voice, "gemini_charon");
   assert.equal(r.model, "gemini-3.8-flash-tts");
@@ -217,8 +218,8 @@ test("synthesize with a Gemini voice: one request per line, same style each time
     assert.equal(b.input[0].content[0].annotations[0].style, "S");
     assert.equal(b.generation_config.speech_config[0].voice, "Charon");
   }
-  // numbers go to Gemini as written (it reads them in the right case); markup would be stripped
-  assert.match(textOf(f.calls[0]), /\$7500 за тонну\. Это рекорд\./);
+  // stage 25: the pronunciation layer spells numbers with agreement before Gemini sees them
+  assert.match(textOf(f.calls[0]), /семь тысяч пятьсот долларов за тонну\. Это рекорд\./);
   assert.equal(r.lines.length, 3);
   assert.equal(r.lines[1].start, 0);
   assert.equal(r.lines[1].end, 0);
@@ -277,7 +278,7 @@ test("make voiceover with a Gemini voice: beats stretched to the speech, voice.j
   assert.equal(meta.engine, "gemini");
   assert.equal(meta.model, "gemini-3.8-flash-tts");
   const style = (f.calls[0].body as { input: { content: { annotations: { style: string }[] }[] }[] }).input[0].content[0].annotations[0].style;
-  assert.match(style, /narrator/);
+  assert.match(style, /news explainer/);
 });
 
 test("generateContent answer as a full RIFF WAV in inlineData (mimeType audio/wav) decodes without the header", async () => {
@@ -345,7 +346,7 @@ test("key routing: Cloud first when both keys exist; Chirp without the Cloud key
   // both keys: the Cloud endpoint is used, with the narration style as the Gemini-TTS prompt
   const cf = stubFetch((c) => [200, cloudAudio(0.5 + cloudText(c).length / 40)]);
   const gf = stubFetch(() => [500, {}]);
-  const r = await synthesize(["Арабика: $7500 за тонну.", "Робуста дешевле."], "gemini_charon", path.join(tmp, "cloud.wav"), { gemini: { key: "g", fetch: gf.fn, cacheDir: null, style: "S" }, cloud: { key: "c", fetch: cf.fn, cacheDir: null, sleep: noSleep } });
+  const r = await synthesize(["Арабика: $7500 за тонну.", "Робуста дешевле."], "gemini_charon", path.join(tmp, "cloud.wav"), { take: "line", gemini: { key: "g", fetch: gf.fn, cacheDir: null, style: "S" }, cloud: { key: "c", fetch: cf.fn, cacheDir: null, sleep: noSleep } });
   assert.equal(r.engine, "cloud");
   assert.equal(r.model, "gemini-2.5-flash-tts");
   assert.equal(cf.calls.length, 2);

@@ -29,6 +29,8 @@ export const TEXTURES = ["none", "grain", "grid", "glow"] as const;
 export const ANCHORS = ["top", "center", "bottom"] as const;
 /** how a scene arrives: a hard cut (default), a whip pan, a zoom-through, a short fade */
 export const TRANSITIONS = ["cut", "whip", "zoom", "fade"] as const;
+/** typographic devices that appear at most once per video (stage 25) */
+export const ONCE_LAYOUTS = ["list", "chat", "timeline", "compare", "statement", "quote", "hero_number", "orbit_title", "depth_cards", "tunnel_number"] as const;
 /** persistent chrome over every scene: none (default) or a small header with the brand and a progress line */
 export const CHROMES = ["none", "header"] as const;
 
@@ -201,6 +203,18 @@ export function normalizeDesign(raw: unknown, script: Script): { design: Design;
       transition: s.transition,
     };
   });
+  // stage 25: each typographic device once per video (a second list or statement reads as a template); the repeat
+  // becomes a plain headline, or a big number when it has one
+  const seen = new Set<Layout>();
+  for (let i = 0; i < scenes.length; i++) {
+    const l = scenes[i].layout;
+    if ((ONCE_LAYOUTS as readonly string[]).includes(l) && seen.has(l)) {
+      const to: Layout = l !== "hero_number" && scenes[i].number?.value ? "hero_number" : "headline";
+      notes.push(`бит ${i}: ${l} уже был — ${to}`);
+      scenes[i] = { ...scenes[i], layout: to, items: [] };
+    }
+    seen.add(scenes[i].layout);
+  }
   // no two identical layouts in a row: the second becomes a headline (or a quote after a headline)
   for (let i = 1; i < scenes.length; i++) {
     if (scenes[i].layout === scenes[i - 1].layout) {
@@ -250,8 +264,10 @@ export function varyComposition(scenes: Scene[], notes: string[] = []): Scene[] 
       scenes[i] = { ...cur, anchor: next };
     }
   }
-  // transitions
+  // transitions; the second scene (around the third second, right after the short hook) is a pattern interrupt:
+  // never a plain cut
   if (n) scenes[0] = { ...scenes[0], transition: "cut" };
+  if (n >= 3 && (scenes[1].transition === "cut" || scenes[1].transition === "fade")) scenes[1] = { ...scenes[1], transition: (MEDIA_LAYOUTS as readonly string[]).includes(scenes[1].layout) ? "zoom" : "whip" };
   let fades = 0;
   let moves = 0;
   const maxMoves = Math.floor(n / 2);

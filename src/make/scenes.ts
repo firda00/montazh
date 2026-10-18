@@ -56,6 +56,8 @@ export interface ComposeScenesOptions {
   frame?: Frame;
   /** per beat: the narration's word times — headline words appear as they are spoken */
   speech?: (BeatSpeech | null | undefined)[];
+  /** stage 25: a talking presenter (circle with alpha, src relative to the project) in the bottom corner over every scene */
+  presenter?: { src: string; box: { size: number; right: number; bottom: number } };
 }
 
 export interface ComposedScenes {
@@ -293,7 +295,8 @@ const ENTER: Record<Scene["entrance"], { from: string; to: string; d: number; ea
 
 export function composeScenes(script: Script, design: Design, o: ComposeScenesOptions): ComposedScenes {
   const F = o.frame ?? FRAMES["9:16"];
-  const S = F.safe;
+  // with a presenter in the bottom corner every text block lives above it (photos still fill the frame)
+  const S = o.presenter ? { ...F.safe, bottom: Math.min(F.safe.bottom, F.h - o.presenter.box.bottom - o.presenter.box.size - Math.round(Math.min(F.w, F.h) * 0.03)) } : F.safe;
   const LS = F.w > F.h;
   const SQ = F.w === F.h;
   const k = Math.min(F.w, F.h) / 1080;
@@ -471,7 +474,8 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
     let layout = scene.layout;
     if (layout === "media_number" && !img) layout = scene.number ? "hero_number" : "headline";
     if (layout.startsWith("media_") && !img) layout = "headline";
-    const anchor = scene.anchor;
+    // the presenter sits in the bottom corner: text blocks that would sit there move to the top
+    const anchor = o.presenter && scene.anchor === "bottom" ? "top" : scene.anchor;
     const photo = `<span class="ph full" id="${id}-ph"><img class="img" id="${id}-img" src="${img}" alt="" /></span>`;
 
     const headline = (cls: string, def: number, maxw: number, maxh: number, min: number, align: "left" | "center") =>
@@ -482,6 +486,9 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
         // one line set huge on a full accent field: the turn or the conclusion
         const w = LS ? Math.min(1560, textW) : textW;
         body.push(`<span class="fill" id="${id}-fill"></span>`);
+        // a soft light band sweeps over the colour field: a held statement is never a flat card
+        body.push(`<span class="sweep" id="${id}-sweep"></span>`);
+        tw.push(`tl.fromTo("#${id}-sweep", { backgroundPosition: "130% 0%" }, { backgroundPosition: "-30% 0%", duration: ${fmt(Math.max(1, t.duration))}, ease: "sine.inOut" }, ${fmt(t.start)});`);
         body.push(block(anchor, S.x, w, "left", [kicker(scene.kicker, `${id}-k`), headline("hl-stmt", LS ? 156 : SQ ? 128 : hook ? 168 : 150, w, LS ? 700 : SQ ? 760 : bandH * 0.8, 60, "left"), subEl(scene, id)]));
         tw.push(`tl.fromTo("#${id}-fill", { clipPath: "inset(0% 100% 0% 0%)" }, { clipPath: "inset(0% 0% 0% 0%)", duration: 0.32, ease: "power3.inOut" }, ${fmt(t.start)});`);
         cues.push({ t: t.start, kind: "swipe", gain: -2 });
@@ -817,6 +824,16 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       }
       // a hard cut has no motion and no whoosh: the next frame simply is there, on the beat
     }
+    // stage 25: the hook punches in (camera from 118 % with blur, a white flash on frame 1); the second scene is the
+    // pattern interrupt around the third second (an accent flash on top of its whip/zoom)
+    if (hook) {
+      body.push(`<span class="flash" id="${id}-flash"></span>`);
+      tw.push(`tl.fromTo("#${id}-out", { scale: 1.18, filter: "blur(10px)" }, { scale: 1, filter: "blur(0px)", duration: 0.5, ease: "expo.out" }, 0);`);
+      tw.push(`tl.fromTo("#${id}-flash", { opacity: 0.85 }, { opacity: 0, duration: 0.28, ease: "power2.out" }, 0);`);
+    } else if (i === 1) {
+      body.push(`<span class="flash acc" id="${id}-flash"></span>`);
+      tw.push(`tl.fromTo("#${id}-flash", { opacity: 0.55 }, { opacity: 0, duration: 0.22, ease: "power2.out", immediateRender: false }, ${fmt(t.start)});`);
+    }
     if (i === design.scenes.length - 1) cues.push({ t: t.start + 0.5, kind: "ding", gain: -4 });
     if (hook && !["hero_number", "media_number", "orbit_title", "tunnel_number"].includes(layout)) cues.push({ t: 0.05, kind: "impact", gain: -3 });
     const is3d = (LAYOUTS_3D as readonly string[]).includes(layout);
@@ -846,6 +863,30 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
         ? `background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='${light ? 0.05 : 0.09}'/></svg>");`
         : "";
   const glow = I.texture === "glow";
+  // stage 25: the background is never a still: two soft colour fields drift across the frame for the whole video and
+  // breathe on every cut, the grid crawls upward, the grain flickers at 12 fps (all on the one paused timeline)
+  const blobSize = px(LS ? 1500 : 1400);
+  const blobA = `left:${-Math.round(blobSize * 0.35)}px;top:${-Math.round(blobSize * 0.3)}px;width:${blobSize}px;height:${blobSize}px;background:radial-gradient(closest-side, ${P.accent}${light ? "26" : "2E"}, ${P.accent}00)`;
+  const blobB = `left:${Math.round(F.w - blobSize * 0.6)}px;top:${Math.round(F.h - blobSize * 0.65)}px;width:${blobSize}px;height:${blobSize}px;background:radial-gradient(closest-side, ${P.accent2}${light ? "22" : "2A"}, ${P.accent2}00)`;
+  const bgMotion: string[] = [
+    `tl.fromTo("#bg-a", { x: 0, y: 0 }, { x: ${px(LS ? 700 : 420)}, y: ${px(LS ? 260 : 620)}, duration: ${fmt(DUR)}, ease: "sine.inOut" }, 0);`,
+    `tl.fromTo("#bg-b", { x: 0, y: 0 }, { x: ${-px(LS ? 640 : 380)}, y: ${-px(LS ? 220 : 560)}, duration: ${fmt(DUR)}, ease: "sine.inOut" }, 0);`,
+  ];
+  timings.forEach((t, q) => {
+    if (q === 0) return;
+    bgMotion.push(`tl.fromTo("#bg-a", { opacity: 0.55 }, { opacity: 1, duration: 0.6, ease: "power2.out", immediateRender: false }, ${fmt(t.start)});`);
+  });
+  if (I.texture === "grid") bgMotion.push(`tl.fromTo("#bg-tex", { backgroundPosition: "0px 0px" }, { backgroundPosition: "0px ${-Math.round(72 * Math.max(4, DUR / 2))}px", duration: ${fmt(DUR)}, ease: "none" }, 0);`);
+  if (I.texture === "grain") bgMotion.push(`tl.fromTo("#bg-tex", { backgroundPosition: "0px 0px" }, { backgroundPosition: "${Math.round(DUR * 12) * 37}px ${Math.round(DUR * 12) * 53}px", duration: ${fmt(DUR)}, ease: "steps(${Math.max(1, Math.round(DUR * 12))})" }, 0);`);
+  // the presenter: a VP9-alpha circle on its own track above the scenes, an accent ring that pops in with the hook
+  const pb = o.presenter?.box;
+  const presenterCss = pb
+    ? `\n      #presenter { position: absolute; right: ${pb.right}px; bottom: ${pb.bottom}px; width: ${pb.size}px; height: ${pb.size}px; z-index: 6; }\n      .pres-ring { position: absolute; right: ${pb.right - px(7)}px; bottom: ${pb.bottom - px(7)}px; width: ${pb.size + px(14)}px; height: ${pb.size + px(14)}px; box-sizing: border-box; display: block; border-radius: 50%; border: ${px(7)}px solid ${P.accent}; box-shadow: 0 ${px(18)}px ${px(60)}px rgba(0,0,0,0.45); z-index: 7; }`
+    : "";
+  const presenterHtml = pb
+    ? `\n      <video id="presenter" src="${esc(o.presenter!.src)}" data-start="0" data-duration="${fmt(DUR)}" data-track-index="3" muted playsinline></video>\n      <section id="presl" class="clip pres" data-start="0" data-duration="${fmt(DUR)}" data-track-index="4">\n        <span class="pres-ring" id="pres-ring"></span>\n      </section>`
+    : "";
+  if (pb) tw.push(`tl.fromTo("#pres-ring", { scale: 0.6, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.45, ease: "back.out(2)" }, 0.15);`);
   const resolution = F.w > F.h ? "landscape" : F.w === F.h ? "square" : "portrait";
   const statementText = onColor(P.accent);
 
@@ -917,6 +958,10 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       .onphoto .num-u { color: #FFFFFF; }
       .onphoto .kick { color: ${P.accent}; text-shadow: 0 1px 12px rgba(0,0,0,0.5); }
       .fill { position: absolute; inset: 0; display: block; background: ${P.accent}; }
+      .sweep { position: absolute; inset: 0; display: block; background-image: linear-gradient(100deg, rgba(255,255,255,0) 35%, rgba(255,255,255,0.16) 50%, rgba(255,255,255,0) 65%); background-size: 300% 100%; background-repeat: no-repeat; pointer-events: none; }
+      .flash { position: absolute; inset: 0; display: block; background: #FFFFFF; opacity: 0; pointer-events: none; z-index: 5; }
+      .flash.acc { background: ${P.accent}; }
+      .blob { position: absolute; display: block; border-radius: 50%; }
       .L-statement .hl, .L-statement .sub, .L-statement .kick { color: ${statementText}; }
       .L-statement .acc-w-color, .L-statement .acc-w-serif, .L-statement .acc-w-gradient, .L-statement .acc-w-outline { color: ${statementText}; background: none; -webkit-text-stroke: 0; }
       .L-statement .acc-w-outline { color: transparent; -webkit-text-stroke: 3px ${statementText}; }
@@ -973,7 +1018,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       .tnum { text-align: center; }
       .caps { position: absolute; inset: 0; pointer-events: none; }
       .cap { position: absolute; left: ${S.x}px; right: ${S.x}px; bottom: ${F.h - S.bottom + 6}px; display: flex; justify-content: center; opacity: 0; }
-      .capt { display: block; max-width: ${textW}px; padding: 14px 28px; border-radius: 22px; background: rgba(0,0,0,0.62); color: #FFFFFF; font-family: ${fontStack("inter")}; font-weight: 700; font-size: ${px(50)}px; line-height: 1.18; text-align: center; text-wrap: balance; }
+      .capt { display: block; max-width: ${textW}px; padding: 14px 28px; border-radius: 22px; background: rgba(0,0,0,0.62); color: #FFFFFF; font-family: ${fontStack("inter")}; font-weight: 700; font-size: ${px(50)}px; line-height: 1.18; text-align: center; text-wrap: balance; }${presenterCss}
       .hl-quote { font-family: ${fontStack(accentFont === "mono" ? display : accentFont)}; font-weight: ${(accentFont === "mono" ? D : A).weight}; font-style: ${(accentFont === "mono" ? D : A).style}; line-height: 1.12; }
     </style>
   </head>
@@ -988,12 +1033,15 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       data-fps="${FPS}"
     >
       <section id="bgl" class="clip bg" data-start="0" data-duration="${fmt(DUR)}" data-track-index="0">
+        <span class="blob" id="bg-a" style="${blobA}"></span>
+        <span class="blob" id="bg-b" style="${blobB}"></span>
         <span class="tex" id="bg-tex"></span>${glow ? `\n        <span class="glow" id="bg-glow"></span>` : ""}${header ? `\n        <span class="brand" id="bg-brand">${esc(I.brand)}</span>\n        <span class="bar" id="bg-bar"><span class="barf" id="bg-barf"></span></span>` : ""}
       </section>
-${sections.join("\n")}
+${sections.join("\n")}${presenterHtml}
     </div>
     <script>
-      const tl = gsap.timeline({ paused: true });${glow ? `\n      tl.fromTo("#bg-glow", { x: 0, y: 0 }, { x: ${px(420)}, y: ${px(380)}, duration: ${fmt(DUR)}, ease: "sine.inOut" }, 0);` : ""}${header ? `\n      tl.fromTo("#bg-barf", { scaleX: 0 }, { scaleX: 1, duration: ${fmt(DUR)}, ease: "none" }, 0);` : ""}
+      const tl = gsap.timeline({ paused: true });
+      ${bgMotion.join("\n      ")}${glow ? `\n      tl.fromTo("#bg-glow", { x: 0, y: 0 }, { x: ${px(420)}, y: ${px(380)}, duration: ${fmt(DUR)}, ease: "sine.inOut" }, 0);` : ""}${header ? `\n      tl.fromTo("#bg-barf", { scaleX: 0 }, { scaleX: 1, duration: ${fmt(DUR)}, ease: "none" }, 0);` : ""}
       ${tw.join("\n      ")}
       window.__timelines["main"] = tl;
     </script>

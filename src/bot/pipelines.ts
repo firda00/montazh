@@ -283,7 +283,7 @@ export const runFullPipeline: PipelineFn = async ({ source, sources, instruction
   checkCancel(signal);
 
   await progress(`▸ анализ речи… (${media.duration.toFixed(0)} с видео)`);
-  const u = await runStep(job.id, "understand", () => understand(job.id, media, { onLog: (l) => log(`    ${l}`) }));
+  const u = await runStep(job.id, "understand", () => understand(job.id, media, { hint: instruction, onLog: (l) => log(`    ${l}`) }));
   checkCancel(signal);
   // "лучшие моменты" of a video that is mostly not speech → highlights on the same job
   if (intent === "weak") {

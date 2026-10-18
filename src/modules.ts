@@ -89,7 +89,7 @@ export const MODULES: ModuleDef[] = [
     stage: "understand",
     title: "Распознавание речи",
     what: "фразы и пословные таймкоды",
-    selector: "--asr auto|cpp|faster, VEDIT_ASR; auto = faster с NVIDIA GPU или для файлов > 20 мин",
+    selector: "--asr auto|cpp|faster, VEDIT_ASR; auto = faster с NVIDIA GPU или для файлов > 20 мин; правка имён/терминов VEDIT_ASR_FIX=auto|off (Gemini flash-lite), VEDIT_WHISPER_PROMPT=on|carry|off",
     backends: [
       { id: "cpp", title: "whisper.cpp large-v3-turbo", deps: "whisper-cli, ggml-модель", license: "MIT (код и веса Whisper)" },
       { id: "faster", title: "faster-whisper", deps: "tools/asr/.venv: faster-whisper, CTranslate2", license: "MIT" },
@@ -311,7 +311,7 @@ export const MODULES: ModuleDef[] = [
     stage: "design",
     title: "Ролик из ничего",
     what: "тема → тренды → сценарий (с проверкой на клише) → настоящие фото и моушн-графика → MP4 9:16 / 16:9 / 1:1 (озвучка по желанию: --voice)",
-    selector: "vedit make <тема> / Telegram /make [16:9] <тема>; --aspect, --images photo|ai|none, --no-trends, --music, --script, --voice",
+    selector: "vedit make <тема> / Telegram /make [16:9] <тема>; --aspect, --images photo|ai|none, --no-trends, --music, --script, --voice, --presenter [фото] / --presenter-video avatar_result.zip",
     backends: [
       { id: "agy-trends", title: "Тренды: Antigravity CLI (поиск в вебе)", deps: "agy + вход Google", license: "условия Antigravity; $0" },
       { id: "gemini-trends", title: "Тренды без agy (сервер): Gemini + Google Search grounding, источники из цитат", deps: "GEMINI_API_KEY (платный уровень: поиск не входит в бесплатный); VEDIT_TRENDS_MODEL → gemini-3.8-flash → 2.5-flash", license: "условия Gemini API; 5000 поисков/мес бесплатно, далее $14 / 1000" },
@@ -337,7 +337,7 @@ export const MODULES: ModuleDef[] = [
     stage: "design",
     title: "Голоса (озвучка)",
     what: "каталог голосов: Gemini TTS (облако, живая интонация, нужен GEMINI_API_KEY), Piper локально на CPU (запасной, $0) и пресеты Chatterbox для аватара",
-    selector: "vedit voices; vedit make --voice <id>; vedit avatar export --voice <id>; Telegram /voice",
+    selector: "vedit voices; vedit make --voice <id>; vedit avatar export --voice <id>; Telegram /voice; произношение data/pronounce.ru.json + VEDIT_PRONOUNCE_DICT, VEDIT_TTS_TAKE=single|line, VEDIT_GEMINI_TTS_STYLE (doc), VEDIT_TTS_STRESS=1",
     backends: [
       { id: "piper", title: "Piper 2023.11.14-2 (rhasspy), бинарник + onnx-модели, скачиваются при первом использовании в tools/voice/", deps: "piper(.exe), espeak-ng-data, onnxruntime (в архиве релиза); ~22 МБ + ~60 МБ на голос", license: "MIT (Piper); espeak-ng GPL-3.0 — только как внешний процесс" },
       { id: "gemini-tts", title: "Gemini TTS (Google Gemini API): по одному запросу на бит, один стиль диктора на ролик, ретраи на 429, кэш workspace/_cache/tts/gemini", deps: "GEMINI_API_KEY (или GOOGLE_API_KEY); модели VEDIT_GEMINI_TTS_MODEL → gemini-3.8-flash-tts → 3.8-flash-lite-tts → 3.1-flash-tts-preview → 2.5-flash-preview-tts", license: "условия Gemini API: коммерческое использование озвучки разрешено; бесплатный уровень — данные могут использоваться Google, для продакшена платный (≈$9 / 1M аудио-токенов ≈ $0.02 за минуту речи)" },
