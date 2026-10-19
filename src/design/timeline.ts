@@ -36,6 +36,8 @@ export interface OutTitle {
   duration: number;
   text: string;
   style: string;
+  /** stage 27: words of the text in the accent colour */
+  accent_words?: string[];
 }
 
 export interface DesignTimeline {
@@ -108,7 +110,7 @@ export function buildDesignTimeline(output: Output, transcript: Transcript, medi
     .map((t) => {
       const at = Math.min(Math.max(0, t.at), Math.max(0, duration - 0.5));
       const dur = Math.min(t.duration ?? DEFAULT_TITLE_DURATION, Math.max(0.5, duration - at));
-      return { at: r3(at), duration: r3(dur), text: t.text, style: t.style };
+      return { at: r3(at), duration: r3(dur), text: t.text, style: t.style, ...(t.accent_words?.length ? { accent_words: t.accent_words } : {}) };
     })
     .filter((t) => t.duration > 0);
 

@@ -68,6 +68,10 @@ export interface LayoutTitle {
   /** vertical centre (fraction of the height), off the faces when they are known; absent → the style's default anchor */
   anchorY?: number;
   place?: string;
+  /** stage 27: words drawn in the accent colour (as displayed) */
+  accent?: string[];
+  /** stage 27 "plain" hook: output time each line appears (line 2 on its spoken word) */
+  lineAt?: number[];
 }
 
 export interface Layout {

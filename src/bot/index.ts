@@ -135,11 +135,13 @@ export type BotState = z.infer<typeof BotStateSchema>;
 export const SEND_MODES: Record<string, SendMode> = { file: "file", document: "file", doc: "file", файл: "file", файлом: "file", fayl: "file", video: "video", видео: "video", both: "both", оба: "both", все: "both", ikkalasi: "both" };
 
 /** /style names → presets */
-export const STYLES: Record<string, string> = { pop: "bold_pop", bold: "bold_pop", bold_pop: "bold_pop", split: "split_news", news: "split_news", split_news: "split_news", calm: "calm" };
+export const STYLES: Record<string, string> = { pop: "bold_pop", bold: "bold_pop", bold_pop: "bold_pop", clean: "clean_min", clean_min: "clean_min", expert: "clean_min", box: "box_reveal", box_reveal: "box_reveal", karaoke: "box_reveal", split: "split_news", news: "split_news", split_news: "split_news", calm: "calm" };
 
 /** a style named in the instruction itself ("в стиле сплит", "как у aleko") */
 export function styleFromText(text: string): string | undefined {
   if (/(сплит|split|как у aleko|как aleko|новостн\w* сплит|карточк\w* сверху)/i.test(text)) return "split_news";
+  if (/(как у эксперт\w*|экспертн\w* стил\w*|как у маргулан\w*|чист\w* субтитр\w*)/i.test(text)) return "clean_min";
+  if (/(плашк\w* с подсветк\w*|караоке|как у таневск\w*)/i.test(text)) return "box_reveal";
   return undefined;
 }
 

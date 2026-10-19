@@ -283,6 +283,17 @@ function lower(text: string, lang: string): string {
   }
 }
 
+/** stage 27: the caption letter case of a design (letter_case wins; else uppercase → "upper", otherwise as spoken). */
+export function captionCase(D: Pick<DesignSpec, "captions">): "as_spoken" | "upper" | "lower" {
+  return D.captions.letter_case ?? (D.captions.uppercase ? "upper" : "as_spoken");
+}
+
+/** A caption word in the design's letter case (rule a + stage 27 letter_case). */
+export function casedWord(raw: string, lang: string, mode: "as_spoken" | "upper" | "lower"): string {
+  const t = displayWord(raw, lang, mode === "upper");
+  return mode === "lower" ? lower(t, lang) : t;
+}
+
 /** Caption display text of one transcript token (rule a). Empty when the token is only punctuation. */
 export function displayWord(raw: string, lang: string, uppercase: boolean): string {
   let t = raw.normalize("NFC").replace(/\s+/gu, " ").trim();
@@ -675,6 +686,24 @@ export function titleBlock(D: DesignSpec, t: Pick<LayoutTitle, "style" | "lines"
   };
 }
 
+const normTok = (s: string, lang: string) => lower(displayWord(s, lang, false), lang).replace(/[^\p{L}\p{N}]/gu, "");
+
+/**
+ * stage 27: when each line of a two-line hook title appears — line 1 at the title start, a later line on the word that
+ * opens it when the speaker says it inside the title window (reel #14: «ОТ ИЛОНА МАСКА» pops in on «от»), else 0.35 s
+ * after the line before it.
+ */
+export function titleLineTimes(lines: string[], at: number, dur: number, words: { w: string; start: number }[], lang: string): number[] {
+  const out = [at];
+  for (let k = 1; k < lines.length; k++) {
+    const first = normTok(lines[k].split(" ")[0] ?? "", lang);
+    const prev = out[k - 1];
+    const hit = first ? words.find((w) => w.start > prev + 0.15 && w.start < at + dur - 0.4 && normTok(w.w, lang) === first) : undefined;
+    out.push(r6(hit ? hit.start : Math.min(prev + 0.35, at + Math.max(0, dur - 0.5))));
+  }
+  return out;
+}
+
 /** A stand-in face for a vertical reel without any face data: where a talking head usually is. */
 export function typicalFaceTrack(split: boolean, duration: number): FaceTrack {
   const box: [number, number, number, number] = split ? [0.3, 0.6, 0.7, 0.8] : [0.2, 0.22, 0.8, 0.64];
@@ -700,11 +729,12 @@ export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOp
   const capMax = Math.min(W - 2 * D.safe_area.x * W, 0.8 * W);
   const capBase = D.captions.font_size * scale;
   const popMax = D.captions.word_animation === "pop" ? D.captions.pop_scale : 1;
+  const letterCase = captionCase(D);
   const drafts = t.captions?.enabled === false ? [] : paginatePhrases(t.phrases, { maxWords: D.captions.max_words, maxChars: D.captions.max_chars, functionWords: opts.functionWords });
   const windows = displayWindows(drafts, duration, fps, holdGap, tailHold);
   const fitted = drafts.map((d) => {
     const caseLang = captionsLang ?? d.lang;
-    const texts = d.words.map((w) => displayWord(w.w, caseLang, D.captions.uppercase));
+    const texts = d.words.map((w) => casedWord(w.w, caseLang, letterCase));
     const fwEnd = d.words.map((w) => isFw(w.w, d.lang, sets));
     const punctEnd = d.words.map((w) => CLAUSE_END.test(w.w.trim()));
     return { texts, fit: fitPage(texts, fwEnd, punctEnd, metrics, capBase, capMax, popMax, popGrow) };
@@ -785,13 +815,17 @@ export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOp
   const ttlBase = D.titles.font_size * scale;
   const ttlMax = Math.min(W - 2 * D.safe_area.x * W - 2 * (D.titles.padding + TITLE_EXTRA_PAD) * scale, 0.8 * W);
   const titlesOut: LayoutTitle[] = [];
+  const allWords = t.phrases.flatMap((p) => p.words);
   for (const title of t.titles) {
-    const text = title.text.normalize("NFC").replace(/\s+/gu, " ").trim();
+    const plain = title.style === "plain";
+    const raw = title.text.normalize("NFC").replace(/\s+/gu, " ").trim();
+    // stage 27 "plain" hook: caps (in the caption language), measured as drawn; heavier than the caption weight → 10 % margin
+    const text = plain && D.titles.plain_uppercase ? upper(raw, language) : raw;
     const at = r6(clamp(title.at, 0, duration));
     const dur = r6(Math.min(title.duration, duration - at));
     if (!text || dur <= 0) continue;
     const tokens = text.split(" ");
-    const fit = fitTitle(tokens, metrics, ttlBase, ttlMax, D.titles.max_lines, sets);
+    const fit = fitTitle(tokens, metrics, ttlBase, plain ? ttlMax * 0.9 : ttlMax, D.titles.max_lines, sets);
     const lines: string[] = [];
     let width = 0;
     let a = 0;
@@ -800,7 +834,9 @@ export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOp
       width = Math.max(width, spanWidth(fit.widths, fit.gap, a, e));
       a = e;
     }
-    titlesOut.push({ index: titlesOut.length, at, duration: dur, text, style: title.style, fontSize: r2(fit.fontSize), lines, width: r2(width) });
+    const accent = (title.accent_words ?? []).map((w) => (plain && D.titles.plain_uppercase ? upper(w, language) : w)).filter((w) => w.trim());
+    const lineAt = plain && lines.length > 1 ? titleLineTimes(lines, at, dur, allWords, language) : undefined;
+    titlesOut.push({ index: titlesOut.length, at, duration: dur, text, style: title.style, fontSize: r2(fit.fontSize), lines, width: r2(width), ...(accent.length ? { accent } : {}), ...(lineAt ? { lineAt } : {}) });
   }
   const tracked = !!faces && faces.source !== "none";
   let outroAnchorY: number | undefined;
@@ -813,7 +849,7 @@ export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOp
     });
     for (const t of titlesOut) {
       const { height, width } = titleBlock(D, t, W, H, metrics.measure);
-      const preferred = t.style === "lower" ? D.captions.anchor_y : t.style === "callout" ? CALLOUT_ANCHOR_Y : tracked ? D.titles.anchor_y : titleAnchor(D, job.face_y);
+      const preferred = t.style === "lower" ? D.captions.anchor_y : t.style === "callout" ? CALLOUT_ANCHOR_Y : t.style === "plain" ? D.titles.plain_anchor_y : tracked ? D.titles.anchor_y : titleAnchor(D, job.face_y);
       const pl = placeBlock({ start: t.at, end: t.at + t.duration, height, width, preferred }, faces, { ...placeOpts, extra: [...extra, ...capObs] });
       t.anchorY = pl.y;
       t.place = pl.rule;

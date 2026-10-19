@@ -1,0 +1,76 @@
+{
+  "name": "box_reveal",
+  "description": "Сторителлинг с цифрами (как у Таневского): строка на тёмной плашке, сказанные слова загораются, цифры антиквой, вставки и чипы фактов, без музыки",
+  "pace": "neutral",
+  "clip_seconds": {
+    "min": 2,
+    "max": 10
+  },
+  "caption_style": "box_reveal",
+  "title_style": "plain",
+  "default_aspect": "9:16",
+  "music_default": false,
+  "music": "off",
+  "notes": [
+    "хук — контраст двух чисел или факт с числом",
+    "паузы можно оставлять: спокойный экспертный темп",
+    "сюжет с цифрами — в первой половине"
+  ],
+  "design": {
+    "font": {
+      "family": "Inter",
+      "file": "assets/fonts/Inter-Variable.ttf",
+      "weight": 600
+    },
+    "colors": {
+      "text": "#FFFFFF",
+      "highlight": "#FFFFFF",
+      "stroke": "rgba(0,0,0,0)",
+      "title": "#FFFFFF",
+      "title_bg": "rgba(0,0,0,0)"
+    },
+    "captions": {
+      "anchor_y": 0.75,
+      "max_words": 5,
+      "max_chars": 30,
+      "font_size": 40,
+      "line_height": 1.18,
+      "uppercase": false,
+      "letter_case": "as_spoken",
+      "stroke_width": 0,
+      "shadow_opacity": 0,
+      "word_animation": "reveal",
+      "dim_color": "rgba(255,255,255,0.3)",
+      "numbers_font": "serif",
+      "page_animation": "none",
+      "avoid_face": true,
+      "backing": { "enabled": true, "color": "rgba(0,0,0,0.8)", "padding": 10, "radius": 6 },
+      "shade": { "enabled": false }
+    },
+    "titles": {
+      "anchor_y": 0.76,
+      "font_size": 64,
+      "max_lines": 2,
+      "animation": "fade",
+      "padding": 0,
+      "radius": 0,
+      "avoid_face": true,
+      "face_zone": 0.42,
+      "accent_color": "#E5C158",
+      "plain_anchor_y": 0.68,
+      "plain_weight": 800,
+      "plain_uppercase": true
+    },
+    "safe_area": {
+      "x": 0.06,
+      "y": 0.08
+    },
+    "inserts": {
+      "enabled": true,
+      "density": "normal"
+    },
+    "outro": {
+      "enabled": false
+    }
+  }
+}

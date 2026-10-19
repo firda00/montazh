@@ -33,6 +33,8 @@ export const TitleSchema = z.object({
   duration: z.number().positive().optional(),
   text: z.string().min(1),
   style: z.string().default("hero"),
+  /** stage 27: words of the text drawn in the accent colour (hook title: «ЛЕТАЮЩАЯ **TESLA**») */
+  accent_words: z.array(z.string()).optional(),
 });
 
 export const OutputSchema = z.object({
@@ -49,6 +51,8 @@ export const OutputSchema = z.object({
     .default({ enabled: false }),
   titles: z.array(TitleSchema).default([]),
   music: z.object({ enabled: z.boolean() }).default({ enabled: false }),
+  /** stage 27: named things the planner marked as worth a B-roll insert (as spoken); the insert scheduler decides */
+  insert_hints: z.array(z.string()).optional(),
   /** sound design decided at plan time (highlights): effects on the output timeline and the music bed */
   sfx: z.array(z.object({ t: z.number().min(0), kind: z.string(), gain: z.number().optional() })).optional(),
   audio: z

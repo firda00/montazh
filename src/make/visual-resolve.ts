@@ -56,6 +56,8 @@ export interface ResolveOptions {
   photosPerEntity?: number;
   /** skip network (tests) */
   offline?: boolean;
+  /** stage 27: the entity dictionary to match (the caller ran its own LLM pass); skips this module's LLM pass */
+  entities?: EntityDef[];
   onEvent?: (l: string) => void;
 }
 
@@ -190,7 +192,7 @@ export async function resolveVisuals(script: Script, speech: (BeatSpeech | null 
   const say = (l: string) => o.onEvent?.(l);
   const dollars = scriptInDollars(script);
   let llm: Awaited<ReturnType<typeof llmPass>> = null;
-  const wantLlm = o.llm ?? process.env.VEDIT_VISUAL_LLM?.trim().toLowerCase() !== "off";
+  const wantLlm = !o.entities && (o.llm ?? process.env.VEDIT_VISUAL_LLM?.trim().toLowerCase() !== "off");
   if (wantLlm && !o.offline) {
     try {
       llm = await llmPass(script, o);
@@ -199,7 +201,7 @@ export async function resolveVisuals(script: Script, speech: (BeatSpeech | null 
       say(`  ⚠ разбор сущностей Gemini не удался: ${err instanceof Error ? err.message.split("\n")[0].slice(0, 160) : err}`);
     }
   }
-  const entities = mergeEntities(llm?.beats ?? null);
+  const entities = o.entities ?? mergeEntities(llm?.beats ?? null);
   const byId = new Map(entities.map((e) => [e.id, e]));
   const beats: BeatVisuals[] = script.beats.map((_, i) => {
     const words = beatWords(script, i, speech[i]);

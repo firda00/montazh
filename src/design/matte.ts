@@ -207,3 +207,56 @@ export async function resolveCutout(
   if (mode === "on") return { cutout: cut, warnings: [`вырезание фона: маска ненадёжна (${verdict.reasons.join("; ")}), но включено --cutout on`] };
   return { warnings: [`фон спикера не вырезан: маска ненадёжна (${verdict.reasons.join("; ")}) — обычное видео`] };
 }
+
+// ---- stage 27: a still photo of a person cut out (the PiP of a montage insert) ----
+
+export interface StillCutoutStats {
+  ok: boolean;
+  coverage?: number;
+  blobs?: number;
+  touches_bottom?: boolean;
+  uncertain_ratio?: number;
+  bbox?: [number, number, number, number];
+  size?: [number, number];
+  reason?: string;
+}
+
+/**
+ * Is the cut-out photo usable as a PiP? One person (≤ 2 big blobs), not a speck and not the whole frame, a clean edge.
+ * The person need not reach the bottom edge (a bust floating on the chest fades in softly).
+ */
+export function judgeStillCutout(s: StillCutoutStats): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  if (!s.ok) reasons.push(s.reason ?? "нет человека");
+  else {
+    if ((s.coverage ?? 0) < 0.06) reasons.push(`человек мал (${Math.round((s.coverage ?? 0) * 100)}%)`);
+    if ((s.coverage ?? 0) > 0.88) reasons.push("маска почти на весь кадр");
+    if ((s.blobs ?? 0) > 2) reasons.push(`несколько фигур (${s.blobs})`);
+    if ((s.uncertain_ratio ?? 0) > 0.4) reasons.push("размытая граница");
+  }
+  return { ok: reasons.length === 0, reasons };
+}
+
+/** Cuts the person out of a photo into an RGBA PNG (cached by the photo's content and the script). */
+export async function cutoutStill(photo: string, cacheDir: string, opts: { python?: string | null; run?: MatteRunner; onLog?: (l: string) => void } = {}): Promise<{ png: string; stats: StillCutoutStats; cached: boolean } | null> {
+  const python = opts.python === undefined ? await findMattePython() : opts.python;
+  if (!python) return null;
+  const script = await fs.readFile(MATTE_SCRIPT).catch(() => Buffer.from(""));
+  const key = createHash("sha1").update(await fs.readFile(photo)).update(script).digest("hex").slice(0, 16);
+  const png = path.join(cacheDir, `still_${key}.png`);
+  const statsFile = path.join(cacheDir, `still_${key}.json`);
+  if (await exists(statsFile)) {
+    try {
+      const stats = JSON.parse(await fs.readFile(statsFile, "utf8")) as StillCutoutStats;
+      if (!stats.ok || (await exists(png))) return { png, stats, cached: true };
+    } catch {}
+  }
+  await fs.mkdir(cacheDir, { recursive: true });
+  const r = await (opts.run ?? runMatteSidecar)(python, ["cutout", "--input", photo, "--out", png, "--stats", statsFile, "--model", MATTE_MODEL], opts.onLog);
+  if (r.code !== 0 || !(await exists(statsFile))) {
+    opts.onLog?.(`вырезание фото не удалось: ${r.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 200) ?? ""}`);
+    return null;
+  }
+  const stats = JSON.parse(await fs.readFile(statsFile, "utf8")) as StillCutoutStats;
+  return { png, stats, cached: false };
+}

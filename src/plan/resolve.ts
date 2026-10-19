@@ -219,7 +219,9 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
       if (t.text.length > 60) warn("title_long", `title "${t.text.slice(0, 30)}…" is ${t.text.length} chars (keep ≤ 40)`);
       // a title that already existed (same text, nearest time) keeps its style; a title added by the edit gets the preset's
       const prevTitle = currentOut?.titles.filter((p) => p.text === t.text).sort((a, b) => Math.abs(a.at - t.at) - Math.abs(b.at - t.at))[0];
-      return { at: r2(at), duration: t.duration, text: t.text, style: t.style ?? (prevTitle ? prevTitle.style : ctx.preset.title_style) };
+      // stage 27: accent words must be words of the title itself (case-insensitive), at most two
+      const accent = (t.accent_words ?? []).map((w) => w.trim()).filter((w) => w && t.text.toLowerCase().includes(w.toLowerCase())).slice(0, 2);
+      return { at: r2(at), duration: t.duration, text: t.text, style: t.style ?? (prevTitle ? prevTitle.style : ctx.preset.title_style), ...(accent.length ? { accent_words: accent } : prevTitle?.accent_words?.length ? { accent_words: prevTitle.accent_words } : {}) };
     });
 
     const out: ResolvedOutput = { id: o.id, aspect: o.aspect, errors, warnings, clips, duration_s: r2(duration), target_s: target, captions_language: captionsLanguage };
@@ -242,6 +244,7 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
         },
         titles,
         music: { enabled: o.music.enabled },
+        ...(o.inserts?.length ? { insert_hints: [...new Set(o.inserts.map((x) => x.trim()).filter((x) => x && x.length <= 60))].slice(0, 12) } : currentOut?.insert_hints ? { insert_hints: currentOut.insert_hints } : {}),
         transitions: "cut",
       };
     }

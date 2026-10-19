@@ -21,6 +21,7 @@ export const DraftTitleSchema = z.object({
   duration: z.number().optional(),
   text: z.string().describe("≤ 40 chars, only facts that appear in the phrases"),
   style: z.string().optional(),
+  accent_words: z.array(z.string()).optional().describe("hook title only: the 1 word of the text (a name, a brand or a number) drawn in the accent colour, copied verbatim from the text"),
 });
 
 export const DraftOutputSchema = z.object({
@@ -36,6 +37,7 @@ export const DraftOutputSchema = z.object({
   }),
   titles: z.array(DraftTitleSchema),
   music: z.object({ enabled: z.boolean() }),
+  inserts: z.array(z.string()).optional().describe("optional: named things (companies, products, people, places, objects) said in this output that deserve a B-roll insert, as spoken; the editor decides timing"),
 });
 
 export const DraftBriefSchema = z.object({
@@ -211,12 +213,28 @@ export const DesignSpecSchema = z.object({
     font_size: z.number().default(72), // px at 1080 wide; scaled by width/1080
     line_height: z.number().default(1.15),
     uppercase: z.boolean().default(true),
+    /**
+     * stage 27: letter case of the caption words — "as_spoken" (the transcript's own case), "upper", "lower";
+     * absent → `uppercase` decides (true = upper, false = as_spoken)
+     */
+    letter_case: z.enum(["as_spoken", "upper", "lower"]).optional(),
     /** px, scaled like font_size */
     stroke_width: z.number().default(8),
     /** opacity of the soft drop shadow under the letters */
     shadow_opacity: z.number().min(0).max(1).default(0.55),
-    /** how the spoken word is emphasised */
-    word_animation: z.enum(["pop", "fill", "none"]).default("pop"),
+    /** drop shadow offset and blur (px at 1080 wide); clean_min: a tight 0 2px 6px */
+    shadow_y: z.number().default(3),
+    shadow_blur: z.number().default(14),
+    /**
+     * how the spoken word is emphasised: "pop" (scale + highlight, back to normal), "fill" (highlight colour, back),
+     * "none", "reveal" (stage 27, karaoke reveal: the whole line is on screen, words not yet said are dim — `dim_color` —
+     * and each word lights up to `colors.text` when it is said and stays lit; no scale)
+     */
+    word_animation: z.enum(["pop", "fill", "none", "reveal"]).default("pop"),
+    /** "reveal": colour of the words not yet said */
+    dim_color: z.string().default("rgba(255,255,255,0.3)"),
+    /** "serif": words with digits are set in a narrow serif (Playfair Display) — numbers stand out without colour (reel #15) */
+    numbers_font: z.enum(["same", "serif"]).default("same"),
     pop_scale: z.number().default(1.12),
     page_animation: z.enum(["fade_up", "none"]).default("fade_up"),
     /** rounded translucent box behind every caption line (legibility over faces and busy backgrounds) */
@@ -252,6 +270,13 @@ export const DesignSpecSchema = z.object({
     /** when the located face sits high in the frame (centre above face_zone), the title moves below it, above the captions */
     avoid_face: z.boolean().default(true),
     face_zone: z.number().default(0.42),
+    /** colour of a title's accent_words (stage 27 hook title); empty = colors.highlight */
+    accent_color: z.string().default(""),
+    /** "plain" titles (stage 27 hook: no card, shadow only, caps): vertical centre, under the face */
+    plain_anchor_y: z.number().default(0.76),
+    /** "plain" titles: font weight and uppercase */
+    plain_weight: z.number().default(800),
+    plain_uppercase: z.boolean().default(true),
   }).prefault({}),
   safe_area: z.object({ x: z.number().default(0.06), y: z.number().default(0.08) }).prefault({}),
   /** "split": speaker in the bottom half, generated visuals + UI cards on top, hook title on the seam */
@@ -269,6 +294,23 @@ export const DesignSpecSchema = z.object({
     cutout: z.enum(["off", "on", "auto"]).default("off"),
     /** how far the cut-out head may break above the seam, fraction of the height */
     pop_out: z.number().min(0).max(0.15).default(0.06),
+  }).prefault({}),
+  /**
+   * stage 27: B-roll inserts for a talking head (src/design/inserts.ts): named things and numbers of the speech →
+   * full-frame cutaways, a cut-out photo of a person on the chest, a scroll of a company's website, a logo with fact chips
+   */
+  inserts: z.object({
+    enabled: z.boolean().default(false),
+    /** share of the runtime under inserts: low ≈ 18 %, normal ≈ 30 %, high ≈ 35 % (never more) */
+    density: z.enum(["low", "normal", "high"]).default("normal"),
+    /** a company's mobile website recorded by headless Chrome (official URL from Wikidata P856 / the dictionary) */
+    site_capture: z.boolean().default(true),
+    /** a person talked about: a cut-out photo on the chest (else a rounded card) */
+    pip: z.boolean().default(true),
+    /** numbers: a logo card + stacking fact chips */
+    chips: z.boolean().default(true),
+    /** a soft whoosh / pop on every insert */
+    sfx: z.boolean().default(true),
   }).prefault({}),
   /** small graphic overlays (stage 22, reference style): a thin progress bar along the top edge */
   overlays: z.object({
@@ -296,6 +338,11 @@ export const PresetSchema = z.object({
   title_style: z.string().default("hero"),
   default_aspect: AspectSchema.default("9:16"),
   music_default: z.boolean().default(false),
+  /**
+   * stage 27: "plan" = the plan / music_default decide the music bed; "off" = expert talking head, never a music bed
+   * (reels #14, #15) — only an explicit --music overrides it
+   */
+  music: z.enum(["plan", "off"]).default("plan"),
   notes: z.array(z.string()).default([]),
   design: DesignSpecSchema.prefault({}),
 });

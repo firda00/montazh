@@ -22,6 +22,7 @@ import { addCost } from "../lib/cost.ts";
 import { writeJson } from "../lib/workspace.ts";
 import { styledPreset } from "../style/profile.ts";
 import type { DesignSpec } from "../schemas/index.ts";
+import { buildInserts, type BuildInsertsOptions, type InsertsTrack } from "./inserts.ts";
 
 export interface DesignJob {
   job_id: string;
@@ -50,6 +51,8 @@ export interface DesignJob {
    * from the rough cut (MediaPipe) or estimated from scenes.json; captions and titles are placed off them
    */
   faces?: FaceTrack;
+  /** stage 27: B-roll inserts over the talking head (src/design/inserts.ts) */
+  inserts?: InsertsTrack;
 }
 
 export interface ExportOptions {
@@ -68,6 +71,10 @@ export interface ExportOptions {
   onLog?: (line: string) => void;
   /** face track: "auto" (default) = sidecar → scenes → none; "scenes" = skip the sidecar; "off" = no track */
   faces?: "auto" | "scenes" | "off";
+  /** stage 27: B-roll inserts "on" / "off" instead of the preset's design.inserts.enabled */
+  inserts?: "on" | "off";
+  /** stage 27: insert options (tests: offline, stub Gemini / fetch / capture) */
+  insertOptions?: BuildInsertsOptions;
 }
 
 export async function exportDesignJob(jobId: string, outputId: string, opts: ExportOptions = {}): Promise<DesignJob> {
@@ -90,11 +97,15 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
   const timeline = buildDesignTimeline(output, transcript, media, cutRecord?.status === "ok" ? cutRecord.clips : undefined);
   // the house style decides the title look: an EDL title left at the schema default ("hero") follows the preset
   if (preset.title_style === "card") timeline.titles = timeline.titles.map((t) => (t.style === "hero" ? { ...t, style: "card" } : t));
+  // stage 27: an expert preset draws the hook plain (no card, caps, accent word) — also over plans made for another preset
+  if (preset.title_style === "plain") timeline.titles = timeline.titles.map((t) => (t.style === "hero" || t.style === "card" ? { ...t, style: "plain" } : t));
   const scenesFile = path.join(dir, "scenes.json");
   const scenes = (await exists(scenesFile)) ? await readJson(scenesFile, ScenesSchema) : undefined;
   const faceY = scenes ? faceCentreY(usedClips, scenes) : undefined;
 
   const target = output.captions.enabled ? (output.captions.language ?? null) : null;
+  // the inserts follow what is SAID (the captions may be translated below)
+  const spokenPhrases = timeline.phrases;
   let translated = false;
   const warnings: string[] = [];
   if (opts.translate && target && timeline.phrases.some((p) => p.lang !== target)) {
@@ -216,7 +227,34 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
       faces = toOutputFrame(faces, view);
     }
   }
-  return { job_id: jobId, rough_path: path.join(dir, `rough_${outputId}.mp4`), timeline, pages, design, preset: preset.name, captions_language: target, translated, warnings, ...(faceY !== undefined ? { face_y: faceY } : {}), ...split, ...(faces ? { faces } : {}) };
+  // stage 27: B-roll inserts (full-frame layout only; split has its own panels)
+  let inserts: InsertsTrack | undefined;
+  const wantInserts = opts.inserts === "on" || (opts.inserts !== "off" && design.inserts.enabled);
+  if (wantInserts && design.layout !== "split" && spokenPhrases.length) {
+    design.inserts.enabled = true;
+    try {
+      const insDir = path.join(dir, "design", `${outputId}-inserts`);
+      // the hook title at the start stays alone on screen until the first insert (reel #14: title 0–2.3 s, cutaway at 2.27 s)
+      const hook = timeline.titles.find((t) => t.at < 0.5);
+      const track = await buildInserts(
+        { jobId, phrases: spokenPhrases, ...(hook ? { hookEnd: hook.at + hook.duration } : {}), duration: timeline.duration, language: spokenPhrases[0]?.lang ?? transcript.language, design, ...(faces ? { faces } : {}), hints: output.insert_hints ?? [], dir: insDir, W: timeline.width, H: timeline.height, fps: timeline.fps },
+        { ...opts.insertOptions, onLog: opts.insertOptions?.onLog ?? (opts.onLog && ((l) => opts.onLog!(`    ${l}`))) },
+      );
+      inserts = track;
+      const first = track.items.find((i) => i.kind !== "chips");
+      if (hook && first && first.start < hook.at + hook.duration) hook.duration = Math.max(1.5, Math.round((first.start - hook.at) * 1000) / 1000);
+      const st = track.stats;
+      opts.onLog?.(`    вставки: ${st.scheduled} из ${st.candidates} кандидатов, ${Math.round(st.coverage * 100)}% времени, ${Math.round(st.first40 * 100)}% в первых 40%`);
+      for (const it of track.items) opts.onLog?.(`      ${it.start.toFixed(2)}–${it.end.toFixed(2)} ${it.kind} «${it.word}» ${it.label}`);
+      await fs.mkdir(insDir, { recursive: true });
+      await fs.writeFile(path.join(dir, "design", `${outputId}.inserts.json`), JSON.stringify(track, null, 1));
+      const usd = st.gemini.usd + st.vision.usd;
+      if (st.gemini.calls || st.vision.requests) await addCost(jobId, { step: "design", provider: "gemini", model: st.gemini.model || "gemini-flash-lite", units: { inserts: st.scheduled, text_calls: st.gemini.calls, vision_requests: st.vision.requests, site_captures: st.captures.ok - st.captures.cached }, usd });
+    } catch (err) {
+      warnings.push(`вставки не построены: ${err instanceof Error ? err.message.split(/\r?\n/)[0] : String(err)}`);
+    }
+  } else if (opts.inserts === "on" && design.layout === "split") warnings.push("вставки в сплите не делаются: там свои панели");
+  return { job_id: jobId, rough_path: path.join(dir, `rough_${outputId}.mp4`), timeline, pages, design, preset: preset.name, captions_language: target, translated, warnings, ...(faceY !== undefined ? { face_y: faceY } : {}), ...split, ...(faces ? { faces } : {}), ...(inserts ? { inserts } : {}) };
 }
 
 /** Duration-weighted mean of the clips' focus y (each clip's focus = overlap-weighted scene focus); undefined without any focus. */

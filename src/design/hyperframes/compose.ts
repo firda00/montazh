@@ -19,6 +19,10 @@ export interface ComposeAssets {
   extraFontFaces?: string;
   /** split layout: the speaker cutout — the plate replaces the rough cut as the a-roll, the pop strip goes above the seam */
   cutoutRel?: { plate: string; pop?: string };
+  /** stage 27: CSS family of the caption digits face (numbers_font "serif"), installed with extraFontFaces */
+  serifNumFamily?: string;
+  /** stage 27: the B-roll insert track (src/design/inserts-layer.ts) */
+  inserts?: { css: string; sections: string[]; tweens: string[] };
 }
 
 export const COMPOSE_VERSION = "hf-compose/1";
@@ -29,6 +33,28 @@ const fmt = (x: number) => String(r3(x));
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 export { splitBalanced };
+
+/** A title line with its accent words wrapped in <span class="acc"> (case-insensitive; escaped). */
+export function accentize(line: string, accents: string[]): string {
+  const marks: [number, number][] = [];
+  const low = line.toLowerCase();
+  for (const a of accents) {
+    const k = a.trim().toLowerCase();
+    if (!k) continue;
+    for (let i = low.indexOf(k); i >= 0; i = low.indexOf(k, i + k.length)) {
+      if (!marks.some(([x, y]) => i < y && i + k.length > x)) marks.push([i, i + k.length]);
+    }
+  }
+  if (!marks.length) return esc(line);
+  marks.sort((a, b) => a[0] - b[0]);
+  let out = "";
+  let at = 0;
+  for (const [x, y] of marks) {
+    out += esc(line.slice(at, x)) + `<span class="acc">${esc(line.slice(x, y))}</span>`;
+    at = y;
+  }
+  return out + esc(line.slice(at));
+}
 
 /** Vertical centring on an anchor without CSS transforms: pad the full-frame clip so its content box is centred at anchorY·H. */
 function anchorPad(anchorY: number, height: number) {
@@ -54,6 +80,9 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
   const strokeVisible = r3(layout.captions.strokeWidth); // already in output px (layout scales it); drawn at 2× with paint-order
   const safeX = Math.round(D.safe_area.x * W);
   const lang = layout.captions.language || "ru";
+  const numFont = D.captions.numbers_font === "serif" && !!assets.serifNumFamily;
+  const reveal = D.captions.word_animation === "reveal";
+  const shadowCss = (op: number) => `0 ${r3(D.captions.shadow_y * scale)}px ${r3(D.captions.shadow_blur * scale)}px rgba(0, 0, 0, ${r3(op)})`;
 
   const capHtml: string[] = [];
   const tw: string[] = [];
@@ -73,7 +102,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
     if (de <= ds) return;
     const lines = p.lines
       .map((line, li) => {
-        const spans = line.words.map((w, wi) => `<span class="w" id="${id}-l${li}-w${wi}">${esc(w.text).replace(/ /g, "&nbsp;")}</span>`).join("");
+        const spans = line.words.map((w, wi) => `<span class="w${numFont && /\d/.test(w.text) ? " num" : ""}" id="${id}-l${li}-w${wi}">${esc(w.text).replace(/ /g, "&nbsp;")}</span>`).join("");
         return `        <span class="cap-line" id="${id}-line${li}">${spans}</span>`;
       })
       .join("\n");
@@ -96,6 +125,11 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
     }
     if (D.captions.word_animation === "none") return;
     const all = p.lines.flatMap((line, li) => line.words.map((w, wi) => ({ ...w, sel: `#${id}-l${li}-w${wi}` })));
+    if (D.captions.word_animation === "reveal") {
+      // stage 27 karaoke reveal (reel #15): the line is on screen whole, a word lights up when it is said and stays lit
+      for (const w of all) tw.push(`tl.fromTo("${w.sel}", { color: "${D.captions.dim_color}" }, { color: "${C.text}", duration: 0.06, ease: "none", immediateRender: false }, ${fmt(Math.max(ds, w.start))});`);
+      return;
+    }
     all.forEach((w, k) => {
       const next = all[k + 1];
       const hlEnd = next ? next.start : de;
@@ -121,6 +155,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       ? buildSplitLayer({ W, H, duration: DUR, design: D, panels: job.panels, images: assets.panelRel ?? {}, credits: Object.fromEntries((job.panel_credits ?? []).map((c) => [c.beat, shortPhotoCredit(c)])), faceY: job.face_y, serifFamily: `'VPlayfairItalic', serif`, monoFamily: `'VMono', monospace`, displayFamily: `'${layout.font.family.replace(/['"<>]/g, "")}', sans-serif`, cutout: cutoutBox })
       : null;
   if (split) tw.push(...split.tweens);
+  if (assets.inserts) tw.push(...assets.inserts.tweens);
   if (!split) layout.titlesOut.forEach((t) => {
     const id = `ttl-${t.index}`;
     if (t.style === "lower") {
@@ -144,12 +179,19 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       return;
     }
     const card = t.style === "card";
-    const lines = t.lines.map((l, li) => `          <span class="ttl-line" id="${id}-line${li}">${esc(l)}</span>`).join("\n");
+    const plain = t.style === "plain";
+    const lines = t.lines.map((l, li) => `          <span class="ttl-line" id="${id}-line${li}">${accentize(l, t.accent ?? [])}</span>`).join("\n");
     const tpad = t.anchorY !== undefined && Math.abs(t.anchorY - layout.titles.anchorY) > 1e-6 ? anchorPad(t.anchorY, H) : null;
     ttlHtml.push(
-      `      <section id="${id}" class="clip ttl" data-start="${fmt(t.at)}" data-duration="${fmt(t.duration)}" data-track-index="2"${tpad ? ` style="padding:${tpad.top}px ${safeX}px ${tpad.bottom}px"` : ""}>\n        <span class="ttl-box${card ? " card" : ""}" id="${id}-box" style="font-size:${r3(t.fontSize)}px">\n${lines}\n        </span>\n      </section>`,
+      `      <section id="${id}" class="clip ttl" data-start="${fmt(t.at)}" data-duration="${fmt(t.duration)}" data-track-index="2"${tpad ? ` style="padding:${tpad.top}px ${safeX}px ${tpad.bottom}px"` : ""}>\n        <span class="ttl-box${card ? " card" : plain ? " plain" : ""}" id="${id}-box" style="font-size:${r3(t.fontSize)}px">\n${lines}\n        </span>\n      </section>`,
     );
     const sel = `#${id}-box`;
+    if (plain) {
+      // stage 27 hook (reel #14): each line pops in — the second on the word that opens it — and the title leaves with a fade
+      t.lines.forEach((_, li) => tw.push(`tl.fromTo("#${id}-line${li}", { opacity: 0, scale: 0.9 }, { opacity: 1, scale: 1, duration: 0.2, ease: "back.out(2)" }, ${fmt(t.lineAt?.[li] ?? t.at + li * 0.3)});`));
+      if (t.duration > 0.8) tw.push(`tl.fromTo("${sel}", { opacity: 1 }, { opacity: 0, duration: 0.2, ease: "power1.in", immediateRender: false }, ${fmt(t.at + t.duration - 0.22)});`);
+      return;
+    }
     if (D.titles.animation === "slide_up") tw.push(`tl.fromTo("${sel}", { opacity: 0, y: ${r3(90 * scale)} }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" }, ${fmt(t.at)});`);
     else if (D.titles.animation === "fade") tw.push(`tl.fromTo("${sel}", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, ${fmt(t.at)});`);
     // exit fade only when it fits inside the clip window (short titles just cut)
@@ -230,8 +272,10 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
         color: ${C.text};
         -webkit-text-stroke: ${r3(strokeVisible * 2)}px ${C.stroke};
         paint-order: stroke fill;
-        text-shadow: 0 ${r3(3 * scale)}px ${r3(14 * scale)}px rgba(0, 0, 0, ${r3(D.captions.shadow_opacity)});
-      }
+        text-shadow: ${shadowCss(D.captions.shadow_opacity)};
+      }${numFont ? `
+      .w.num { font-family: ${assets.serifNumFamily}; font-weight: 500; letter-spacing: 0; }` : ""}${reveal ? `
+      .cap .w { color: ${D.captions.dim_color}; -webkit-text-stroke: 0; text-shadow: none; }` : ""}
       .ttl-box {
         display: block;
         text-align: center;
@@ -251,6 +295,8 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
         text-shadow: none;
       }
       .ttl-line { display: block; white-space: nowrap; }
+      .ttl-box.plain { font-weight: ${D.titles.plain_weight}; line-height: 1.04; letter-spacing: -0.01em; -webkit-text-stroke: 0; text-shadow: 0 ${r3(3 * scale)}px ${r3(12 * scale)}px rgba(0, 0, 0, 0.6), 0 ${r3(1 * scale)}px ${r3(3 * scale)}px rgba(0, 0, 0, 0.5); }
+      .acc { color: ${D.titles.accent_color || C.highlight}; }
       .lower { display: inline-block; max-width: 100%; padding: 0.28em 0.6em; border-radius: 0.4em; background: rgba(0,0,0,0.55); color: #fff; font-weight: 700; line-height: 1.2; text-align: center; white-space: normal; }
       .callout { display: inline-block; padding: 0.12em 0.42em 0.08em; border-radius: 0.18em; background: ${C.highlight}; color: #111; font-weight: 900; letter-spacing: 0.02em; white-space: nowrap; box-shadow: 0 ${r3(6 * scale)}px ${r3(24 * scale)}px rgba(0,0,0,0.35); }
       .outro { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; padding: 0 ${safeX}px; }
@@ -258,7 +304,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       .outro-text { position: relative; display: block; text-align: center; font-weight: ${layout.font.weight}; line-height: 1.1; letter-spacing: -0.01em; color: ${C.title}; -webkit-text-stroke: ${r3(strokeVisible * 2)}px ${C.stroke}; paint-order: stroke fill; text-shadow: 0 ${r3(3 * scale)}px ${r3(14 * scale)}px rgba(0, 0, 0, 0.55); }
       .outro-line { display: block; white-space: nowrap; }
       .progress { position: absolute; left: 0; top: 0; width: 100%; height: ${r3(Math.max(6, 10 * scale))}px; display: block; pointer-events: none; background: rgba(255,255,255,0.18); }
-      .progress-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; display: block; background: ${C.highlight}; }
+      .progress-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; display: block; background: ${C.highlight}; }${assets.inserts?.css ?? ""}
     </style>
   </head>
   <body>
@@ -272,7 +318,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       data-fps="${FPS}"
     >
       <video id="a-roll" src="${cutoutBox ? assets.cutoutRel!.plate : assets.videoRel}" data-start="0" data-duration="${DUR}" data-track-index="0" muted playsinline></video>${cutoutBox?.popHeight ? `\n      <video id="a-pop" src="${assets.cutoutRel!.pop}" data-start="0" data-duration="${DUR}" data-track-index="8" muted playsinline></video>` : ""}
-${D.captions.shade.enabled && layout.pages.length ? `      <section id="shade" class="clip shade" data-start="0" data-duration="${DUR}" data-track-index="1"></section>\n` : ""}${capHtml.join("\n")}
+${assets.inserts?.sections.length ? `${assets.inserts.sections.join("\n")}\n` : ""}${D.captions.shade.enabled && layout.pages.length ? `      <section id="shade" class="clip shade" data-start="0" data-duration="${DUR}" data-track-index="1"></section>\n` : ""}${capHtml.join("\n")}
 ${ttlHtml.join("\n")}${split ? `\n${split.sections.join("\n")}` : ""}
 ${outroHtml.join("\n")}${progressHtml.length ? `\n${progressHtml.join("\n")}` : ""}
     </div>

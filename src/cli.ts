@@ -94,6 +94,10 @@ function printRenderReport(r: RenderReport) {
       const caps = o.captions_language ? `, субтитры ${o.captions_language}${o.translated ? " (перевод)" : ""}` : "";
       console.log(`  ✔ ${o.id}: ${o.duration?.toFixed(2)}s, ${o.pages} стр. субтитров${caps}, ${o.loudness_after?.toFixed(1)} LUFS → ${o.output}`);
       console.log(`    сборка ${o.build_seconds?.toFixed(1)}s · рендер ${o.render_seconds?.toFixed(1)}s · финализация ${o.finalize_seconds?.toFixed(1)}s`);
+      if (o.inserts) {
+        console.log(`    вставки: ${o.inserts.count} (${Object.entries(o.inserts.by_kind).map(([k, n]) => `${k} ${n}`).join(", ") || "—"}), ${Math.round(o.inserts.coverage * 100)}% времени, ${Math.round(o.inserts.first40 * 100)}% в первых 40%`);
+        for (const c of o.inserts.credits) console.log(`      ${c}`);
+      }
     } else console.log(`  ${o.status === "skipped" ? "–" : "✖"} ${o.id}: ${o.error}`);
     for (const w of o.warnings) console.log(`    ⚠ ${w}`);
   }
@@ -108,6 +112,7 @@ interface RenderCliOpts {
   bgMusic?: string;
   design?: string;
   cutout?: string;
+  inserts?: string;
 }
 
 function withRenderOptions(cmd: Command) {
@@ -118,20 +123,22 @@ function withRenderOptions(cmd: Command) {
     .option("--renderer <name>", "hyperframes (другие — после этапа 4)", "hyperframes")
     .option("--bg-music <m>", "музыка под речью: auto | upbeat|chill|… | файл | none (по умолчанию — из пресета)")
     .option("--design <preset>", "пресет оформления вместо пресета задачи (например split_news)")
-    .option("--cutout <mode>", "сплит: вырезать фон спикера (MediaPipe) — on | off | auto (по умолчанию — из пресета)");
+    .option("--cutout <mode>", "сплит: вырезать фон спикера (MediaPipe) — on | off | auto (по умолчанию — из пресета)")
+    .option("--inserts <mode>", "перебивки по словам (фото, сайт компании, вырезанное фото человека, чипы цифр) — on | off (по умолчанию — из пресета: clean_min и box_reveal — on)");
 }
 
 function makeRenderer(o: RenderCliOpts) {
   if (o.renderer !== "hyperframes") throw new Error(`рендерер "${o.renderer}" не подключён; доступен: hyperframes`);
   if (!["draft", "looks", "delivery"].includes(o.quality)) throw new Error("--quality: ожидается draft | looks | delivery");
   if (o.cutout !== undefined && !["on", "off", "auto"].includes(o.cutout)) throw new Error("--cutout: ожидается on | off | auto");
+  if (o.inserts !== undefined && !["on", "off"].includes(o.inserts)) throw new Error("--inserts: ожидается on | off");
   return new HyperFramesRenderer({ workers: o.workers });
 }
 
 async function runRender(jobId: string, o: RenderCliOpts & { only?: string[] }, edl?: Edl) {
   const renderer = makeRenderer(o);
   await renderer.prepare();
-  const r = await runStep(jobId, "render", () => renderOutputs(jobId, { renderer, quality: o.quality, only: o.only, translate: o.translate, edl, music: o.bgMusic, preset: o.design, cutout: o.cutout as CutoutMode | undefined, onEvent: (l) => console.log(l) }));
+  const r = await runStep(jobId, "render", () => renderOutputs(jobId, { renderer, quality: o.quality, only: o.only, translate: o.translate, edl, music: o.bgMusic, preset: o.design, cutout: o.cutout as CutoutMode | undefined, ...(o.inserts ? { inserts: o.inserts as "on" | "off" } : {}), onEvent: (l) => console.log(l) }));
   printRenderReport(r);
   return r;
 }

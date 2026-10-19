@@ -236,6 +236,8 @@ test("montage by buttons: video → option card; mode / format / style toggles e
     "✓ 9:16=M:a:9:16",
     "16:9=M:a:16:9",
     "✓ Динамичный=M:y:pop",
+    "Чистые (как у экспертов)=M:y:clean",
+    "Плашка с подсветкой=M:y:box",
     "Сплит=M:y:split",
     "Спокойный=M:y:calm",
     "▶️ Начать=M:go",

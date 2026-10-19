@@ -24,6 +24,8 @@ PLAN RULES (hard)
 - crop "auto_face" for 9:16 clips that show a speaking person; otherwise "center".
 - captions.language is the language the user asked for (e.g. "uz" even if the speech is "ru"); captions.style is the preset caption style.
 - At most 2 titles per output; "at" is in OUTPUT-timeline seconds; ≤ 40 characters each.
+- Hook title (the title at 0): the core of the output in 3–6 words built from the phrases ("Летающая Tesla от Илона Маска", "Привлекли $247M, продали за $500K"); put the one name, brand or number that carries it into accent_words (copied verbatim from the title text). Leave style empty: the preset decides the look.
+- inserts (optional, per output): the named things worth showing as B-roll while the person talks — companies, products, people other than the speaker, places, concrete objects or actions ("Tesla", "Starship", "Илон Маск", "летающий автомобиль"), copied as spoken, the most visual first, at most 8. Skip abstractions and the speaker. The editor picks which of them become inserts and when.
 - Do not reuse a phrase in two outputs unless the instruction asks for variants of the same moment.
 
 EDITING HEURISTICS

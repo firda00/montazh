@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { DesignJob } from "../export.ts";
 import type { Layout } from "../layout-types.ts";
 import { composeHyperframes } from "./compose.ts";
+import { captionTopOf, insertFiles, insertsLayer } from "./inserts-layer.ts";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 export const HF_VERSION = "0.8.145";
@@ -69,7 +70,28 @@ export async function writeHyperframesProject(job: DesignJob, layout: Layout, di
     const { installFonts } = await import("../../make/fonts.ts");
     extraFontFaces = await installFonts(dir, ["playfair-italic", "mono"]);
   }
-  const html = composeHyperframes(job, layout, { videoRel, fontRel, gsapRel: "assets/gsap.min.js", panelRel, extraFontFaces, cutoutRel });
+  // stage 27: caption digits in a serif face, the insert track (its pictures copied under assets/inserts)
+  let serifNumFamily: string | undefined;
+  const fontIds: ("serif-num" | "mono" | "playfair-italic")[] = [];
+  if (job.design.captions.numbers_font === "serif") fontIds.push("serif-num");
+  if (job.inserts?.items.length) fontIds.push("mono");
+  if (fontIds.length) {
+    const { installFonts, fontStack } = await import("../../make/fonts.ts");
+    const more = await installFonts(dir, fontIds);
+    extraFontFaces = [extraFontFaces, more].filter(Boolean).join("\n      ");
+    if (fontIds.includes("serif-num")) serifNumFamily = fontStack("serif-num").replace(/"/g, "'");
+  }
+  let inserts: ReturnType<typeof insertsLayer> | undefined;
+  if (job.inserts?.items.length) {
+    const rel: Record<string, string> = {};
+    for (const f of insertFiles(job.inserts)) {
+      const r = `assets/inserts/${path.basename(f)}`;
+      await linkOrCopy(f, path.join(dir, r));
+      rel[f] = r;
+    }
+    inserts = insertsLayer(job.inserts, { W: layout.frame.width, H: layout.frame.height, duration: layout.frame.duration, rel, display: `'${layout.font.family.replace(/['"<>]/g, "")}', sans-serif`, mono: `'VMono', monospace`, captionTop: captionTopOf(layout) });
+  }
+  const html = composeHyperframes(job, layout, { videoRel, fontRel, gsapRel: "assets/gsap.min.js", panelRel, extraFontFaces, cutoutRel, serifNumFamily, inserts });
   const entry = path.join(dir, "index.html");
   await fs.writeFile(entry, html);
   const name = `${job.job_id}-${job.timeline.output_id}`;

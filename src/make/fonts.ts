@@ -14,7 +14,7 @@ const FS = path.join(ROOT, "node_modules", "@fontsource");
 const LATIN = "U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD";
 const CYRILLIC = "U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116";
 
-export type FontId = "inter" | "unbounded" | "playfair" | "playfair-italic" | "mono";
+export type FontId = "inter" | "unbounded" | "playfair" | "playfair-italic" | "mono" | "serif-num";
 
 interface Face {
   file: string;
@@ -47,6 +47,8 @@ export const FONTS: Record<FontId, FontDef> = {
   unbounded: { id: "unbounded", family: "VUnbounded", fallback: "sans-serif", faces: fs("unbounded", "unbounded", 800, "normal"), weight: 800, style: "normal", tracking: "-0.01em" },
   playfair: { id: "playfair", family: "VPlayfair", fallback: "serif", faces: fs("playfair-display", "playfair-display", 800, "normal"), weight: 800, style: "normal", tracking: "-0.01em" },
   "playfair-italic": { id: "playfair-italic", family: "VPlayfairItalic", fallback: "serif", faces: fs("playfair-display", "playfair-display", 700, "italic"), weight: 700, style: "italic", tracking: "-0.005em" },
+  // stage 27: digits of box_reveal captions in a lighter antiqua (reel #15 sets «247», «500.000» apart without colour)
+  "serif-num": { id: "serif-num", family: "VSerifNum", fallback: "serif", faces: fs("playfair-display", "playfair-display", 500, "normal"), weight: 500, style: "normal", tracking: "0" },
   mono: { id: "mono", family: "VMono", fallback: "monospace", faces: [...fs("jetbrains-mono", "jetbrains-mono", 500, "normal"), ...fs("jetbrains-mono", "jetbrains-mono", 700, "normal")], weight: 700, style: "normal", tracking: "0.06em" },
 };
 

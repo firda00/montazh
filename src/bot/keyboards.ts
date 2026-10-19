@@ -30,9 +30,11 @@ export interface MakeDraft {
 
 export const COUNTS = [1, 3, 5];
 export const SECONDS = [30, 60, 90];
-export const STYLE_CODES = ["pop", "split", "calm"] as const;
-export const STYLE_PRESET: Record<string, string> = { pop: "bold_pop", split: "split_news", calm: "calm" };
-export const PRESET_STYLE: Record<string, string> = { bold_pop: "pop", split_news: "split", calm: "calm" };
+export const STYLE_CODES = ["pop", "clean", "box", "split", "calm"] as const;
+export const STYLE_PRESET: Record<string, string> = { pop: "bold_pop", clean: "clean_min", box: "box_reveal", split: "split_news", calm: "calm" };
+export const PRESET_STYLE: Record<string, string> = { bold_pop: "pop", clean_min: "clean", box_reveal: "box", split_news: "split", calm: "calm" };
+/** stage 27: the caption styles in rows of two (long names: «Чистые (как у экспертов)») */
+const styleRows = <T>(xs: T[]): T[][] => xs.reduce<T[][]>((rows, x, i) => (i % 2 ? rows[rows.length - 1].push(x) : rows.push([x]), rows), []);
 /** voices offered on the make card (cloud voices first; avatar-only Chatterbox voices are not offered) */
 export const MAKE_VOICES = ["gemini_charon", "gemini_kore", "gemini_puck", "gemini_aoede", "dmitri", "denis"];
 
@@ -72,7 +74,7 @@ export function montageKb(L: Strings, d: MontageDraft, hasRef = false): InlineKe
   if (d.mode === "reels" || d.mode === "viral") {
     // with a reference the style buttons give way to one toggle «🎯 как в примере ✓» (off → the house styles again)
     if (hasRef && d.style === "ref") rows.push([btn(mark(true, L.styleRef), "M:y:ref")]);
-    else rows.push([...STYLE_CODES.map((s) => btn(mark(d.style === s, L.styleNames[STYLE_PRESET[s]]), `M:y:${s}`)), ...(hasRef ? [btn(L.styleRef, "M:y:ref")] : [])]);
+    else rows.push(...styleRows([...STYLE_CODES.map((s) => btn(mark(d.style === s, L.styleNames[STYLE_PRESET[s]]), `M:y:${s}`)), ...(hasRef ? [btn(L.styleRef, "M:y:ref")] : [])]));
   }
   rows.push([btn(L.btnStart, "M:go")]);
   return { inline_keyboard: rows };
@@ -94,7 +96,7 @@ export function settingsKb(L: Strings, s: { aspect: string; style: string; send:
   return {
     inline_keyboard: [
       ["9:16", "16:9", "1:1"].map((a) => btn(mark(s.aspect === a, a), `S:a:${a}`)),
-      STYLE_CODES.map((c) => btn(mark(PRESET_STYLE[s.style] === c, L.styleNames[STYLE_PRESET[c]]), `S:y:${c}`)),
+      ...styleRows(STYLE_CODES.map((c) => btn(mark(PRESET_STYLE[s.style] === c, L.styleNames[STYLE_PRESET[c]]), `S:y:${c}`))),
       (["file", "video", "both"] as const).map((m) => btn(mark(s.send === m, L.sendNames[m]), `S:s:${m}`)),
       [btn(L.btnVoice, "S:v")],
       (["ru", "uz", "en"] as const).map((l) => btn(mark(s.lang === l, l.toUpperCase()), `S:l:${l}`)),

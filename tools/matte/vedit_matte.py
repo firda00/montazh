@@ -828,6 +828,75 @@ def cmd_faces(a: argparse.Namespace) -> dict:
     return stats
 
 
+def cmd_cutout(a: argparse.Namespace) -> dict:
+    """Stage 27: one still photo of a person -> RGBA PNG cut to the person (the PiP of a montage insert).
+    Same segmenter and edge refinement as the video matte: selfie segmenter on a 256x256 view, blob cleanup,
+    colour guided filter at ~540 px, a slight erode and a soft feather; the PNG is trimmed to the person.
+    Stats (coverage, blobs, whether the person reaches the bottom edge) let the Node side judge the result."""
+    cv2 = cv()
+    t0 = time.time()
+    data = np.frombuffer(Path(a.input).read_bytes(), np.uint8)
+    bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise RuntimeError("cannot decode image")
+    h, w = bgr.shape[:2]
+    rgb = np.ascontiguousarray(bgr[..., ::-1])
+    seg = KeySegmenter(a.key_color) if a.segmenter == "key" else MediaPipeSegmenter(ensure_model(Path(a.model)))
+    try:
+        # a copy: the mask is a view into the segmenter's result buffer, freed by close()
+        m = np.array(seg(cv2.resize(rgb, (SEG, SEG), interpolation=cv2.INTER_AREA)), dtype=np.float32, copy=True)
+    finally:
+        seg.close()
+    m = clean_coarse(m)
+    b = m > 0.5
+    coverage = float(b.mean())
+    n, lab, st, _ = cv2.connectedComponentsWithStats(b.astype(np.uint8), connectivity=8)
+    blobs = int(sum(1 for i in range(1, n) if st[i, cv2.CC_STAT_AREA] >= 0.01 * SEG * SEG))
+    # edge refinement at ~540 px on the long side
+    gs = max(1.0, max(w, h) / 540.0)
+    gw, gh = int(round(w / gs)), int(round(h / gs))
+    small = cv2.resize(rgb, (gw, gh), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+    p0 = cv2.resize(smoothstep(0.3, 0.7, m), (gw, gh), interpolation=cv2.INTER_LINEAR)
+    q = fast_guided(small, p0, a.radius, a.eps, a.sub, True)
+    q = np.clip((q - a.erode) * (1.0 / (1.0 - 2 * a.erode)), 0.0, 1.0)
+    near = cv2.resize(cv2.dilate((m > 0.05).astype(np.uint8), np.ones((5, 5), np.uint8)), (gw, gh), interpolation=cv2.INTER_NEAREST)
+    q *= near
+    # a still is looked at for seconds: no half-transparent fringe of the old background (speckles along the edge)
+    q = smoothstep(0.35, 0.75, q)
+    q = cv2.GaussianBlur(q, (0, 0), a.feather)
+    alpha = cv2.resize(q, (w, h), interpolation=cv2.INTER_LINEAR)
+    alpha = smoothstep(0.2, 0.8, alpha)
+    ys, xs = np.nonzero(alpha > 0.08)
+    if ys.size == 0:
+        stats = {"version": "cutout/1", "ok": False, "coverage": coverage, "blobs": blobs, "reason": "no person"}
+        if a.stats:
+            write_json(a.stats, stats)
+        return stats
+    pad = int(0.02 * max(w, h))
+    x0, x1 = max(0, int(xs.min()) - pad), min(w, int(xs.max()) + pad + 1)
+    y0, y1 = max(0, int(ys.min()) - pad), min(h, int(ys.max()) + pad + 1)
+    touches_bottom = bool((alpha[-max(2, h // 100):, :] > 0.5).mean() > 0.08)
+    rgba = np.dstack([rgb, np.clip(alpha * 255.0 + 0.5, 0, 255).astype(np.uint8)])[y0:y1, x0:x1]
+    scale = min(1.0, a.max_side / max(rgba.shape[0], rgba.shape[1]))
+    if scale < 1.0:
+        rgba = cv2.resize(rgba, (int(round(rgba.shape[1] * scale)), int(round(rgba.shape[0] * scale))), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".png", np.ascontiguousarray(rgba[..., [2, 1, 0, 3]]))
+    if not ok:
+        raise RuntimeError("png encode failed")
+    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(a.out).write_bytes(buf.tobytes())
+    mid = float(((alpha > 0.15) & (alpha < 0.85)).sum() / max(1, (alpha > 0.5).sum()))
+    stats = {
+        "version": "cutout/1", "ok": True, "coverage": round(coverage, 4), "blobs": blobs, "touches_bottom": touches_bottom,
+        "uncertain_ratio": round(mid, 4), "bbox": [x0 / w, y0 / h, x1 / w, y1 / h], "size": [int(rgba.shape[1]), int(rgba.shape[0])],
+        "seconds": round(time.time() - t0, 2),
+    }
+    if a.stats:
+        write_json(a.stats, stats)
+    log(f"matte: cutout {stats['size'][0]}x{stats['size'][1]}, person {coverage:.0%}, {blobs} blob(s)")
+    return stats
+
+
 def cmd_model(a: argparse.Namespace) -> None:
     p = ensure_model(Path(a.model))
     log(f"model ok: {p} ({p.stat().st_size} bytes)")
@@ -886,6 +955,19 @@ def main() -> None:
     f.add_argument("--ffmpeg", default=os.environ.get("FFMPEG_PATH", "ffmpeg"))
     f.add_argument("--ffprobe", default=os.environ.get("FFPROBE_PATH", "ffprobe"))
     f.add_argument("--max-seconds", type=float)
+    c = sub.add_parser("cutout", help="one still photo of a person -> RGBA PNG (stage 27 PiP)")
+    c.add_argument("--input", required=True)
+    c.add_argument("--out", required=True)
+    c.add_argument("--stats")
+    c.add_argument("--model", default=str(MODEL_FILE))
+    c.add_argument("--segmenter", choices=["mediapipe", "key"], default="mediapipe")
+    c.add_argument("--key-color", default="#00FF00")
+    c.add_argument("--radius", type=int, default=4)
+    c.add_argument("--sub", type=int, default=2)
+    c.add_argument("--eps", type=float, default=2e-3)
+    c.add_argument("--erode", type=float, default=0.08)
+    c.add_argument("--feather", type=float, default=1.2)
+    c.add_argument("--max-side", type=int, default=900)
     d = sub.add_parser("model")
     d.add_argument("--model", default=str(MODEL_FILE))
     d.add_argument("--face-model", default=str(FACE_MODEL_FILE))
@@ -898,6 +980,8 @@ def main() -> None:
             cmd_selftest(a)
         elif a.cmd == "faces":
             cmd_faces(a)
+        elif a.cmd == "cutout":
+            cmd_cutout(a)
         else:
             cmd_model(a)
     except Exception as e:  # one readable line for the Node side

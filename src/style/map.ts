@@ -58,6 +58,8 @@ export interface StyleMapping {
   zoom: ZoomPlan;
   grade: Grade | null;
   audio: { music: boolean; duckDb: number | null; sfx: SfxPlan };
+  /** stage 27: the house caption look the reference matches (expert clean captions / karaoke box), or null */
+  captionLook: "clean_min" | "box_reveal" | null;
   /** what could not be reproduced (shown in `vedit style` and the README) */
   unsupported: string[];
   /** DNA field → our variable → value, for reports and the README table */
@@ -93,6 +95,18 @@ const ZOOM_RU: Record<ZoomPlan["frequency"], string> = {
   every_2_3_sentences: "наезд примерно на каждой 2–3-й фразе: отметь punch_in: true на клипах с акцентом (главная мысль, число, эмоция)",
   every_cut_aggressive: "наезд почти на каждой склейке (это сделает монтаж сам, чередуя крупность); punch_in отмечать не нужно",
 };
+
+/**
+ * stage 27: which expert look a reference's captions are — "clean_min" (reel #14: small, not caps, no box, no stroke, no
+ * word highlight, chest height) or "box_reveal" (reel #15: a dark box per line, the spoken words light up without a pop).
+ */
+export function matchCaptionLook(C: StyleDNA["hyperframes_theme"]["captions"], enabled = true): "clean_min" | "box_reveal" | null {
+  if (!enabled || C.uppercase) return null;
+  const highlight = C.active_word_color.toUpperCase() !== C.primary_text_color.toUpperCase();
+  if (C.background_box !== "none" && (C.word_animation === "color_switch_only" || (highlight && C.active_word_scale <= 1.03))) return "box_reveal";
+  if (C.background_box === "none" && C.stroke_width_px <= 2 && C.font_weight !== "900_black" && C.position_y_percent >= 68 && !highlight && (C.word_animation === "none" || C.word_animation === "fade_up")) return "clean_min";
+  return null;
+}
 
 export function mapStyle(dna: StyleDNA): StyleMapping {
   const P = dna.planner_rules;
@@ -170,6 +184,17 @@ export function mapStyle(dna: StyleDNA): StyleMapping {
     // the house CTA card is ours, not the reference's
     outro: { enabled: false },
   };
+  // stage 27: references in the two expert talking-head looks get the house versions of them (and B-roll inserts)
+  const captionLook = matchCaptionLook(C, captionsEnabled);
+  if (captionLook === "clean_min") {
+    design.captions = { ...design.captions, letter_case: "as_spoken", stroke_width: 0, shadow_y: 2, shadow_blur: 6, shadow_opacity: Math.max(0.35, r2(C.shadow_opacity)), font_size: Math.min(lay.font_size, 42), word_animation: "none", page_animation: "none", backing: { enabled: false } };
+    design.inserts = { enabled: true };
+  } else if (captionLook === "box_reveal") {
+    design.captions = { ...design.captions, letter_case: "as_spoken", stroke_width: 0, shadow_opacity: 0, word_animation: "reveal", dim_color: "rgba(255,255,255,0.3)", numbers_font: "serif", font_size: Math.min(lay.font_size, 44), page_animation: "none", backing: { enabled: true, color: "rgba(0,0,0,0.8)", padding: 10, radius: 6 } };
+    design.colors = { ...design.colors, text: "#FFFFFF" };
+    design.inserts = { enabled: true };
+  }
+  row("captions (look)", "stage 27 caption look + design.inserts", captionLook ?? "—");
   row("captions.enabled + layout_preset", "EDL output.captions.enabled", captionsEnabled);
   row("captions.layout_preset", "design.captions.font_size / line_height (max_words=1 for single_word_impact)", `${C.layout_preset} → ${lay.font_size}px / ${lay.line_height}`);
   row("captions.max_words_per_screen", "design.captions.max_words", maxWords);
@@ -258,6 +283,7 @@ export function mapStyle(dna: StyleDNA): StyleMapping {
     zoom,
     grade,
     audio: { music: A.has_background_music, duckDb, sfx },
+    captionLook,
     unsupported,
     table,
   };

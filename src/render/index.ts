@@ -13,7 +13,7 @@ import { loadJob } from "../lib/workspace.ts";
 import { loadPreset } from "../plan/presets.ts";
 import { mixSoundtrack, speechRangesFrom } from "../audio/mix.ts";
 import { isMood, pickMusic, type Mood, type MusicTrack } from "../audio/music.ts";
-import { SFX_KINDS, type SfxCue } from "../audio/sfx.ts";
+import { SFX_KINDS, thinCues, type SfxCue } from "../audio/sfx.ts";
 import { styledPreset } from "../style/profile.ts";
 
 export const RenderReportSchema = z.object({
@@ -36,6 +36,8 @@ export const RenderReportSchema = z.object({
       finalize_seconds: z.number().optional(),
       music: z.string().optional(),
       music_attribution: z.string().optional(),
+      /** stage 27: B-roll inserts (count, share of the runtime, description credits) */
+      inserts: z.object({ count: z.number(), coverage: z.number(), first40: z.number(), by_kind: z.record(z.string(), z.number()), credits: z.array(z.string()) }).optional(),
       warnings: z.array(z.string()).default([]),
       error: z.string().optional(),
     }),
@@ -103,7 +105,7 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
     try {
       opts.onEvent?.(`▸ design ${output.id}`);
       const tb = Date.now();
-      const job = await exportDesignJob(jobId, output.id, { translate: opts.translate ?? true, llm: opts.llm, model: opts.model, preset: opts.preset, panelImages: opts.panelImages, cutout: opts.cutout, onLog: opts.onEvent });
+      const job = await exportDesignJob(jobId, output.id, { translate: opts.translate ?? true, llm: opts.llm, model: opts.model, preset: opts.preset, panelImages: opts.panelImages, cutout: opts.cutout, onLog: opts.onEvent, ...(opts.inserts ? { inserts: opts.inserts } : {}), ...(opts.insertOptions ? { insertOptions: opts.insertOptions } : {}) });
       warnings.push(...job.warnings);
       const projectDir = path.join(dir, "design", output.id);
       await fs.rm(projectDir, { recursive: true, force: true });
@@ -121,9 +123,11 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
       // background music, ducked under the speech
       // reference style: the reference decides (stage 23 — its measured music beats the plan's music.enabled, which
       // followed an older DNA); otherwise the plan or the preset
-      const wantMusic = opts.music ?? (output.audio?.music ?? (styleMapping ? (styleMapping.audio.music ? "auto" : "none") : output.music.enabled || preset.music_default ? "auto" : "none"));
+      // stage 27: an expert preset (music "off": clean_min, box_reveal) never gets a bed unless --music asks for one
+      const wantMusic = opts.music ?? (output.audio?.music ?? (styleMapping ? (styleMapping.audio.music ? "auto" : "none") : preset.music === "off" ? "none" : output.music.enabled || preset.music_default ? "auto" : "none"));
       const plan = output.audio; // sound design decided at plan time (highlights)
-      const cues = (output.sfx ?? []).filter((c): c is SfxCue => (SFX_KINDS as readonly string[]).includes(c.kind));
+      const planned = (output.sfx ?? []).filter((c): c is SfxCue => (SFX_KINDS as readonly string[]).includes(c.kind));
+      const cues = job.inserts?.cues.length ? thinCues([...planned, ...job.inserts.cues], { duration: job.timeline.duration, max: 200 }) : planned;
       let musicNote: { music?: string; music_attribution?: string } = {};
       if (wantMusic !== "none") {
         if (track === undefined) {
@@ -207,6 +211,7 @@ export async function renderOutputs(jobId: string, opts: RenderOptions): Promise
         render_seconds: rendered.seconds,
         finalize_seconds: (Date.now() - tf) / 1000,
         ...musicNote,
+        ...(job.inserts ? { inserts: { count: job.inserts.items.length, coverage: job.inserts.stats.coverage, first40: job.inserts.stats.first40, by_kind: job.inserts.stats.by_kind, credits: job.inserts.credits } } : {}),
         warnings,
       });
     } catch (err) {

@@ -1,0 +1,76 @@
+{
+  "name": "clean_min",
+  "description": "Экспертная говорящая голова (как у Маргулана): маленькие белые строчные субтитры на груди, хук-титр под лицом, перебивки по словам, без музыки",
+  "pace": "neutral",
+  "clip_seconds": {
+    "min": 2,
+    "max": 8
+  },
+  "caption_style": "clean_min",
+  "title_style": "plain",
+  "default_aspect": "9:16",
+  "music_default": false,
+  "music": "off",
+  "notes": [
+    "голос с первой секунды, без приветствий",
+    "джамп-каты без пауз, законченные фразы",
+    "один титр-хук в начале, сущность-акцент"
+  ],
+  "design": {
+    "font": {
+      "family": "Inter",
+      "file": "assets/fonts/Inter-Variable.ttf",
+      "weight": 500
+    },
+    "colors": {
+      "text": "#FFFFFF",
+      "highlight": "#FFFFFF",
+      "stroke": "rgba(0,0,0,0)",
+      "title": "#FFFFFF",
+      "title_bg": "rgba(0,0,0,0)"
+    },
+    "captions": {
+      "anchor_y": 0.82,
+      "max_words": 4,
+      "max_chars": 26,
+      "font_size": 38,
+      "line_height": 1.2,
+      "uppercase": false,
+      "letter_case": "lower",
+      "stroke_width": 0,
+      "shadow_opacity": 0.45,
+      "shadow_y": 2,
+      "shadow_blur": 6,
+      "word_animation": "none",
+      "page_animation": "none",
+      "avoid_face": true,
+      "backing": { "enabled": false },
+      "shade": { "enabled": false }
+    },
+    "titles": {
+      "anchor_y": 0.76,
+      "font_size": 66,
+      "max_lines": 2,
+      "animation": "fade",
+      "padding": 0,
+      "radius": 0,
+      "avoid_face": true,
+      "face_zone": 0.42,
+      "accent_color": "#E5C158",
+      "plain_anchor_y": 0.76,
+      "plain_weight": 800,
+      "plain_uppercase": true
+    },
+    "safe_area": {
+      "x": 0.06,
+      "y": 0.08
+    },
+    "inserts": {
+      "enabled": true,
+      "density": "normal"
+    },
+    "outro": {
+      "enabled": false
+    }
+  }
+}

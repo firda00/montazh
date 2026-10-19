@@ -174,8 +174,10 @@ export function entityFromLlm(x: { name: string; kind: string; forms: string[]; 
     name,
     kind,
     match: rx(body),
-    commons: x.commons_query?.trim() ? [x.commons_query.trim()] : kind === "product" ? [] : [name],
-    titleWords: [name.split(/\s+/).sort((a, b) => b.length - a.length)[0].toLowerCase()],
+    // a person: the plain full name finds the portraits («Larry Page portrait» finds other things)
+    commons: kind === "person" ? [...new Set([name, x.commons_query?.trim()].filter((q): q is string => !!q))] : x.commons_query?.trim() ? [x.commons_query.trim()] : kind === "product" ? [] : [name],
+    // a person's Commons file must name the surname («Larry Page», not «Larry Sharpe»); anything else its longest word
+    titleWords: [(kind === "person" && name.includes(" ") ? name.split(/\s+/).at(-1)! : name.split(/\s+/).sort((a, b) => b.length - a.length)[0]).toLowerCase()],
     subject: x.subject?.trim() || (kind === "person" ? `a real photograph of a person (${name} according to the file title)` : `${name} (its logo, building, signage, product or event)`),
   };
 }
