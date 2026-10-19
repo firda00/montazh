@@ -17,6 +17,8 @@ export class GeminiCallError extends Error {
     message: string,
     readonly kind: GeminiFailure,
     readonly status: number,
+    /** a quota that waiting will not fix (per-day, no free tier, billing) */
+    readonly hard = false,
   ) {
     super(message);
     this.name = "GeminiCallError";
@@ -57,6 +59,13 @@ export function isHardQuota(msg: string): boolean {
   return /per[ _]?day|PerDay|daily|limit:\s*0\b|free[ _-]?tier|billing|not available|FAILED_PRECONDITION|prepay|credits? (are )?depleted/i.test(msg);
 }
 
+/** quotaId of every QuotaFailure violation in an error body (e.g. GenerateRequestsPerDayPerProjectPerModel-FreeTier) */
+export function quotaIds(json: unknown): string[] {
+  const ids: string[] = [];
+  for (const d of (json as { error?: { details?: { violations?: { quotaId?: string }[] }[] } })?.error?.details ?? []) for (const v of d.violations ?? []) if (v.quotaId) ids.push(v.quotaId);
+  return ids;
+}
+
 /** POST JSON, return the parsed answer; throws GeminiCallError. */
 export async function geminiPost(url: string, body: unknown, o: GeminiPostOptions): Promise<unknown> {
   const doFetch = o.fetch ?? globalThis.fetch;
@@ -83,7 +92,9 @@ export async function geminiPost(url: string, body: unknown, o: GeminiPostOption
     if (res.ok) return json;
     const msg = errorMessage(json, text);
     if (res.status === 401 || (res.status === 403 && !isHardQuota(msg)) || (res.status === 400 && /api key|API_KEY_INVALID/i.test(msg))) throw new GeminiCallError(`ключ отклонён (${res.status}): ${msg}`, "auth", res.status);
-    if (isHardQuota(msg) && (res.status === 429 || res.status === 400 || res.status === 403)) throw new GeminiCallError(`нет квоты (${res.status}): ${msg}`, "quota", res.status);
+    // a per-minute limit (free tier TPM / RPM) clears by itself: its "check your plan and billing" text is not a hard quota
+    const perMinute = res.status === 429 && quotaIds(json).some((q) => /PerMinute/i.test(q)) && !quotaIds(json).some((q) => /PerDay/i.test(q));
+    if (!perMinute && isHardQuota(msg) && (res.status === 429 || res.status === 400 || res.status === 403)) throw new GeminiCallError(`нет квоты (${res.status}): ${msg}`, "quota", res.status, true);
     if (res.status === 400 || res.status === 404) throw new GeminiCallError(`${res.status}: ${msg}`, "unsupported", res.status);
     if ((res.status === 429 || res.status >= 500) && attempt < maxRetries) {
       const wait = Math.min(o.maxWait ?? 30, retryDelay(json, res.headers.get("retry-after")) ?? 2 ** (attempt + 1));

@@ -12,6 +12,7 @@ import { findAsrPython } from "./understand/asr.ts";
 import { findMattePython } from "./design/matte.ts";
 import { findAgy } from "./understand/vision/agy.ts";
 import { claudeLoginAvailable } from "./plan/backend/index.ts";
+import { resolveLlmProvider } from "./lib/llm-provider.ts";
 import { piperExe, PIPER_DIR } from "./voice/piper.ts";
 
 /**
@@ -116,9 +117,18 @@ export async function runDoctor(opts: { env?: NodeJS.ProcessEnv; bot?: boolean; 
   // keys (presence only, values are never printed)
   const has = (k: string) => !!env[k]?.trim();
   const claude = has("ANTHROPIC_API_KEY") || has("ANTHROPIC_AUTH_TOKEN") || claudeLoginAvailable(env);
-  add("claude", "Claude (сценарии, планы, перевод)", claude, true, has("ANTHROPIC_API_KEY") || has("ANTHROPIC_AUTH_TOKEN") ? "ANTHROPIC_API_KEY" : claude ? "вход Claude Code (подписка)" : server.on ? "нет ANTHROPIC_API_KEY (в серверном режиме вход Claude Code не используется)" : "нет ANTHROPIC_API_KEY и входа Claude Code");
   const gemini = has("GEMINI_API_KEY") || has("GOOGLE_API_KEY");
-  add("gemini", "Gemini API (кадры, хайлайты, тренды, картинки, голос)", gemini, false, gemini ? "GEMINI_API_KEY" : "нет — vision: заглушка, хайлайты недоступны, тренды пропускаются, голос Piper");
+  // stage 29: the LLM steps run on Claude or on Gemini — one of the two is required, not Claude specifically
+  let llmNote: string;
+  try {
+    const p = resolveLlmProvider(undefined, env);
+    llmNote = `${p.provider === "claude" ? "Claude" : "Gemini"} (${p.reason})${p.fallback ? "; при сбое Claude — повтор на Gemini" : ""}`;
+  } catch (err) {
+    llmNote = err instanceof Error ? err.message : String(err);
+  }
+  add("llm", "LLM для планов, сценариев, перевода (Claude или Gemini, VEDIT_LLM)", claude || gemini, true, llmNote);
+  add("claude", "Claude (необязательно при GEMINI_API_KEY)", claude, false, has("ANTHROPIC_API_KEY") || has("ANTHROPIC_AUTH_TOKEN") ? "ANTHROPIC_API_KEY" : claude ? "вход Claude Code (подписка)" : server.on ? "нет ANTHROPIC_API_KEY (в серверном режиме вход Claude Code не используется) — LLM-шаги идут на Gemini" : "нет ANTHROPIC_API_KEY и входа Claude Code — LLM-шаги идут на Gemini");
+  add("gemini", "Gemini API (планы и сценарии без Claude, кадры, хайлайты, тренды, картинки, голос)", gemini, false, gemini ? "GEMINI_API_KEY" : "нет — vision: заглушка, хайлайты недоступны, тренды пропускаются, голос Piper, без запаски для Claude");
   add("cloud-tts", "Google Cloud TTS", has("GOOGLE_CLOUD_API_KEY"), false, has("GOOGLE_CLOUD_API_KEY") ? "GOOGLE_CLOUD_API_KEY" : "нет (необязательно)");
   if (opts.bot) {
     add("telegram", "TELEGRAM_BOT_TOKEN", has("TELEGRAM_BOT_TOKEN"), true, has("TELEGRAM_BOT_TOKEN") ? "" : "токен от @BotFather в .env");

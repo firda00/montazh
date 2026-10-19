@@ -110,7 +110,7 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
   const warnings: string[] = [];
   if (opts.translate && target && timeline.phrases.some((p) => p.lang !== target)) {
     try {
-      const llm = opts.llm ?? selectStructuredLlm();
+      const llm = opts.llm ?? selectStructuredLlm(process.env, "translate");
       const translations = await translatePhrases(jobId, timeline.phrases, target, llm, { model: opts.model });
       timeline.phrases = applyTranslations(timeline.phrases, translations, target);
       translated = translations.size > 0;
@@ -130,7 +130,7 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
     if (opts.reusePanels !== false && (await exists(panelsFile))) panels = await readJson(panelsFile, PanelsSchema);
     else {
       try {
-        const llm = opts.llm ?? selectStructuredLlm();
+        const llm = opts.llm ?? selectStructuredLlm(process.env, "panels");
         const d = await directPanels(timeline.phrases, timeline.duration, { llm, language: timeline.phrases[0]?.lang ?? transcript.language, instruction: job.prompt ?? "", model: opts.model });
         panels = d.panels;
         await addCost(jobId, { step: "design", provider: d.provider === "anthropic" ? "anthropic" : d.provider, model: d.model, units: { ...d.usage, calls: 1, panels: d.panels.panels.length, estimate: d.estimate ? 1 : 0 }, usd: d.usd });

@@ -1,7 +1,7 @@
 /**
  * Server mode: the bot runs on a machine where only API keys exist (no Antigravity CLI with a Google
  * login, no Claude Code subscription login). Under server mode providers never try those logins:
- *   Claude      → Claude API (ANTHROPIC_API_KEY), never the Agent SDK login
+ *   Claude      → Claude API (ANTHROPIC_API_KEY), never the Agent SDK login; without a key the LLM steps run on Gemini (stage 29)
  *   trends      → Gemini API + Google Search grounding (GEMINI_API_KEY), never agy
  *   AI images   → Gemini image model over the API, never agy
  *   vision      → Gemini API (as before), never agy

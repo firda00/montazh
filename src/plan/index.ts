@@ -16,7 +16,8 @@ import {
   type ToolCallRecord,
   type Transcript,
 } from "../schemas/index.ts";
-import { DEFAULT_MODEL, selectBackend, type BackendChoice, type Effort } from "./backend/index.ts";
+import { DEFAULT_MODEL, fallbackBackend, selectBackend, type BackendChoice, type Effort } from "./backend/index.ts";
+import { isProviderFailure } from "../lib/llm-provider.ts";
 import { PlanError, type Contract, type PlannerBackend, type Turn } from "./backend/types.ts";
 import { BudgetTracker, type Budget } from "./budget.ts";
 import { buildPlanContext, type PlanContext } from "./context.ts";
@@ -121,7 +122,7 @@ export async function loadPlanInputs(jobId: string, presetName: string, sel: Sel
       let llm = sel.llm;
       if (!llm) {
         try {
-          llm = selectStructuredLlm();
+          llm = selectStructuredLlm(process.env, "shortlist");
         } catch {}
       }
       const r = await shortlist({ transcript: filtered, highlights, instruction: sel.instruction ?? "", llm, maxWindows: sel.maxWindows, onEvent: sel.onEvent });
@@ -145,17 +146,19 @@ export interface RunLoopArgs {
   step: "plan" | "revise";
 }
 
-/** Shared by plan() and revise(): backend, tools, budget, loop, cost logging, contract fallback. */
+/** Shared by plan() and revise(): backend, tools, budget, loop, cost logging, contract fallback, provider fallback. */
 export async function runPlanning(args: RunLoopArgs): Promise<{ loop: LoopResult; backend: PlannerBackend; contract: Contract; toolCalls: ToolCallRecord[]; effort: Effort; warnings: string[] }> {
   const { jobId, ctx, task, opts, step } = args;
   const effort: Effort = opts.effort ?? "medium";
   const model = opts.model ?? process.env.VEDIT_PLANNER_MODEL ?? DEFAULT_MODEL;
   const choice: BackendChoice = opts.backend ?? (process.env.VEDIT_PLANNER as BackendChoice | undefined) ?? "auto";
-  const backend = opts.backendInstance ?? selectBackend(choice, { model, effort, cacheTtl: opts.cacheTtl, verbose: opts.verbose });
-  opts.onEvent?.(backend.note);
+  const backendOpts = { model, effort, cacheTtl: opts.cacheTtl, verbose: opts.verbose };
+  const primary = opts.backendInstance ?? selectBackend(choice, backendOpts);
+  opts.onEvent?.(primary.note);
   const warnings: string[] = [];
+  const providerOf = (b: PlannerBackend) => (b.name === "api" ? "anthropic" : b.name);
 
-  const attempt = async (contract: Contract) => {
+  const attempt = async (backend: PlannerBackend, contract: Contract) => {
     const budget = new BudgetTracker(opts.budget);
     const state = newToolState();
     const deps: ToolDeps = {
@@ -170,13 +173,13 @@ export async function runPlanning(args: RunLoopArgs): Promise<{ loop: LoopResult
       for (const c of turn.perCall) {
         await addCost(jobId, {
           step,
-          provider: backend.name === "api" ? "anthropic" : backend.name,
+          provider: providerOf(backend),
           model: c.model,
           units: { ...c.usage, calls: 1, tool_calls: c.tools.length, unpriced: c.priced ? 0 : 1, estimate: backend.name === "agent" ? 1 : 0 },
           usd: c.usd,
         });
       }
-      opts.onEvent?.(`  ↳ ${turn.stopReason}, ${turn.calls} запрос(ов), $${turn.perCall.reduce((s, c) => s + c.usd, 0).toFixed(3)}`);
+      opts.onEvent?.(`  ↳ ${turn.stopReason}, ${turn.calls} запрос(ов), $${turn.perCall.reduce((s, c) => s + c.usd, 0).toFixed(3)}${turn.error ? ` — ${turn.error.slice(0, 160)}` : ""}`);
     };
     const loop = await runPlannerLoop(backend, ctx, task, {
       budget,
@@ -191,24 +194,48 @@ export async function runPlanning(args: RunLoopArgs): Promise<{ loop: LoopResult
     return { loop, toolCalls: state.trace };
   };
 
-  let contract: Contract = opts.contract ?? "format";
-  try {
-    const r = await attempt(contract);
-    return { ...r, backend, contract, effort, warnings };
-  } catch (err) {
-    if (err instanceof PlanError && err.code === "contract" && contract === "format") {
-      // requests made before the rejection are still money: log them
-      for (const c of (err.details?.perCall as { model: string; usage: Record<string, number>; usd: number; priced: boolean; tools: string[] }[] | undefined) ?? []) {
-        await addCost(jobId, { step, provider: "anthropic", model: c.model, units: { ...c.usage, calls: 1, tool_calls: c.tools.length, unpriced: c.priced ? 0 : 1, estimate: 0 }, usd: c.usd });
+  /** one backend: the format contract, and the submit contract when the API rejects format + tools */
+  const runWith = async (backend: PlannerBackend) => {
+    let contract: Contract = opts.contract ?? "format";
+    try {
+      const r = await attempt(backend, contract);
+      return { ...r, backend, contract };
+    } catch (err) {
+      if (err instanceof PlanError && err.code === "contract" && contract === "format") {
+        // requests made before the rejection are still money: log them
+        for (const c of (err.details?.perCall as { model: string; usage: Record<string, number>; usd: number; priced: boolean; tools: string[] }[] | undefined) ?? []) {
+          await addCost(jobId, { step, provider: providerOf(backend), model: c.model, units: { ...c.usage, calls: 1, tool_calls: c.tools.length, unpriced: c.priced ? 0 : 1, estimate: 0 }, usd: c.usd });
+        }
+        warnings.push(`api_rejected_format_with_tools: ${err.message}`);
+        opts.onEvent?.("  ⚠ API не принял structured output вместе с инструментами — переключаюсь на submit_edl");
+        contract = "submit";
+        const r = await attempt(backend, contract);
+        return { ...r, backend, contract };
       }
-      warnings.push(`api_rejected_format_with_tools: ${err.message}`);
-      opts.onEvent?.("  ⚠ API не принял structured output вместе с инструментами — переключаюсь на submit_edl");
-      contract = "submit";
-      const r = await attempt(contract);
-      return { ...r, backend, contract, effort, warnings };
+      throw err;
     }
+  };
+
+  // stage 29: a Claude run that failed on auth / quota / overload / network is retried once on Gemini (VEDIT_LLM_FALLBACK)
+  const fallback = opts.backendInstance ? null : fallbackBackend(primary, backendOpts);
+  const switchTo = async (why: string) => {
+    const fb = fallback!;
+    warnings.push(`llm_fallback: Claude (${primary.name}) не сработал — ${why.slice(0, 200)}; план построен на Gemini (${fb.model})`);
+    opts.onEvent?.(`  ⚠ Claude недоступен (${why.slice(0, 120)}) → повтор на Gemini`);
+    opts.onEvent?.(fb.note);
+    return runWith(fb);
+  };
+  let r;
+  try {
+    r = await runWith(primary);
+  } catch (err) {
+    if (fallback && isProviderFailure(err)) return { ...(await switchTo(err instanceof Error ? err.message : String(err))), effort, warnings };
     throw err;
   }
+  if (fallback && r.loop.status === "failed" && !r.loop.draft && isProviderFailure({ code: r.loop.errorCode, message: r.loop.error })) {
+    return { ...(await switchTo(r.loop.error ?? r.loop.errorCode ?? "ошибка")), effort, warnings };
+  }
+  return { ...r, effort, warnings };
 }
 
 export function buildReport(kind: "plan" | "revise", loop: LoopResult, extra: { backend: PlannerBackend; contract: Contract; effort: string; ctx: PlanContext; instruction: string; preset: string; toolCalls: ToolCallRecord[]; warnings: string[]; startedAt: number }): PlanReport {

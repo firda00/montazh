@@ -24,15 +24,15 @@ const program = new Command();
 program.name("vedit").description("AI video editing agent — MVP").version("0.3.0");
 
 const HINTS: Partial<Record<PlanError["code"], string>> = {
-  no_backend: "варианты: ANTHROPIC_API_KEY в .env (бэкенд api) · `claude /login` (бэкенд agent по подписке) · готовый план: vedit cut <job> --edl <file>",
-  auth: "проверьте ключ/вход: ANTHROPIC_API_KEY в .env или `claude /login`",
+  no_backend: "варианты: GEMINI_API_KEY в .env (бэкенд gemini, достаточно его одного) · ANTHROPIC_API_KEY (бэкенд api) · `claude /login` (бэкенд agent по подписке) · готовый план: vedit cut <job> --edl <file>",
+  auth: "проверьте ключ/вход: ANTHROPIC_API_KEY / GEMINI_API_KEY в .env или `claude /login`",
   refusal: "модель отказалась; переформулируйте инструкцию или выберите другой фрагмент",
   budget: "поднимите лимит: --budget <usd> (по умолчанию 1.50) или упростите инструкцию",
   invalid: "если модель вернула черновик, он сохранён как edl.draft.json — исправьте вручную и запустите vedit cut <job> --edl <file>; иначе уточните инструкцию",
   loop: "лимит запросов исчерпан; попробуйте --effort high или более конкретную инструкцию",
   nothing_to_plan: "запустите понимание видео: vedit understand <job> (или уберите --skip-understand)",
   missing_inputs: "сначала vedit run <video> или vedit ingest + vedit understand",
-  model: "проверьте --model (по умолчанию claude-opus-5-5) и доступ организации к модели",
+  model: "проверьте --model (по умолчанию claude-opus-5-5; для gemini — VEDIT_GEMINI_PLANNER_MODEL, по умолчанию gemini-3.8-flash) и доступ к модели",
 };
 
 function fail(err: unknown): never {
@@ -171,8 +171,8 @@ interface PlannerCliOpts {
 
 function withPlannerOptions(cmd: Command) {
   return cmd
-    .option("--backend <name>", "auto | api | agent | mock (env VEDIT_PLANNER)", (process.env.VEDIT_PLANNER as BackendChoice) || "auto")
-    .option("--model <id>", `модель планировщика (по умолчанию ${DEFAULT_MODEL}, env VEDIT_PLANNER_MODEL)`)
+    .option("--backend <name>", "auto | api | agent | gemini | mock (env VEDIT_PLANNER; auto — по VEDIT_LLM / VEDIT_LLM_PLANNER: Claude, иначе Gemini)", (process.env.VEDIT_PLANNER as BackendChoice) || "auto")
+    .option("--model <id>", `модель планировщика (по умолчанию ${DEFAULT_MODEL}, env VEDIT_PLANNER_MODEL; gemini-* — для бэкенда gemini, env VEDIT_GEMINI_PLANNER_MODEL)`)
     .option("--effort <level>", "low | medium | high | xhigh | max", "medium")
     .option("--budget <usd>", "лимит стоимости одного планирования", (v) => Number(v))
     .option("--max-repairs <n>", "сколько раз просить модель исправить план", (v) => Number(v))
@@ -187,7 +187,7 @@ function withPlannerOptions(cmd: Command) {
     .option("--verbose", "печатать вызовы инструментов");
 }
 
-const BACKENDS = ["auto", "api", "agent", "mock"];
+const BACKENDS = ["auto", "api", "agent", "gemini", "mock"];
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 function plannerOpts(o: PlannerCliOpts): Omit<PlanOptions, "instruction"> {
@@ -418,9 +418,9 @@ async function highlightsPipeline(jobId: string, media: import("./schemas/index.
   let llm = null;
   if (opts.editor) {
     try {
-      llm = selectStructuredLlm();
+      llm = selectStructuredLlm(process.env, "highlights");
     } catch {
-      console.log("  (нет входа Claude — титр и порядок по правилам)");
+      console.log("  (нет модели (Claude / Gemini) — титр и порядок по правилам)");
     }
   }
   const { perPersonIntent } = await import("./highlights/intent.ts");

@@ -5,8 +5,15 @@
 из Telegram сам (long polling), веб-сервер не нужен. GPU нет.
 
 На сервере нет входов разработчика (Antigravity, подписка Claude Code) — только ключи из `.env`. Бот работает в
-**серверном режиме** (`VEDIT_SERVER=1`): Claude — через API, тренды — Gemini + Google Search, ИИ-картинки — Gemini
-image API, понимание кадра — Gemini API, одна тяжёлая задача за раз.
+**серверном режиме** (`VEDIT_SERVER=1`): LLM (план, сценарий, перевод) — Claude API, а без `ANTHROPIC_API_KEY` — Gemini
+(этап 29), тренды — Gemini + Google Search, ИИ-картинки — Gemini image API, понимание кадра — Gemini API, одна тяжёлая
+задача за раз.
+
+**Минимальный набор ключей для сервера клиента: `GEMINI_API_KEY` + `TELEGRAM_BOT_TOKEN`** (+ `TELEGRAM_ADMIN_IDS`).
+Ключ Anthropic необязателен: без него планировщик, сценарист, арт-директор и перевод работают на Gemini
+(`gemini-3.8-flash`). С ним Claude основной, а при сбое Claude (ключ, квота, перегрузка) шаг повторяется на Gemini
+(`VEDIT_LLM_FALLBACK=on`). Выбор — `VEDIT_LLM=auto|claude|gemini` в `.env`. Ключ Gemini нужен **платного уровня**:
+бесплатный даёт 20 запросов в сутки на модель, а один план — 4–8 запросов.
 
 ## Файлы
 
@@ -20,8 +27,8 @@ image API, понимание кадра — Gemini API, одна тяжёлая
 
 ## Первый деплой
 
-1. В `.env` на ноутбуке должны быть: `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
-   `TELEGRAM_ADMIN_IDS` (ваш Telegram id), по желанию `TELEGRAM_ALLOWED_USERS`, `GOOGLE_CLOUD_API_KEY`.
+1. В `.env` на ноутбуке должны быть: `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`, `TELEGRAM_ADMIN_IDS` (ваш Telegram id),
+   по желанию `ANTHROPIC_API_KEY` (Claude основным, Gemini запаской), `TELEGRAM_ALLOWED_USERS`, `GOOGLE_CLOUD_API_KEY`.
 2. IP сервера — в `~/.oci/vedit-ip.txt` (или первым аргументом).
 3. Из корня репозитория в Git Bash:
 
@@ -95,7 +102,8 @@ bash deploy/deploy.sh --ref 538a3521     # вернуть любой прежн�
 | что | цена | где видно |
 |---|---|---|
 | сервер Oracle A1 | $0 (Always Free: до 4 OCPU / 24 ГБ на аккаунт) | консоль Oracle |
-| Claude API (план, сценарий, перевод) | по токенам модели `VEDIT_PLANNER_MODEL` (по умолчанию claude-opus-5-5); один план ≤ `VEDIT_BUDGET_USD` ($1.5) | console.anthropic.com → Usage |
+| Claude API (план, сценарий, перевод), если задан ключ | по токенам модели `VEDIT_PLANNER_MODEL` (по умолчанию claude-opus-5-5); один план ≤ `VEDIT_BUDGET_USD` ($1.5); замер: план $0.13–0.67, сценарий + арт-директор $0.15 | console.anthropic.com → Usage |
+| Gemini как LLM (без ключа Anthropic или запаской) | gemini-3.8-flash: $0.75 / $3.75 за 1M токенов (с 2027 — вдвое); замер: план $0.08–0.20, сценарий + арт-директор $0.03 | aistudio.google.com → Usage |
 | Gemini API: понимание кадра, хайлайты, TTS | бесплатный уровень есть (данные могут использоваться Google); платный — по токенам | aistudio.google.com → Usage |
 | Gemini + Google Search (тренды) | **нет в бесплатном уровне**; платный: 5000 поисков/мес бесплатно, далее $14 / 1000 | там же |
 | Gemini image (ИИ-картинки) | **нет в бесплатном уровне**; ≈$0.034 за картинку | там же |
@@ -162,7 +170,10 @@ Dropbox, прямые); YouTube / Instagram / TikTok — через `yt-dlp`, к
 
 ## Если что-то не так
 
-- `doctor: ✖ Claude` — нет `ANTHROPIC_API_KEY` в `.env`.
+- `doctor: ✖ LLM` — нет ни `GEMINI_API_KEY`, ни `ANTHROPIC_API_KEY` в `.env` (достаточно одного). `⚠ Claude` без ключа
+  Anthropic — норма: LLM-шаги идут на Gemini.
+- план падает с `нет квоты (429) … FreeTier` — ключ Gemini бесплатного уровня (20 запросов в сутки на модель):
+  включите биллинг в AI Studio или задайте `ANTHROPIC_API_KEY`.
 - `doctor: ✖ Chrome` — `ls -l /opt/vedit/bin/chrome-headless-shell`; переустановить: `sudo bash setup-ubuntu.sh --chrome ppa`
   (или `bash deploy/deploy.sh --setup`).
 - `doctor: ✖ whisper` — `sudo -u vedit bash /opt/vedit/app/deploy/build-whisper.sh --prefix /opt/vedit/whisper`.

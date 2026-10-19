@@ -1,13 +1,15 @@
-import os from "node:os";
-import path from "node:path";
-import { existsSync } from "node:fs";
 import { AgentSdkBackend } from "./agent.ts";
 import { AnthropicApiBackend } from "./anthropic.ts";
+import { GeminiPlannerBackend } from "./gemini.ts";
 import { MockBackend } from "./mock.ts";
 import { PlanError, type PlannerBackend } from "./types.ts";
 import { serverForced } from "../../lib/server.ts";
+import { claudeKey, claudeLoginAvailable, claudeLoginExists, geminiKey, LlmUnavailable, resolveLlmProvider } from "../../lib/llm-provider.ts";
 
-export type BackendChoice = "auto" | "api" | "agent" | "mock";
+export { claudeLoginAvailable, claudeLoginExists };
+
+/** auto | api (Claude API) | agent (Claude Code login) | gemini (Gemini API) | mock */
+export type BackendChoice = "auto" | "api" | "agent" | "gemini" | "mock";
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface BackendOptions {
@@ -15,45 +17,66 @@ export interface BackendOptions {
   effort: Effort;
   cacheTtl?: "5m" | "1h";
   verbose?: boolean;
+  /** test hook: fetch for the Gemini backend */
+  fetch?: typeof fetch;
 }
 
 export const DEFAULT_MODEL = "claude-opus-5-5";
 
-/** Existence of the Claude Code login file is the only probe; the file is never read. */
-export function claudeLoginExists(env: NodeJS.ProcessEnv = process.env): boolean {
-  const dir = env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
-  return existsSync(path.join(dir, ".credentials.json"));
+function claudeBackend(choice: "api" | "agent" | "auto", opts: BackendOptions, env: NodeJS.ProcessEnv, loginExists: () => boolean): PlannerBackend {
+  const hasKey = claudeKey(env);
+  const hasLogin = claudeLoginAvailable(env, loginExists);
+  if (choice === "api" || (choice === "auto" && hasKey)) {
+    if (!hasKey) throw new PlanError("бэкенд api требует ANTHROPIC_API_KEY (или ANTHROPIC_AUTH_TOKEN) в окружении / .env", "auth");
+    return new AnthropicApiBackend({ model: opts.model, effort: opts.effort, cacheTtl: opts.cacheTtl, fallbacks: env.VEDIT_FALLBACKS === "1" });
+  }
+  if (choice === "agent" || hasLogin) {
+    if (!hasLogin) throw new PlanError(serverForced(env) ? "бэкенд agent недоступен в серверном режиме (VEDIT_SERVER=1): нужен ANTHROPIC_API_KEY" : "бэкенд agent: не найден вход Claude Code (выполните `claude /login`) и нет CLAUDE_CODE_OAUTH_TOKEN", "auth");
+    return new AgentSdkBackend({ model: opts.model, effort: opts.effort, verbose: opts.verbose });
+  }
+  throw new PlanError("нет ANTHROPIC_API_KEY и нет входа Claude Code", "no_backend");
+}
+
+export function geminiBackend(opts: BackendOptions, env: NodeJS.ProcessEnv = process.env): GeminiPlannerBackend {
+  const key = geminiKey(env);
+  if (!key) throw new PlanError("бэкенд gemini требует GEMINI_API_KEY в окружении / .env", "auth");
+  return new GeminiPlannerBackend({ key, model: opts.model, effort: opts.effort, env, fetch: opts.fetch, verbose: opts.verbose });
 }
 
 /**
- * The Claude Code subscription can be used: CLAUDE_CODE_OAUTH_TOKEN or the login file — never in server
- * mode (VEDIT_SERVER=1), where only ANTHROPIC_API_KEY counts.
+ * Planner backend. `auto` follows VEDIT_LLM_PLANNER / VEDIT_LLM (auto | claude | gemini): Claude (API key, else
+ * the Claude Code login outside server mode), else Gemini (GEMINI_API_KEY), else a clear error.
  */
-export function claudeLoginAvailable(env: NodeJS.ProcessEnv = process.env, loginExists: () => boolean = () => claudeLoginExists(env)): boolean {
-  if (serverForced(env)) return false;
-  return Boolean(env.CLAUDE_CODE_OAUTH_TOKEN) || loginExists();
-}
-
 export function selectBackend(
   choice: BackendChoice,
   opts: BackendOptions,
   env: NodeJS.ProcessEnv = process.env,
   probe: { loginExists: () => boolean } = { loginExists: () => claudeLoginExists(env) },
 ): PlannerBackend {
-  const hasKey = Boolean(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN);
-  const hasLogin = claudeLoginAvailable(env, probe.loginExists);
   if (choice === "mock") return new MockBackend({ heuristic: true });
-  if (choice === "api" || (choice === "auto" && hasKey)) {
-    if (!hasKey) throw new PlanError("бэкенд api требует ANTHROPIC_API_KEY (или ANTHROPIC_AUTH_TOKEN) в окружении / .env", "auth");
-    return new AnthropicApiBackend({ model: opts.model, effort: opts.effort, cacheTtl: opts.cacheTtl, fallbacks: env.VEDIT_FALLBACKS === "1" });
+  if (choice === "gemini") return geminiBackend(opts, env);
+  if (choice === "api" || choice === "agent") return claudeBackend(choice, opts, env, probe.loginExists);
+  let pick;
+  try {
+    pick = resolveLlmProvider("planner", env, probe);
+  } catch (err) {
+    if (err instanceof LlmUnavailable) throw new PlanError(`${err.message}; или передайте готовый план через --edl <file>`, "no_backend");
+    throw err;
   }
-  if (choice === "agent" || (choice === "auto" && hasLogin)) {
-    if (!hasLogin && choice === "agent") throw new PlanError(serverForced(env) ? "бэкенд agent недоступен в серверном режиме (VEDIT_SERVER=1): нужен ANTHROPIC_API_KEY" : "бэкенд agent: не найден вход Claude Code (выполните `claude /login`) и нет CLAUDE_CODE_OAUTH_TOKEN", "auth");
-    return new AgentSdkBackend({ model: opts.model, effort: opts.effort, verbose: opts.verbose });
-  }
-  if (serverForced(env)) throw new PlanError("серверный режим (VEDIT_SERVER=1): нет ANTHROPIC_API_KEY — задайте ключ в .env (вход Claude Code на сервере не используется)", "no_backend");
-  throw new PlanError("нет ANTHROPIC_API_KEY и нет входа Claude Code: задайте ключ в .env, выполните `claude /login`, или передайте готовый план через --edl <file>", "no_backend");
+  return pick.provider === "gemini" ? geminiBackend(opts, env) : claudeBackend("auto", opts, env, probe.loginExists);
 }
 
-export { AgentSdkBackend, AnthropicApiBackend, MockBackend };
+/** The backend a failed Claude planning run is retried on (VEDIT_LLM_FALLBACK, GEMINI_API_KEY), or null. */
+export function fallbackBackend(primary: PlannerBackend, opts: BackendOptions, env: NodeJS.ProcessEnv = process.env): PlannerBackend | null {
+  if (primary.name !== "api" && primary.name !== "agent") return null;
+  try {
+    const pick = resolveLlmProvider("planner", env, { loginExists: () => true });
+    if (pick.fallback !== "gemini") return null;
+  } catch {
+    return null;
+  }
+  return geminiBackend(opts, env);
+}
+
+export { AgentSdkBackend, AnthropicApiBackend, GeminiPlannerBackend, MockBackend };
 export * from "./types.ts";

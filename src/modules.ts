@@ -3,7 +3,8 @@ import path from "node:path";
 import { ffmpeg } from "./lib/ffmpeg.ts";
 import { promptNames, promptsHash } from "./lib/prompts.ts";
 import { exists, readJson, WORKSPACE_ROOT } from "./lib/workspace.ts";
-import { claudeLoginAvailable } from "./plan/backend/index.ts";
+import { resolveLlmProvider, type LlmStep, type ProviderPick } from "./lib/llm-provider.ts";
+import { plannerModels, textModels } from "./lib/gemini-llm.ts";
 import { HF_BIN } from "./design/hyperframes/project.ts";
 import { findMattePython, MATTE_MODEL } from "./design/matte.ts";
 import { findAsrPython } from "./understand/asr.ts";
@@ -28,6 +29,15 @@ import { dailyBudgetUsdFromEnv, FREE_PLAN_FIELDS, freePlanFromEnv, maxJobsFromEn
 import { trendsBackend } from "./make/trends.ts";
 import { imageBackend } from "./make/images.ts";
 import { cloudApiKey, cloudGeminiModels } from "./voice/cloudtts.ts";
+
+/** the provider a step would use, or null when no model is configured (registry probes never throw) */
+function llmPick(step: LlmStep, env: NodeJS.ProcessEnv): ProviderPick | null {
+  try {
+    return resolveLlmProvider(step, env);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The module registry: every replaceable part of the pipeline, what it depends on (and under
@@ -156,18 +166,21 @@ export const MODULES: ModuleDef[] = [
     stage: "plan",
     title: "Планировщик",
     what: "инструкция + пак → edl.json; правки диалогом",
-    selector: "--backend auto|api|agent|mock, VEDIT_PLANNER; модель VEDIT_PLANNER_MODEL",
+    selector: "--backend auto|api|agent|gemini|mock, VEDIT_PLANNER; auto — VEDIT_LLM_PLANNER / VEDIT_LLM (claude|gemini); модель VEDIT_PLANNER_MODEL / VEDIT_GEMINI_PLANNER_MODEL; запаска VEDIT_LLM_FALLBACK",
     backends: [
       { id: "api", title: "Claude API", deps: "@anthropic-ai/sdk, ANTHROPIC_API_KEY", license: "MIT (SDK); условия Anthropic API" },
       { id: "agent", title: "Claude Code (подписка)", deps: "@anthropic-ai/claude-agent-sdk, вход Claude Code", license: "MIT (SDK); условия подписки" },
+      { id: "gemini", title: "Gemini API: function calling (инструменты планировщика) + responseSchema, ремонт по валидатору, запасные модели на 429/503/404 (этап 29)", deps: "GEMINI_API_KEY; модели VEDIT_GEMINI_PLANNER_MODEL → gemini-3.8-flash → 3.7-flash → 3.6-flash → 3.5-flash", license: "условия Gemini API (бесплатный уровень: 20 запросов в день на модель, данные могут использоваться Google — для клиентов платный)" },
       { id: "mock", title: "Мок", deps: "—", license: "—" },
     ],
     step: "plan",
     cost: (e) => (e.step === "plan" || e.step === "revise") && e.units.shortlist !== 1,
     probe: async (env) => {
-      if (env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN) return { active: "api", ready: true, note: "" };
-      const login = claudeLoginAvailable(env);
-      return { active: login ? "agent" : "api", ready: login, note: login ? "вход Claude Code" : "нет ANTHROPIC_API_KEY и входа Claude Code" };
+      const pick = llmPick("planner", env);
+      if (!pick) return { active: "api", ready: false, note: "нет ANTHROPIC_API_KEY, входа Claude Code и GEMINI_API_KEY" };
+      if (pick.provider === "gemini") return { active: "gemini", ready: true, note: pick.reason };
+      const active = env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN ? "api" : "agent";
+      return { active, ready: true, note: [active === "agent" ? "вход Claude Code" : "", pick.fallback ? "запаска: Gemini" : ""].filter(Boolean).join("; ") };
     },
   },
   {
@@ -176,12 +189,12 @@ export const MODULES: ModuleDef[] = [
     title: "Отбор окон (длинное видео)",
     what: "индекс фраз → ≤24 окна; авто при >250 фраз",
     selector: "--long / --no-long, --windows; те же бэкенды, что у планировщика",
-    backends: [{ id: "llm", title: "Structured-вызов Claude", deps: "как планировщик", license: "как планировщик" }],
+    backends: [{ id: "llm", title: "Structured-вызов Claude или Gemini (VEDIT_LLM_SHORTLIST / VEDIT_LLM)", deps: "как планировщик", license: "как планировщик" }],
     step: "plan",
     cost: (e) => e.units.shortlist === 1,
     probe: async (env) => {
-      const ready = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || claudeLoginAvailable(env));
-      return { active: "llm", ready, note: ready ? "" : "без модели окна берутся из highlights" };
+      const pick = llmPick("shortlist", env);
+      return { active: "llm", ready: !!pick, note: pick ? pick.provider : "без модели окна берутся из highlights" };
     },
   },
   {
@@ -236,12 +249,12 @@ export const MODULES: ModuleDef[] = [
     title: "Перевод субтитров",
     what: "ru ↔ uz ↔ en по фразам, кэш в задаче",
     selector: "--no-translate; авто, когда язык субтитров ≠ язык речи",
-    backends: [{ id: "llm", title: "Structured-вызов Claude", deps: "как планировщик", license: "как планировщик" }],
+    backends: [{ id: "llm", title: "Structured-вызов Claude или Gemini (VEDIT_LLM_TRANSLATE / VEDIT_LLM)", deps: "как планировщик", license: "как планировщик" }],
     step: "design",
     cost: (e) => e.step === "design",
     probe: async (env) => {
-      const ready = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || claudeLoginAvailable(env));
-      return { active: "llm", ready, note: ready ? "" : "перевод недоступен, субтитры на языке речи" };
+      const pick = llmPick("translate", env);
+      return { active: "llm", ready: !!pick, note: pick ? pick.provider : "перевод недоступен, субтитры на языке речи" };
     },
   },
   {
@@ -315,7 +328,8 @@ export const MODULES: ModuleDef[] = [
     backends: [
       { id: "agy-trends", title: "Тренды: Antigravity CLI (поиск в вебе)", deps: "agy + вход Google", license: "условия Antigravity; $0" },
       { id: "gemini-trends", title: "Тренды без agy (сервер): Gemini + Google Search grounding, источники из цитат", deps: "GEMINI_API_KEY (платный уровень: поиск не входит в бесплатный); VEDIT_TRENDS_MODEL → gemini-3.8-flash → 2.5-flash", license: "условия Gemini API; 5000 поисков/мес бесплатно, далее $14 / 1000" },
-      { id: "claude-script", title: "Сценарий: structured-вызов Claude + проверка клише (src/make/slop.ts, одна переписка)", deps: "как планировщик", license: "как планировщик" },
+      { id: "claude-script", title: "Сценарий и арт-директор: structured-вызов Claude + проверка клише (src/make/slop.ts, одна переписка)", deps: "как планировщик", license: "как планировщик" },
+      { id: "gemini-script", title: "Сценарий и арт-директор на Gemini (этап 29): responseSchema, один ремонт ответа (VEDIT_LLM_SCRIPT / VEDIT_LLM_DESIGN / VEDIT_LLM)", deps: "GEMINI_API_KEY; VEDIT_GEMINI_LLM_MODEL → gemini-3.8-flash → …", license: "условия Gemini API" },
       { id: "openverse-photos", title: "Фото: Openverse (api.openverse.org, без ключа), кэш workspace/_cache/photos", deps: "сеть; ffmpeg (кадрирование)", license: "только CC0 / Public Domain Mark / CC BY (коммерческое использование разрешено); CC BY требует атрибуции — строки в credits.json, make.json и в описании (CLI, бот)" },
       { id: "commons-entities", title: "Этап 26: фото названного (компания, место, человек, биржа) — Wikimedia Commons API по точному имени, кэш workspace/_cache/photos", deps: "сеть; ffmpeg (кадрирование по фокусу)", license: "только CC0 / Public domain / CC BY / CC BY-SA; автор и лицензия — в credits.json и описании; CC BY-SA: кадрированный кадр под той же лицензией" },
       { id: "simple-icons", title: "Этап 26: знаки брендов Simple Icons (jsDelivr, версия зафиксирована, кэш workspace/_cache/simple-icons)", deps: "сеть при первом использовании", license: "данные CC0-1.0 (у отдельных иконок своя лицензия — пишется в make.json); товарные знаки — владельцев, показ для обозначения компании; бренды, удалённые из Simple Icons (OpenAI, Microsoft, Nasdaq), — набранное имя" },
@@ -327,11 +341,12 @@ export const MODULES: ModuleDef[] = [
     ],
     job: (j) => /make:/.test(j.source),
     probe: async (env) => {
-      const script = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || claudeLoginAvailable(env));
+      const scriptPick = llmPick("script", env);
+      const script = !!scriptPick;
       const trends = await trendsBackend(env);
       const images = await imageBackend(env);
-      const active = [trends === "agy" ? "agy-trends" : trends === "gemini-search" ? "gemini-trends" : "", "claude-script", "openverse-photos", env.VEDIT_VISUALS?.trim().toLowerCase() === "off" ? "" : `commons-entities+simple-icons${env.GEMINI_API_KEY || env.GOOGLE_API_KEY ? "+gemini-visual-check" : ""}`, images === "agy" ? "agy-images" : images === "gemini-image" ? "gemini-images" : ""].filter(Boolean).join("+");
-      const notes = [script ? "" : "нет ANTHROPIC_API_KEY (и входа Claude) для сценария", trends ? "" : "нет agy и GEMINI_API_KEY — тренды пропускаются", images ? "" : "нет генератора картинок — только фото и типографика"].filter(Boolean);
+      const active = [trends === "agy" ? "agy-trends" : trends === "gemini-search" ? "gemini-trends" : "", scriptPick?.provider === "gemini" ? "gemini-script" : "claude-script", "openverse-photos", env.VEDIT_VISUALS?.trim().toLowerCase() === "off" ? "" : `commons-entities+simple-icons${env.GEMINI_API_KEY || env.GOOGLE_API_KEY ? "+gemini-visual-check" : ""}`, images === "agy" ? "agy-images" : images === "gemini-image" ? "gemini-images" : ""].filter(Boolean).join("+");
+      const notes = [script ? "" : "нет ANTHROPIC_API_KEY / входа Claude / GEMINI_API_KEY для сценария", trends ? "" : "нет agy и GEMINI_API_KEY — тренды пропускаются", images ? "" : "нет генератора картинок — только фото и типографика"].filter(Boolean);
       return { active, ready: script, note: notes.join("; ") };
     },
   },
@@ -370,13 +385,13 @@ export const MODULES: ModuleDef[] = [
       { id: "insightface", title: "Детекция лица в LivePortrait: InsightFace buffalo_l (det_10g, 2d106det)", deps: "веса из KwaiVGI/LivePortrait", license: "ТОЛЬКО некоммерческое исследование — TODO до коммерческого запуска: заменить на MediaPipe Face Detection (Apache-2.0)" },
       { id: "colab", title: "GPU: Google Colab T4 (бесплатно)", deps: "аккаунт Google, браузер", license: "условия Google Colab; $0" },
       { id: "portrait", title: "Портрет вымышленного ведущего: Antigravity (как в make), или фото пользователя", deps: "agy + вход Google", license: "условия Antigravity; $0; реальных и известных людей не генерируем" },
-      { id: "claude-script", title: "Монолог по теме: structured-вызов Claude (prompts/avatar.script.*)", deps: "как планировщик", license: "как планировщик" },
+      { id: "claude-script", title: "Монолог по теме: structured-вызов Claude или Gemini (prompts/avatar.script.*, VEDIT_LLM_AVATAR / VEDIT_LLM)", deps: "как планировщик", license: "как планировщик" },
     ],
     job: (j) => /avatar:/.test(j.source),
     probe: async (env) => {
-      const script = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || claudeLoginAvailable(env));
+      const script = !!llmPick("avatar", env);
       const agy = !!(await imageBackend(env));
-      const notes = [agy ? "" : "без генератора картинок (agy / GEMINI_API_KEY) нужен --photo", script ? "" : "по теме — нет входа Claude, только --text", "InsightFace — некоммерческая лицензия"].filter(Boolean);
+      const notes = [agy ? "" : "без генератора картинок (agy / GEMINI_API_KEY) нужен --photo", script ? "" : "по теме — нет модели (Claude / Gemini), только --text", "InsightFace — некоммерческая лицензия"].filter(Boolean);
       return { active: "colab: chatterbox+joyvasa", ready: true, note: notes.join("; ") };
     },
   },
@@ -511,6 +526,9 @@ export function limitsCatalog(env: NodeJS.ProcessEnv = process.env): LimitEntry[
   }
   const fixed = (id: string, module: string, what: string, value: string, set_by = "код") => out.push({ id, module, what, value, default: value, set_by });
   fixed("planner.model", "planner", "модель планировщика", env.VEDIT_PLANNER_MODEL?.trim() || DEFAULT_MODEL, env.VEDIT_PLANNER_MODEL?.trim() ? "env VEDIT_PLANNER_MODEL" : "--model / env VEDIT_PLANNER_MODEL");
+  fixed("planner.gemini_model", "planner", "модель планировщика на Gemini (бэкенд gemini)", plannerModels(env).join(" → "), "env VEDIT_GEMINI_PLANNER_MODEL");
+  fixed("llm.gemini_model", "make", "модель Gemini для сценария, арт-директора, перевода, шортлиста", textModels(env).join(" → "), "env VEDIT_GEMINI_LLM_MODEL");
+  fixed("llm.provider", "planner", "провайдер LLM-шагов", (() => { try { const p = resolveLlmProvider(undefined, env); return `${p.provider}${p.fallback ? " (+ запаска gemini)" : ""}`; } catch { return "—"; } })(), "env VEDIT_LLM / VEDIT_LLM_<ШАГ>, VEDIT_LLM_FALLBACK");
   fixed("planner.compact_above_tokens", "planner", "пак сжимается выше, токенов", String(COMPACT_ABOVE_TOKENS));
   fixed("planner.max_highlights", "planner", "highlights в паке, не больше", String(MAX_HIGHLIGHTS));
   fixed("planner.min_gap", "planner", "пауза считается разрезом от, с", String(MIN_GAP));

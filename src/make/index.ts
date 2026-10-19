@@ -328,7 +328,7 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     s = { script, usd: 0, provider: "file", model: "saved", usage: { input_tokens: 0, output_tokens: 0 }, estimate: false };
     await runStep(job.id, "plan", async () => script);
   } else {
-    const llm = opts.llm ?? selectStructuredLlm();
+    const llm = opts.llm ?? selectStructuredLlm(process.env, "script");
     const w = await runStep(job.id, "plan", () => writeScript(topicClean, llm, { language, seconds, audience: opts.audience, trendsText: trendsData ? trendsText(trendsData) : undefined, model: opts.model, instruction }));
     s = w;
     clichesFixed = w.cliches.length - w.remaining.length;
@@ -427,7 +427,7 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     const designReused = !!design;
     if (!design) {
       try {
-        const llm = opts.llm ?? selectStructuredLlm();
+        const llm = opts.llm ?? selectStructuredLlm(process.env, "design");
         const optionIds = visuals ? new Set(visuals.beats.flatMap((b) => b.options.map((x) => x.id))) : undefined;
         const d = await directDesign(topicClean, s.script, llm, { model: opts.model, aspect, options: visuals ? optionsForDirector(visuals) : undefined, optionIds });
         design = d.design;

@@ -111,9 +111,11 @@ if (( SEND_ENV )) && [[ -f .env ]]; then
   (umask 077; tr -d '\r' < .env | grep -vE "$DROP" > "$TMP/vedit.env" || true)
   DROPPED="$(tr -d '\r' < .env | grep -oE "$DROP" | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/=$//' | sort -u | tr '\n' ' ' || true)"
   [[ -n "$DROPPED" ]] && ok "не переносятся (машинные): $DROPPED"
-  for k in TELEGRAM_BOT_TOKEN ANTHROPIC_API_KEY GEMINI_API_KEY TELEGRAM_ADMIN_IDS; do
+  for k in TELEGRAM_BOT_TOKEN GEMINI_API_KEY TELEGRAM_ADMIN_IDS; do
     grep -qE "^[[:space:]]*(export[[:space:]]+)?${k}=." "$TMP/vedit.env" && ok "$k есть" || warn "$k нет в .env"
   done
+  # Claude is optional since stage 29: without it every LLM step runs on Gemini
+  grep -qE "^[[:space:]]*(export[[:space:]]+)?ANTHROPIC_API_KEY=." "$TMP/vedit.env" && ok "ANTHROPIC_API_KEY есть (Claude, запаска — Gemini)" || ok "ANTHROPIC_API_KEY нет — планы и сценарии на Gemini"
   scp_to "$TMP/vedit.env" "$USER_AT@$HOST:$REMOTE_TMP/vedit.env"
   ENV_ARG="--env $REMOTE_TMP/vedit.env"
 elif (( SEND_ENV )); then

@@ -3,7 +3,7 @@ import type { CallUsage, Edl, PlanDraft } from "../../schemas/index.ts";
 import type { BudgetTracker } from "../budget.ts";
 import type { PlanContext } from "../context.ts";
 
-export type BackendName = "api" | "agent" | "mock";
+export type BackendName = "api" | "agent" | "gemini" | "mock";
 /** 'format' = output_config.format (structured output); 'submit' = terminal submit_edl tool (fallback). */
 export type Contract = "format" | "submit";
 

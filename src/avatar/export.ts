@@ -151,7 +151,7 @@ export async function exportAvatarJob(o: AvatarExportOptions): Promise<AvatarExp
   let hashtags: string[] = [];
   if (!lines.length && topic && !o.speech) {
     say("▸ сценарий монолога…");
-    const llm = o.llm ?? selectStructuredLlm();
+    const llm = o.llm ?? selectStructuredLlm(process.env, "avatar");
     const r = await writeMonologue(topic, llm, { language, seconds: o.seconds ?? 40, model: o.model });
     lines = r.monologue.lines;
     title = r.monologue.title;
