@@ -59,6 +59,57 @@ export interface JobRow {
   purged: number;
 }
 
+export interface OutputRow {
+  job: string;
+  output_id: string;
+  file: string;
+  duration: number | null;
+  aspect: string | null;
+  created_at: string;
+}
+
+/** one record per (job, output, user); output_id "*" = the whole result message (several outputs rated at once) */
+export interface FeedbackRow {
+  job: string;
+  output_id: string;
+  user: number;
+  stars: number;
+  /** JSON array of reason codes (see src/bot/feedback.ts) */
+  reasons: string;
+  comment: string | null;
+  /** text | voice */
+  comment_kind: string | null;
+  /** montage | highlights | reference | make | revise | avatar */
+  kind: string | null;
+  preset: string | null;
+  voice: string | null;
+  aspect: string | null;
+  duration: number | null;
+  cost_usd: number | null;
+  /** the bot already said «Похоже, проблема в …» for this record */
+  acked: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SelfReviewRow {
+  job: string;
+  output_id: string;
+  hash: string | null;
+  status: "ok" | "skipped" | "failed";
+  /** JSON: { hook: { score, reason }, …, overall } */
+  scores: string | null;
+  overall: number | null;
+  /** JSON array of the top fixes */
+  fixes: string;
+  summary: string | null;
+  confidence: number | null;
+  model: string | null;
+  cost_usd: number;
+  error: string | null;
+  created_at: string;
+}
+
 const MIGRATIONS: string[] = [
   // 1: the whole schema
   `
@@ -135,6 +186,64 @@ const MIGRATIONS: string[] = [
     summary TEXT,
     created_at TEXT NOT NULL
   );
+  `,
+  // 3: stage 28 — delivered outputs, the user's feedback (stars + reasons + comment) and the AI critic's self-review
+  `
+  CREATE TABLE outputs (
+    job TEXT NOT NULL,
+    output_id TEXT NOT NULL,
+    file TEXT NOT NULL,
+    duration REAL,
+    aspect TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (job, output_id)
+  );
+  CREATE TABLE feedback (
+    job TEXT NOT NULL,
+    output_id TEXT NOT NULL,
+    user INTEGER NOT NULL,
+    stars INTEGER NOT NULL CHECK (stars BETWEEN 1 AND 5),
+    reasons TEXT NOT NULL DEFAULT '[]',
+    comment TEXT,
+    comment_kind TEXT,
+    kind TEXT,
+    preset TEXT,
+    voice TEXT,
+    aspect TEXT,
+    duration REAL,
+    cost_usd REAL,
+    acked INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (job, output_id, user)
+  );
+  CREATE INDEX feedback_created ON feedback (created_at);
+  CREATE TABLE self_review (
+    job TEXT NOT NULL,
+    output_id TEXT NOT NULL,
+    hash TEXT,
+    status TEXT NOT NULL CHECK (status IN ('ok','skipped','failed')),
+    scores TEXT,
+    overall INTEGER,
+    fixes TEXT NOT NULL DEFAULT '[]',
+    summary TEXT,
+    confidence REAL,
+    model TEXT,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (job, output_id)
+  );
+  CREATE INDEX self_review_hash ON self_review (hash);
+  -- ratings given before stage 28 (stars only) become feedback records, so the analytics start with them
+  INSERT INTO feedback (job, output_id, user, stars, reasons, kind, preset, voice, aspect, cost_usd, created_at, updated_at)
+  SELECT id, '*', user, rating, '[]',
+    CASE kind WHEN 'run' THEN 'montage' WHEN 'make' THEN 'make' WHEN 'revise' THEN 'revise' ELSE 'avatar' END,
+    CASE WHEN json_valid(payload) THEN COALESCE(json_extract(payload, '$.preset'), CASE kind WHEN 'make' THEN 'make' END) END,
+    CASE WHEN json_valid(payload) THEN json_extract(payload, '$.voice') END,
+    CASE WHEN json_valid(payload) THEN COALESCE(json_extract(payload, '$.resultAspect'), json_extract(payload, '$.aspect')) END,
+    cost_usd, COALESCE(finished_at, created_at), COALESCE(finished_at, created_at)
+  FROM jobs WHERE rating BETWEEN 1 AND 5;
   `,
 ];
 
@@ -398,5 +507,60 @@ export class BotDb {
 
   putStyleKey(alias: string, key: string, summary?: string) {
     this.run("INSERT INTO style_cache (alias, key, summary, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(alias) DO UPDATE SET key = excluded.key, summary = excluded.summary", alias, key, summary ?? null, nowIso());
+  }
+
+  // ── stage 28: outputs, feedback, self-review ─────────────────────────────────
+
+  putOutputs(job: string, outputs: { id: string; file: string; duration?: number; aspect?: string }[]) {
+    for (const o of outputs) this.run("INSERT INTO outputs (job, output_id, file, duration, aspect, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(job, output_id) DO UPDATE SET file = excluded.file, duration = excluded.duration, aspect = excluded.aspect", job, o.id, o.file, o.duration ?? null, o.aspect ?? null, nowIso());
+  }
+
+  outputsOf(job: string): OutputRow[] {
+    return this.all<OutputRow>("SELECT * FROM outputs WHERE job = ? ORDER BY rowid", job);
+  }
+
+  getFeedback(job: string, outputId: string, user: number): FeedbackRow | undefined {
+    return this.get<FeedbackRow>("SELECT * FROM feedback WHERE job = ? AND output_id = ? AND user = ?", job, outputId, user);
+  }
+
+  /** creates or edits the record; fields not given keep their value */
+  upsertFeedback(row: Pick<FeedbackRow, "job" | "output_id" | "user" | "stars"> & Partial<Omit<FeedbackRow, "job" | "output_id" | "user" | "created_at" | "updated_at">>): FeedbackRow {
+    const now = nowIso();
+    const old = this.getFeedback(row.job, row.output_id, row.user);
+    const full: FeedbackRow = { reasons: "[]", comment: null, comment_kind: null, kind: null, preset: null, voice: null, aspect: null, duration: null, cost_usd: null, acked: 0, created_at: now, ...old, ...row, updated_at: now };
+    const keys = Object.keys(full) as (keyof FeedbackRow)[];
+    this.run(
+      `INSERT INTO feedback (${keys.join(", ")}) VALUES (${keys.map(() => "?").join(", ")}) ON CONFLICT(job, output_id, user) DO UPDATE SET ${keys.filter((k) => !["job", "output_id", "user", "created_at"].includes(k)).map((k) => `${k} = excluded.${k}`).join(", ")}`,
+      ...keys.map((k) => clean(full[k])),
+    );
+    return full;
+  }
+
+  feedbackOf(job: string): FeedbackRow[] {
+    return this.all<FeedbackRow>("SELECT * FROM feedback WHERE job = ? ORDER BY updated_at", job);
+  }
+
+  /** feedback updated since (all when undefined), newest first */
+  feedbackSince(sinceIso?: string): FeedbackRow[] {
+    return sinceIso ? this.all<FeedbackRow>("SELECT * FROM feedback WHERE updated_at >= ? ORDER BY updated_at DESC", sinceIso) : this.all<FeedbackRow>("SELECT * FROM feedback ORDER BY updated_at DESC");
+  }
+
+  putSelfReview(row: Pick<SelfReviewRow, "job" | "output_id" | "status"> & Partial<SelfReviewRow>) {
+    const full: SelfReviewRow = { hash: null, scores: null, overall: null, fixes: "[]", summary: null, confidence: null, model: null, cost_usd: 0, error: null, created_at: nowIso(), ...row };
+    const keys = Object.keys(full) as (keyof SelfReviewRow)[];
+    this.run(`INSERT OR REPLACE INTO self_review (${keys.join(", ")}) VALUES (${keys.map(() => "?").join(", ")})`, ...keys.map((k) => clean(full[k])));
+  }
+
+  selfReviewsOf(job: string): SelfReviewRow[] {
+    return this.all<SelfReviewRow>("SELECT * FROM self_review WHERE job = ? ORDER BY rowid", job);
+  }
+
+  /** a finished review of the same file (content hash) from any job */
+  selfReviewByHash(hash: string): SelfReviewRow | undefined {
+    return this.get<SelfReviewRow>("SELECT * FROM self_review WHERE hash = ? AND status = 'ok' ORDER BY created_at DESC LIMIT 1", hash);
+  }
+
+  selfReviewsSince(sinceIso?: string): SelfReviewRow[] {
+    return sinceIso ? this.all<SelfReviewRow>("SELECT * FROM self_review WHERE created_at >= ? ORDER BY created_at DESC", sinceIso) : this.all<SelfReviewRow>("SELECT * FROM self_review ORDER BY created_at DESC");
   }
 }

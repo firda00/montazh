@@ -910,6 +910,70 @@ program
     }
   });
 
+// stage 28: ratings and the AI critic
+const feedback = program.command("feedback").description("оценки пользователей и самопроверка ИИ (этап 28)");
+feedback
+  .command("report")
+  .description("сводка оценок (как /admin → 📊 Оценки) + docs/feedback-report.md")
+  .option("--days <n>", "окно разбивок, дней (0 = всё время)", (v) => Number(v), 30)
+  .option("--db <file>", "база бота (по умолчанию workspace/_bot/vedit.db)")
+  .option("--out <file>", "куда записать отчёт", "docs/feedback-report.md")
+  .option("--lang <ru|uz|en>", "язык подписей", "ru")
+  .action(async (opts: { days: number; db?: string; out: string; lang: string }) => {
+    try {
+      const { WORKSPACE_ROOT } = await import("./lib/workspace.ts");
+      const { BotDb } = await import("./bot/db.ts");
+      const { t } = await import("./bot/i18n.ts");
+      const { summarizeFeedback, formatFeedbackSummary, formatLowList, formatDisagree, feedbackReportMarkdown } = await import("./bot/feedback.ts");
+      const file = path.resolve(opts.db ?? path.join(WORKSPACE_ROOT, "_bot", "vedit.db"));
+      if (!(await exists(file))) throw new Error(`нет базы бота: ${file} (бот ещё не запускался или задайте --db)`);
+      const db = new BotDb(file);
+      try {
+        const L = t(opts.lang === "uz" || opts.lang === "en" ? opts.lang : "ru");
+        const s = summarizeFeedback(db.feedbackSince(), db.selfReviewsSince(), { days: opts.days, lowLimit: 20 });
+        console.log([formatFeedbackSummary(L, s), "", formatLowList(L, s), "", formatDisagree(L, s)].join("\n"));
+        await fs.mkdir(path.dirname(path.resolve(opts.out)), { recursive: true });
+        await fs.writeFile(opts.out, feedbackReportMarkdown(L, s));
+        console.log(`\n→ ${opts.out}`);
+      } finally {
+        db.close();
+      }
+    } catch (err) {
+      fail(err);
+    }
+  });
+feedback
+  .command("review")
+  .description("самопроверка ИИ готовых роликов: Gemini смотрит копию 480p и ставит оценки 1–5 с правками (кэш по хэшу файла)")
+  .argument("<files...>", "mp4 файлы")
+  .option("--model <list>", "модели Gemini через запятую (по умолчанию VEDIT_REVIEW_MODEL или gemini-3.5-flash-lite → 3.6-flash)")
+  .option("--task <text>", "что просили (для контекста критика)")
+  .option("--style <name>", "пресет / стиль субтитров")
+  .option("--kind <kind>", "montage | highlights | reference | make | avatar", "montage")
+  .option("--no-cache", "не брать из кэша и не писать в него")
+  .action(async (files: string[], opts: { model?: string; task?: string; style?: string; kind: string; cache: boolean }) => {
+    try {
+      const { runSelfReview } = await import("./review/self-review.ts");
+      const { ffprobe } = await import("./lib/ffmpeg.ts");
+      let total = 0;
+      for (const f of files) {
+        const probe = await ffprobe(f).catch(() => undefined);
+        const v = probe?.streams.find((x) => x.codec_type === "video");
+        const aspect = v?.width && v.height ? (v.height > v.width ? "9:16" : v.width > v.height ? "16:9" : "1:1") : undefined;
+        const r = await runSelfReview(
+          f,
+          { kind: opts.kind, task: opts.task, style: opts.style, duration: Number(probe?.format.duration) || undefined, aspect },
+          { models: opts.model ? opts.model.split(",").map((x) => x.trim()).filter(Boolean) : undefined, cacheDir: opts.cache ? undefined : null, env: { ...process.env, VEDIT_SELF_REVIEW: "on" }, onLog: (l) => console.error(`  ${l}`) },
+        );
+        total += r.cost_usd;
+        console.log(JSON.stringify({ file: f, ...r }, null, 2));
+      }
+      console.error(`итого: $${total.toFixed(4)}`);
+    } catch (err) {
+      fail(err);
+    }
+  });
+
 program
   .command("modules")
   .description("реестр модулей: бэкенд, готовность, использование и стоимость по задачам")

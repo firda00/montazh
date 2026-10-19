@@ -66,7 +66,14 @@ const apiBase = process.env.TELEGRAM_API_BASE?.trim() || undefined;
 if (apiBase) log(`Bot API: ${apiBase} (локальный сервер --local — файлы до 2000 МБ)`);
 else log("Bot API: облако — файлы от пользователей до 20 МБ, больше — ссылкой (VEDIT_LINK_MAX_MB); до 2 ГБ: deploy/telegram-bot-api.sh");
 
-const running = await startBot({ token, allowedUserIds, adminIds: admins, apiBase, maxJobs, retentionDays, onLog: log });
+// stage 28: the AI critic watches every delivered output in the background (VEDIT_SELF_REVIEW=off turns it off)
+const { runSelfReview, selfReviewEnabled, reviewModels } = await import("../review/self-review.ts");
+const reviewOn = selfReviewEnabled();
+const reviewKey = !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+log(`самопроверка ИИ: ${reviewOn ? (reviewKey ? `вкл. (${reviewModels().join(" → ")})` : "вкл., но нет GEMINI_API_KEY — будет пропускаться") : "выкл. (VEDIT_SELF_REVIEW=off)"}`);
+const selfReview = reviewOn && reviewKey ? (file: string, ctx: Parameters<typeof runSelfReview>[1]) => runSelfReview(file, ctx, { onLog: (l) => log(`  ${l}`) }) : false;
+
+const running = await startBot({ token, allowedUserIds, adminIds: admins, apiBase, maxJobs, retentionDays, onLog: log, selfReview });
 
 let stopping = false;
 const shutdown = async () => {

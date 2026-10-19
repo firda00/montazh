@@ -1,10 +1,12 @@
 // /admin: statistics, user lookup (credits, ban, admin role), broadcast (≤ 20 msg/s, opt-out respected),
-// live free-plan limits. Admins = TELEGRAM_ADMIN_IDS (or the first TELEGRAM_ALLOWED_USERS id) + users given
+// live free-plan limits, ratings with the AI self-review (stage 28). Admins = TELEGRAM_ADMIN_IDS (or the first TELEGRAM_ALLOWED_USERS id) + users given
 // the admin role here. Every admin callback re-checks the role.
 import type { BotApi, InlineKeyboard } from "./telegram-api.ts";
 import type { BotDb } from "./db.ts";
 import { t, type Strings } from "./i18n.ts";
-import { adminKb, broadcastKb, limitsKb, limitStep, userCardKb } from "./keyboards.ts";
+import { adminKb, broadcastKb, feedbackAdminKb, feedbackJobKb, feedbackJobsKb, limitsKb, limitStep, userCardKb } from "./keyboards.ts";
+import { formatDisagree, formatFeedbackSummary, formatJobFeedback, formatLowList, summarizeFeedback } from "./feedback.ts";
+import { exists } from "../lib/workspace.ts";
 import { FREE_PLAN_FIELDS, type PlanLimits } from "./plans.ts";
 
 export interface AdminCtx {
@@ -167,6 +169,44 @@ export function adminHandlers(ctx: AdminCtx) {
         case "l":
           await ctx.say(chatId, limitsText(uid), limitsKb());
           return;
+        // ── stage 28: «📊 Оценки» ──
+        case "fb":
+        case "fl":
+        case "fd": {
+          const days = [7, 30, 0].includes(Number(a)) ? Number(a) : 30;
+          const s = summarizeFeedback(db.feedbackSince(), db.selfReviewsSince(), { days });
+          if (op === "fb") {
+            const text = formatFeedbackSummary(L, s);
+            // from the admin menu ("a:fb:30:n") a new card; switching the window edits the card in place
+            if (msgId && b !== "n") await ctx.edit(chatId, msgId, text, feedbackAdminKb(L, days));
+            else await ctx.say(chatId, text, feedbackAdminKb(L, days));
+            return;
+          }
+          const jobs = op === "fl" ? s.low.map((x) => x.f.job) : s.disagree.map((x) => x.f.job);
+          await ctx.say(chatId, op === "fl" ? formatLowList(L, s) : formatDisagree(L, s), jobs.length ? feedbackJobsKb(jobs) : undefined);
+          return;
+        }
+        case "fo": {
+          if (!a) return;
+          const text = formatJobFeedback(L, db.getJob(a), a, db.outputsOf(a), db.feedbackOf(a), db.selfReviewsOf(a));
+          await ctx.say(chatId, text, db.outputsOf(a).length ? feedbackJobKb(L, a) : undefined);
+          return;
+        }
+        case "fv": {
+          if (!a) return;
+          for (const o of db.outputsOf(a)) {
+            if (!(await exists(o.file))) {
+              await ctx.say(chatId, `${o.output_id}: ${L.fbAdmin.videoGone}`);
+              continue;
+            }
+            try {
+              await ctx.api.sendDocument(chatId, o.file, `${a} · ${o.output_id}`);
+            } catch (err) {
+              await ctx.say(chatId, `✖ ${o.output_id}: ${err instanceof Error ? err.message : err}`);
+            }
+          }
+          return;
+        }
         case "lv": {
           const f = FREE_PLAN_FIELDS[Number(a)];
           if (!f) return;

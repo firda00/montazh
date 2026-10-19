@@ -16,7 +16,7 @@ import { CostSchema } from "../schemas/index.ts";
 import { getVoice, isCloud, NO_VOICE, piperVoiceFor, sampleVoiceFor, type VoiceDef } from "../voice/catalog.ts";
 import { downloadLink, findLinks, LinkError, linkKey, linkMaxBytes, textWithoutLinks, type DownloadLinkOptions } from "../ingest/links.ts";
 import { isFileTooBig, makeBotApi, TelegramError, type BotApi, type CallMethod, type DownloadFn, type InlineKeyboard, type Limits, type ReplyMarkup, type TgCallbackQuery, type TgMessage, type TgUpdate, type TgUser } from "./telegram-api.ts";
-import { BotDb, isLang, type JobKind, type JobRow, type Lang, type UserRow } from "./db.ts";
+import { BotDb, isLang, type FeedbackRow, type JobKind, type JobRow, type Lang, type OutputRow, type UserRow } from "./db.ts";
 import { hasGoogleTtsKey, menuAction, STRINGS, t, voiceLabel, type MenuAction, type SendMode, type Strings } from "./i18n.ts";
 import { adminHandlers } from "./admin.ts";
 import { JobQueue, type JobOutcome } from "./queue.ts";
@@ -25,6 +25,8 @@ import type { ExtractInput, ExtractResult } from "../style/extract.ts";
 import { mapStyle, styleSummary } from "../style/map.ts";
 import { StyleProfileSchema } from "../style/profile.ts";
 import { runRetention, type RetentionReport } from "./retention.ts";
+import { commentKb, COMMENT_WINDOW_MS, feedbackKb, feedbackMeta, isLow, parseReasons, reasonsFor, reviewContext, transcribeNote, VOICE_NOTE_MAX_S } from "./feedback.ts";
+import { likelyIssue, parseReview, type SelfReviewFn } from "../review/self-review.ts";
 import { dailyBudgetUsdFromEnv, dayStart, freePlanFromEnv, maxJobsFromEnv, retentionDaysFromEnv, tzOffsetFromEnv, userDailyJobsFromEnv, type JobClass, type PlanLimits } from "./plans.ts";
 import {
   cancelKb,
@@ -91,7 +93,7 @@ export const SessionSchema = z.object({
   avatar_photo: z.string().optional(),
   avatar_voice: z.string().optional(),
   avatar_job: z.string().optional(),
-  /** what the next text means: topic | avatar | edit:<botJob> | admin_find | admin_broadcast */
+  /** what the next text means: topic | avatar | edit:<botJob> | fb:<botJob> (feedback comment) | admin_find | admin_broadcast */
   awaiting: z.string().optional(),
   /** the mode chosen in the menu before uploading (🏀 → hl) */
   intent: z.enum(["reels", "viral", "hl", "pp"]).optional(),
@@ -104,6 +106,8 @@ export const SessionSchema = z.object({
   /** the analysis was just made and is not yet billed to a job */
   ref_fresh: z.boolean().optional(),
   broadcast: z.string().optional(),
+  /** stage 28: when «Готово» on the reason chips was pressed — a comment (text / voice) is expected for a while */
+  fb_at: z.number().optional(),
   /** what the user is doing (last menu choice or upload): a photo during a montage is not an avatar photo */
   ctx: z.enum(["montage", "avatar", "make"]).optional(),
 });
@@ -380,6 +384,15 @@ export interface BotOptions {
   statusEditMs?: number;
   /** pause between broadcast messages, ms (default 50 → 20 msg/s) */
   broadcastDelayMs?: number;
+  /**
+   * stage 28: the AI critic run in the background on every delivered output (src/review/self-review.ts). Off unless
+   * given: `npm run bot` (src/bot/run.ts) passes the Gemini one when VEDIT_SELF_REVIEW is not "off"; tests inject a stub.
+   */
+  selfReview?: SelfReviewFn | false;
+  /** outputs of one job the critic watches (default VEDIT_SELF_REVIEW_MAX, 3) */
+  selfReviewMax?: number;
+  /** a voice-note comment → text (default whisper.cpp; tests inject a fake) */
+  transcribeNote?: (file: string) => Promise<string>;
   /** legal texts (terms|privacy).<lang>.md (default docs/legal) */
   docsDir?: string;
   env?: NodeJS.ProcessEnv;
@@ -444,6 +457,9 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   const retentionDays = o.retentionDays ?? retentionDaysFromEnv(env);
   const statusEditMs = o.statusEditMs ?? 1500;
   const docsDir = o.docsDir ?? DOCS_DIR;
+  const reviewFn = o.selfReview || undefined;
+  const reviewMax = o.selfReviewMax ?? (Number(env.VEDIT_SELF_REVIEW_MAX) > 0 ? Number(env.VEDIT_SELF_REVIEW_MAX) : 3);
+  const transcribeFn = o.transcribeNote ?? transcribeNote;
 
   await fs.mkdir(botDir, { recursive: true });
   const db = new BotDb(path.join(botDir, "vedit.db"));
@@ -704,6 +720,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       db.addUsage({ user: uid, kind: job.kind, units: job.paid_credits, cost_usd: cost, job_id: jobId });
       await finish("done", { vedit_job: result.jobId, cost_usd: cost, percent: 100, stage: "done" });
       log(`[${uid}] ${job.kind} ok: ${result.jobId}, ${result.outputs.length} файл(ов), $${cost.toFixed(3)}`);
+      // stage 28: the critic watches the outputs after delivery, in the background (never delays the user)
+      scheduleReview(jobId);
       return "done";
     } catch (err) {
       if (signal.aborted || err instanceof CancelledError) {
@@ -771,6 +789,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     }
     const mode = sendOf(uid);
     const notes: string[] = [];
+    // stage 28: what was delivered (feedback and the self-review refer to these)
+    if (result.outputs.length) db.putOutputs(jobId, result.outputs);
     for (const out of result.outputs) {
       const caption = videoCaption(out, result.reasoning);
       let size = 0;
@@ -832,12 +852,143 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const text = [head, ...lines, result.outputs.length ? `${L.reviseHint}\n${L.rateAsk}` : ""].filter(Boolean).join("\n");
     const msgId = await say(chatId, text, result.outputs.length ? encodeKb(resultKb(L, jobId)) : undefined);
     if (msgId) db.updateJob(jobId, { result_msg_id: msgId });
-    // the format of the result, for «📐 Другой формат»
+    // the format of the result, for «📐 Другой формат»; the text of the result message, restored after the feedback
     const aspect = result.outputs.find((x) => x.aspect)?.aspect;
-    if (aspect) {
+    if (aspect || result.outputs.length) {
       const j = db.getJob(jobId);
-      if (j) db.updateJob(jobId, { payload: JSON.stringify({ ...JSON.parse(j.payload), resultAspect: aspect }) });
+      if (j) db.updateJob(jobId, { payload: JSON.stringify({ ...JSON.parse(j.payload), ...(aspect ? { resultAspect: aspect } : {}), ...(result.outputs.length ? { resultText: text } : {}) }) });
     }
+  }
+
+  // ── stage 28: self-review (the AI critic) ──
+  let reviewChain: Promise<void> = Promise.resolve();
+  function scheduleReview(jobId: string) {
+    if (!reviewFn) return;
+    const job = db.getJob(jobId);
+    if (!job || job.kind === "avatar") return;
+    const outs = db.outputsOf(jobId).slice(0, reviewMax);
+    if (!outs.length) return;
+    // one review at a time: frugal with the free tier and with RAM
+    reviewChain = reviewChain.then(async () => {
+      for (const out of outs) await reviewOne(job, out);
+    });
+    track(reviewChain);
+  }
+
+  async function reviewOne(job: JobRow, out: OutputRow) {
+    const pause = db.getKv("review.pause_until");
+    if (pause && Date.parse(pause) > Date.now()) {
+      db.putSelfReview({ job: job.id, output_id: out.output_id, status: "skipped", error: `квота: пауза до ${pause}` });
+      return;
+    }
+    try {
+      const r = await reviewFn!(out.file, reviewContext(job, out));
+      if (r.status === "ok") {
+        db.putSelfReview({ job: job.id, output_id: out.output_id, hash: r.hash, status: "ok", scores: JSON.stringify(r.review.scores), overall: r.review.scores.overall.score, fixes: JSON.stringify(r.review.fixes), summary: r.review.summary, confidence: r.review.confidence, model: r.model, cost_usd: r.cost_usd });
+        if (r.cost_usd > 0) db.addUsage({ user: job.user, kind: "self_review", units: 0, cost_usd: r.cost_usd, job_id: job.id });
+        log(`[${job.user}] самопроверка ${job.id}/${out.output_id}: ${r.review.scores.overall.score}/5 (${r.model}${r.cached ? ", из кэша" : ""}, $${r.cost_usd.toFixed(4)})`);
+        return;
+      }
+      db.putSelfReview({ job: job.id, output_id: out.output_id, hash: r.hash ?? null, status: r.status, error: r.reason });
+      // quota: no more attempts for an hour (every one would fail the same way)
+      if (r.status === "skipped" && /квот|quota|429|RESOURCE_EXHAUSTED|limit|PerDay/i.test(r.reason)) db.setKv("review.pause_until", new Date(Date.now() + 3_600_000).toISOString());
+      log(`[${job.user}] самопроверка ${job.id}/${out.output_id}: ${r.status} — ${r.reason}`);
+    } catch (err) {
+      db.putSelfReview({ job: job.id, output_id: out.output_id, status: "failed", error: errMsg(err).slice(0, 300) });
+      log(`⚠ самопроверка ${job.id}/${out.output_id}: ${errMsg(err)}`);
+    }
+  }
+
+  // ── stage 28: feedback after a rating ──
+  /** one record per (job, output, user): the only output, or "*" for a result with several */
+  const fbOutput = (jobId: string) => {
+    const outs = db.outputsOf(jobId);
+    return outs.length === 1 ? outs[0].output_id : "*";
+  };
+
+  /** a star press: the record is created or edited; reasons survive a re-rate on the same side (1–3 / 4–5) */
+  function rateFeedback(uid: number, job: JobRow, stars: number): FeedbackRow {
+    const outs = db.outputsOf(job.id);
+    const outId = outs.length === 1 ? outs[0].output_id : "*";
+    const old = db.getFeedback(job.id, outId, uid);
+    const reasons = old && isLow(old.stars) === isLow(stars) ? old.reasons : "[]";
+    return db.upsertFeedback({ job: job.id, output_id: outId, user: uid, stars, reasons, ...feedbackMeta(job, outs) });
+  }
+
+  const fbPending = (uid: number): string | undefined => {
+    const s = sess(uid);
+    if (!s.awaiting?.startsWith("fb:")) return undefined;
+    if (Date.now() - (s.fb_at ?? 0) > COMMENT_WINDOW_MS) {
+      patchSess(uid, { awaiting: undefined, fb_at: undefined });
+      return undefined;
+    }
+    return s.awaiting.slice(3);
+  };
+
+  /** the result message gets its text and buttons back (the stars row shows the rating, tap = change it) */
+  async function finishFeedback(uid: number, chatId: number, jobId: string, msgId?: number) {
+    if (sess(uid).awaiting === `fb:${jobId}`) patchSess(uid, { awaiting: undefined, fb_at: undefined });
+    const job = db.getJob(jobId);
+    const f = db.getFeedback(jobId, fbOutput(jobId), uid);
+    if (!job || !f) return;
+    const L = T(uid);
+    const p = JSON.parse(job.payload) as Record<string, unknown>;
+    const target = msgId ?? job.result_msg_id ?? undefined;
+    // results delivered before stage 28 have no stored text: rebuild its usual shape
+    const text = typeof p.resultText === "string" ? p.resultText : [L.done(Math.max(1, db.outputsOf(jobId).length), job.vedit_job ?? jobId), L.reviseHint, L.rateAsk].join("\n");
+    if (target) await edit(chatId, target, text, encodeKb(resultKb(L, jobId, f.stars)));
+    log(`[${uid}] отзыв ${jobId}: ${f.stars}⭐ ${parseReasons(f.reasons).join(",") || "—"}${f.comment ? ` «${f.comment.slice(0, 80)}»` : ""}`);
+    await maybeAck(uid, chatId, f);
+  }
+
+  /** ≤ 3 ⭐: one humble sentence about the likely cause — only when the critic is confident and agrees */
+  async function maybeAck(uid: number, chatId: number, f: FeedbackRow) {
+    if (!isLow(f.stars) || f.acked) return;
+    const reviews = db
+      .selfReviewsOf(f.job)
+      .filter((r) => r.status === "ok" && r.scores && (f.output_id === "*" || r.output_id === f.output_id))
+      .map((r) => {
+        try {
+          return parseReview({ scores: JSON.parse(r.scores!), fixes: parseReasons(r.fixes), summary: r.summary ?? "", confidence: r.confidence ?? 0 });
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((r) => !!r)
+      .sort((a, b) => a.scores.overall.score - b.scores.overall.score);
+    if (!reviews.length) return;
+    const issue = likelyIssue(reviews[0], parseReasons(f.reasons));
+    const L = T(uid);
+    const label = issue ? (L.fb.issue as Record<string, string>)[issue] : undefined;
+    if (!label) return;
+    await say(chatId, L.fb.ack(label));
+    db.upsertFeedback({ ...f, acked: 1 });
+  }
+
+  async function saveComment(uid: number, chatId: number, jobId: string, comment: string, kind: "text" | "voice", reply: string) {
+    const f = db.getFeedback(jobId, fbOutput(jobId), uid);
+    patchSess(uid, { awaiting: undefined, fb_at: undefined });
+    if (!f) return;
+    db.upsertFeedback({ ...f, comment: comment.slice(0, 2000), comment_kind: kind });
+    await say(chatId, reply);
+    await finishFeedback(uid, chatId, jobId);
+  }
+
+  async function onFeedbackVoice(uid: number, m: TgMessage, jobId: string, v: { file_id: string; file_size?: number; duration?: number }) {
+    const chatId = m.chat.id;
+    const L = T(uid);
+    if (v.file_size !== undefined && v.file_size > uploadLimit(uid)) return tooLargeReply(uid, chatId, v.file_size);
+    const dest = path.join(usersDir, String(uid), "feedback", `${jobId}_${safeName(v.file_id).slice(-16)}.ogg`);
+    let text = "";
+    try {
+      if (!(await exists(dest))) await api.download(await api.getFile(v.file_id), dest);
+      text = (await transcribeFn(dest)).trim();
+    } catch (err) {
+      log(`[${uid}] голосовой отзыв ${jobId}: не распознан — ${errMsg(err)}`);
+    }
+    if ((v.duration ?? 0) > VOICE_NOTE_MAX_S) log(`[${uid}] голосовой отзыв длиннее ${VOICE_NOTE_MAX_S} с — распознано начало`);
+    const short = text.length > 300 ? `${text.slice(0, 299)}…` : text;
+    await saveComment(uid, chatId, jobId, text || `🎤 ${path.basename(dest)}`, "voice", text ? L.fb.heard(short) : L.fb.voiceKept);
   }
 
   // ── starting work ──
@@ -1531,7 +1682,12 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       if (s.ctx === "montage" && s.awaiting !== "avatar" && !/^\/avatar\b/i.test(m.caption ?? "")) return void (await say(chatId, L.photoInMontage));
       return onAvatarMedia(uid, m, "photo", image, m.photo?.length ? ".jpg" : path.extname(m.document?.file_name ?? "") || ".jpg");
     }
-    if (m.voice) return onAvatarMedia(uid, m, "voice", m.voice, ".ogg");
+    // a voice note right after «Готово» on the reason chips is a feedback comment, not an avatar voice
+    if (m.voice) {
+      const fbJob = fbPending(uid);
+      if (fbJob) return onFeedbackVoice(uid, m, fbJob, m.voice);
+      return onAvatarMedia(uid, m, "voice", m.voice, ".ogg");
+    }
     if (m.audio) return onAvatarMedia(uid, m, "voice", m.audio, path.extname(m.audio.file_name ?? "") || ".mp3");
     if (m.document) return void (await say(chatId, L.notVideo));
     const text = m.text?.trim();
@@ -1617,6 +1773,10 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     if (awaiting?.startsWith("admin_")) {
       if (isAdmin(uid) && (await admin.text(uid, chatId, text))) return;
       patchSess(uid, { awaiting: undefined });
+    }
+    if (awaiting?.startsWith("fb:")) {
+      const fbJob = fbPending(uid);
+      if (fbJob) return saveComment(uid, chatId, fbJob, text, "text", L.fb.thanks);
     }
     if (awaiting === "ref") {
       const url = findUrl(text);
@@ -1789,8 +1949,42 @@ export async function createBot(o: BotOptions): Promise<Bot> {
           const n = Number(b);
           if (!job || job.user !== uid || job.status !== "done" || !(n >= 1 && n <= 5)) break;
           db.updateJob(a, { rating: n });
-          if (msgId) await editMarkup(chatId, msgId, encodeKb(resultKb(L, a, n)));
+          // stage 28: the same message asks why (reason chips → optional comment → back to the result)
+          const f = rateFeedback(uid, job, n);
+          if (msgId) await edit(chatId, msgId, isLow(n) ? L.fb.askLow(n) : L.fb.askHigh(n), encodeKb(feedbackKb(L, a, n, parseReasons(f.reasons))));
           toast = L.rated(n);
+          break;
+        }
+        case "fb": {
+          const job = db.getJob(a);
+          if (!job || job.user !== uid) {
+            toast = L.jobGone;
+            break;
+          }
+          // ⭐ · изменить: the stars row again
+          if (b === "re") {
+            if (msgId) await editMarkup(chatId, msgId, encodeKb(resultKb(L, a)));
+            break;
+          }
+          const f = db.getFeedback(a, fbOutput(a), uid);
+          if (!f) break;
+          if (b === "t" && c && reasonsFor(f.stars).includes(c)) {
+            const cur = parseReasons(f.reasons);
+            const next = cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c];
+            // «Всё отлично» / «Другое» are allowed together with the others: the user means it
+            db.upsertFeedback({ ...f, reasons: JSON.stringify(next) });
+            if (msgId) await editMarkup(chatId, msgId, encodeKb(feedbackKb(L, a, f.stars, next)));
+            break;
+          }
+          if (b === "ok") {
+            patchSess(uid, { awaiting: `fb:${a}`, fb_at: Date.now() });
+            if (msgId) await edit(chatId, msgId, L.fb.comment, encodeKb(commentKb(L, a)));
+            break;
+          }
+          if (b === "end") {
+            await answer(L.fb.thanks);
+            await finishFeedback(uid, chatId, a, msgId);
+          }
           break;
         }
         case "a":
@@ -1891,7 +2085,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const str = (k: string) => (typeof p[k] === "string" ? (p[k] as string) : undefined);
     if (op === "R") {
       if (job.kind === "run" && str("source") && !(await exists(str("source")!))) return L.needVideo;
-      const { resultAspect: _ra, ...clean } = p;
+      const { resultAspect: _ra, resultText: _rt, ...clean } = p;
       await submit(uid, chatId, job.kind, clean, job.class);
       return undefined;
     }
@@ -1899,7 +2093,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       const note = "Сделай другой вариант: другие моменты и другой хук, чем в прошлый раз.";
       if (job.kind === "run") {
         if (!(await exists(str("source") ?? ""))) return L.needVideo;
-        await submit(uid, chatId, "run", { ...p, instruction: `${str("instruction")} ${note}`, resultAspect: undefined }, job.class);
+        await submit(uid, chatId, "run", { ...p, instruction: `${str("instruction")} ${note}`, resultAspect: undefined, resultText: undefined }, job.class);
       } else if (job.kind === "make") await submit(uid, chatId, "make", { topic: str("topic"), voice: str("voice"), aspect: str("aspect") }, "standard");
       else if (job.vedit_job) await startRevise(uid, chatId, note, job.vedit_job);
       return undefined;

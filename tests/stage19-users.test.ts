@@ -38,7 +38,7 @@ async function boot(extra: Partial<BotOptions> = {}) {
 
 test("db: migrations table, users with credits that never go negative, lookup by @username, settings and sessions", async () => {
   const db = new BotDb(path.join(await tmp(), "vedit.db"));
-  assert.deepEqual(db.migrations(), [1, 2]);
+  assert.deepEqual(db.migrations(), [1, 2, 3]);
   const u = db.touchUser(42, { username: "Alisher", first_name: "Алишер" });
   assert.equal(u.onboarding, "lang");
   assert.equal(u.lang, "ru");
@@ -55,7 +55,7 @@ test("db: migrations table, users with credits that never go negative, lookup by
   // a second open of the same file does not re-run migrations
   db.close();
   const again = new BotDb(db.file);
-  assert.deepEqual(again.migrations(), [1, 2]);
+  assert.deepEqual(again.migrations(), [1, 2, 3]);
   assert.equal(again.getUser(42)?.credits, 0);
   again.close();
 });
@@ -263,7 +263,11 @@ test("montage by buttons: video → option card; mode / format / style toggles e
   await bot.handleUpdate(tg.press(3, `r:${jobId}:4`, resultId));
   assert.equal(bot.db.getJob(jobId)!.rating, 4);
   assert.equal(tg.lastToast(), MSG.rated(4));
-  assert.deepEqual(tg.buttons(tg.markupOf(resultId)).at(-1), "⭐⭐⭐⭐=noop");
+  // stage 28: the same message asks what was liked; «Готово» twice brings the result back with the stars
+  assert.equal(tg.buttons(tg.markupOf(resultId)).at(-1), `✅ Готово=fb:${jobId}:ok`);
+  await bot.handleUpdate(tg.press(3, `fb:${jobId}:ok`, resultId));
+  await bot.handleUpdate(tg.press(3, `fb:${jobId}:end`, resultId));
+  assert.deepEqual(tg.buttons(tg.markupOf(resultId)).at(-1), `⭐⭐⭐⭐ · изменить=fb:${jobId}:re`);
   assert.ok(draftInstruction({ mode: "reels", count: 5, seconds: 90, aspect: "9:16", style: "pop" }).startsWith("5 рилсов по 90 секунд"));
   assert.match(draftInstruction({ mode: "hl", count: 1, seconds: 60, aspect: "9:16", style: "pop" }), /броски/);
   bot.close();
@@ -428,7 +432,7 @@ test("admin: stats, find a user, +credits (user notified in their language), ban
 
   await bot.handleUpdate(tg.text(1, "/admin"));
   const menu = tg.sent(1, MSG.adminMenu)!;
-  assert.deepEqual(tg.buttons(tg.keyboardOf(menu)), ["📊 Статистика=a:st", "👤 Найти пользователя=a:f", "📣 Рассылка=a:b", "⚙️ Лимиты=a:l"]);
+  assert.deepEqual(tg.buttons(tg.keyboardOf(menu)), ["📊 Статистика=a:st", "👤 Найти пользователя=a:f", "📣 Рассылка=a:b", "⚙️ Лимиты=a:l", "📊 Оценки=a:fb:30:n"]);
   await bot.handleUpdate(tg.press(1, "a:st", 1));
   assert.match(tg.texts(1).at(-1)!, /Пользователи: 2 \(новых сегодня 2[\s\S]*Очередь: в работе 0\/\d+, ждут 0/);
   await bot.handleUpdate(tg.press(1, "a:f", 1));

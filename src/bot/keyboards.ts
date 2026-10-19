@@ -125,7 +125,8 @@ export function resultKb(L: Strings, jobId: string, rating?: number | null): Inl
     inline_keyboard: [
       [btn(L.btnAgain, `A:${jobId}`), btn(L.btnEdit, `E:${jobId}`)],
       [btn(L.btnFormat, `F:${jobId}`)],
-      rating ? [btn("⭐".repeat(rating), "noop")] : [1, 2, 3, 4, 5].map((n) => btn(`${n}⭐`, `r:${jobId}:${n}`)),
+      // stage 28: a rated result can be re-rated (the stars row comes back, the reasons are kept)
+      rating ? [btn(L.fb.rated(rating), `fb:${jobId}:re`)] : [1, 2, 3, 4, 5].map((n) => btn(`${n}⭐`, `r:${jobId}:${n}`)),
     ],
   };
 }
@@ -134,8 +135,25 @@ export const adminKb = (L: Strings): InlineKeyboard => ({
   inline_keyboard: [
     [btn(L.btnStats, "a:st"), btn(L.btnFind, "a:f")],
     [btn(L.btnBroadcast, "a:b"), btn(L.btnLimits, "a:l")],
+    [btn(L.btnFeedback, "a:fb:30:n")],
   ],
 });
+
+/** «📊 Оценки»: the window (7 d / 30 d / all) and the two lists of that window */
+export function feedbackAdminKb(L: Strings, days: number): InlineKeyboard {
+  const mark2 = (on: boolean, text: string) => (on ? `✓ ${text}` : text);
+  return {
+    inline_keyboard: [
+      [7, 30, 0].map((d) => btn(mark2(d === days, L.fbAdmin.period(d)), `a:fb:${d}`)),
+      [btn(L.fbAdmin.btnLow, `a:fl:${days}`), btn(L.fbAdmin.btnDisagree, `a:fd:${days}`)],
+    ],
+  };
+}
+
+/** one button per listed job: opens its feedback + self-review card */
+export const feedbackJobsKb = (jobs: string[]): InlineKeyboard => ({ inline_keyboard: [...new Set(jobs)].slice(0, 10).map((j) => [btn(`🔎 ${j}`, `a:fo:${j}`)]) });
+
+export const feedbackJobKb = (L: Strings, jobId: string): InlineKeyboard => ({ inline_keyboard: [[btn(L.fbAdmin.btnVideo, `a:fv:${jobId}`)]] });
 
 export function userCardKb(L: Strings, u: { tg_id: number; status: string; role: string }): InlineKeyboard {
   return {

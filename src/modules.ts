@@ -418,6 +418,22 @@ export const MODULES: ModuleDef[] = [
     },
   },
   {
+    id: "feedback",
+    stage: "delivery",
+    title: "Оценки и самопроверка ИИ (этап 28)",
+    what: "после ⭐ бот спрашивает «почему» (причины-кнопки, текст или голосовое), в фоне Gemini смотрит каждый готовый ролик и ставит оценки 1–5 по хуку, картинкам, темпу, субтитрам, звуку, тексту + 3 правки; админка «📊 Оценки» и `vedit feedback report` сводят оценки людей и критика, расхождения ≥ 2",
+    selector: "VEDIT_SELF_REVIEW=on|off (по умолчанию on), VEDIT_REVIEW_MODEL, VEDIT_SELF_REVIEW_MAX, VEDIT_REVIEW_FPS, VEDIT_REVIEW_RESOLUTION; голосовой отзыв — whisper.cpp",
+    backends: [
+      { id: "gemini-review", title: "Gemini API: копия 480p ≤ 180 с, 1 кадр/с, Files API (удаляется сразу), JSON-оценки по критериям docs/reference-reels-analysis.md; кэш workspace/_cache/review/<хэш>.json; квота → пауза 1 ч", deps: "GEMINI_API_KEY; модели gemini-3.5-flash-lite → 3.6-flash → flash-lite-latest", license: "условия Gemini API (бесплатный уровень: данные могут использоваться Google); ≈ $0.003 за ролик 35–45 с" },
+      { id: "sqlite-feedback", title: "workspace/_bot/vedit.db: outputs, feedback (одна запись на задачу/ролик/пользователя), self_review", deps: "node:sqlite", license: "MIT / public domain" },
+    ],
+    probe: async (env) => {
+      const on = !/^(off|0|false|no)$/i.test(env.VEDIT_SELF_REVIEW?.trim() ?? "");
+      const key = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
+      return { active: on ? "gemini-review" : "выкл.", ready: true, note: on ? (key ? "" : "нет GEMINI_API_KEY — самопроверка пропускается, оценки людей пишутся") : "VEDIT_SELF_REVIEW=off" };
+    },
+  },
+  {
     id: "cli",
     stage: "delivery",
     title: "CLI и batch",
