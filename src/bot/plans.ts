@@ -22,6 +22,8 @@ export interface PlanLimits {
   longMinutes: number;
   /** biggest upload, MB (capped by the Bot API: 20 MB cloud, 2000 MB local server) */
   uploadMb: number;
+  /** stage 30, closed beta: strangers let in automatically (with ⭐ VIP) on their first message, until the slots are used */
+  testerSlots: number;
 }
 
 export interface PlanField {
@@ -42,6 +44,7 @@ export const FREE_PLAN_FIELDS: PlanField[] = [
   { key: "creditsLong", what: "кредитов за длинную задачу сверх лимита", env: "VEDIT_CREDITS_LONG", default: 3, min: 0, max: 100 },
   { key: "longMinutes", what: "видео длиннее, мин — длинная задача", env: "VEDIT_LONG_MINUTES", default: 15, min: 1, max: 600 },
   { key: "uploadMb", what: "файл от пользователя, МБ (не больше лимита Bot API)", env: "VEDIT_FREE_UPLOAD_MB", default: 20, min: 1, max: 2000 },
+  { key: "testerSlots", what: "автодоступ тестировщиков (закрытая бета): мест для первых написавших боту, с ⭐ VIP", env: "VEDIT_TESTER_SLOTS", default: 4, min: 0, max: 1000 },
 ];
 
 /** a bad env value is an error, not a silent fallback (same rule as VEDIT_BUDGET_*) */

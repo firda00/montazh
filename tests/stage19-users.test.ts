@@ -38,7 +38,7 @@ async function boot(extra: Partial<BotOptions> = {}) {
 
 test("db: migrations table, users with credits that never go negative, lookup by @username, settings and sessions", async () => {
   const db = new BotDb(path.join(await tmp(), "vedit.db"));
-  assert.deepEqual(db.migrations(), [1, 2, 3, 4]);
+  assert.deepEqual(db.migrations(), [1, 2, 3, 4, 5]);
   const u = db.touchUser(42, { username: "Alisher", first_name: "Алишер" });
   assert.equal(u.onboarding, "lang");
   assert.equal(u.lang, "ru");
@@ -55,7 +55,7 @@ test("db: migrations table, users with credits that never go negative, lookup by
   // a second open of the same file does not re-run migrations
   db.close();
   const again = new BotDb(db.file);
-  assert.deepEqual(again.migrations(), [1, 2, 3, 4]);
+  assert.deepEqual(again.migrations(), [1, 2, 3, 4, 5]);
   assert.equal(again.getUser(42)?.credits, 0);
   again.close();
 });
@@ -158,7 +158,8 @@ test("onboarding in Uzbek: language → intro + purpose → terms (with the text
   assert.match(tg.edits(50).at(-1)!, /7 kundan keyin/);
   assert.deepEqual(tg.buttons(tg.markupOf(msgId)), ["📄 Shartlar=T:terms", "🔒 Maxfiylik=T:privacy", "✅ Qabul qilaman=T:ok"]);
   await bot.handleUpdate(tg.press(50, "T:terms", msgId));
-  assert.match(tg.texts(50).at(-1)!, /Foydalanish shartlari \(qoralama\)/);
+  // stage 30: the longer terms come in two messages, cut between lines
+  assert.match(tg.texts(50).slice(-2).join("\n"), /^Foydalanish shartlari \(qoralama\)[\s\S]*bot administratori orqali/);
   await bot.handleUpdate(tg.press(50, "T:privacy", msgId));
   assert.match(tg.texts(50).at(-1)!, /Anthropic \(Claude\)/);
 
@@ -186,7 +187,8 @@ test("onboarding in Uzbek: language → intro + purpose → terms (with the text
 });
 
 test("closed beta: TELEGRAM_ALLOWED_USERS ignores strangers (messages and buttons); the first allowed id is the admin", async () => {
-  const { tg, bot, logs } = await boot({ allowedUserIds: [1, 2], onboarding: false });
+  // no tester slots (stage 30): strangers stay outside
+  const { tg, bot, logs } = await boot({ allowedUserIds: [1, 2], onboarding: false, plan: { testerSlots: 0 } });
   await bot.handleUpdate(tg.text(9, "/start"));
   await bot.handleUpdate(tg.press(9, "S:a:16:9", 5));
   assert.equal(tg.calls.filter((c) => c.params.chat_id === 9 && c.method !== "answerCallbackQuery").length, 0);
@@ -242,6 +244,8 @@ test("montage by buttons: video → option card; mode / format / style toggles e
     "Плашка с подсветкой=M:y:box",
     "Сплит=M:y:split",
     "Спокойный=M:y:calm",
+    "🌐 Озвучить на русском=M:d",
+    "🌐 Русская версия=D:open",
     "▶️ Начать=M:go",
   ]);
   await bot.handleUpdate(tg.press(3, "M:m:viral", id));

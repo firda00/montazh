@@ -409,6 +409,25 @@ export const MODULES: ModuleDef[] = [
     },
   },
   {
+    id: "dub",
+    stage: "delivery",
+    title: "Перевод и озвучка — «Русская версия» (этап 30)",
+    what: "речь → фразы → перевод с бюджетом символов на фразу → TTS пачками по N фраз → каждая фраза на своём месте (ресинхронизация на каждой фразе, заход в паузу, ускорение ≤ 1.25×, одно сокращение) → оригинал −18 дБ под переводом, субтитры на языке перевода; метка «Неофициальный перевод», без клонирования чужого голоса",
+    selector: "vedit dub <задача|видео> --lang ru --voice gemini_charon [--mode voiceover|replace] [--full]; бот: 🌐 Русская версия, 🌐 Озвучить на русском; VEDIT_DUB_BATCH (12), VEDIT_DUB_CHUNK (60), VEDIT_DUB_SHORTEN_MAX (12)",
+    backends: [
+      { id: "translate", title: "Structured-вызов Claude или Gemini (VEDIT_LLM_TRANSLATE / VEDIT_LLM), кэш dub_translations_<lang>.json + общий с субтитрами translations_<lang>.json", deps: "как планировщик", license: "как планировщик" },
+      { id: "tts", title: "Голоса каталога: Gemini TTS / Cloud TTS (одна запись на пачку фраз, кэш) или Piper", deps: "как модуль voice", license: "как модуль voice" },
+      { id: "ffmpeg", title: "atempo (ускорение без смены тона), автоматизация громкости оригинала, mov_text-субтитры", deps: "ffmpeg", license: "LGPL-2.1+" },
+    ],
+    cost: (e) => /\(dub/.test(e.provider),
+    job: (j) => j.preset === "dub",
+    probe: async (env) => {
+      const pick = llmPick("translate", env);
+      const key = !!(geminiApiKey(env) || cloudApiKey(env));
+      return { active: key ? "llm + gemini-tts" : "llm + piper", ready: !!pick, note: pick ? (key ? "" : "нет ключа Google — озвучка голосом Piper") : "нет модели для перевода (GEMINI_API_KEY или ANTHROPIC_API_KEY)" };
+    },
+  },
+  {
     id: "users",
     stage: "delivery",
     title: "Пользователи, лимиты, очередь (этап 19)",

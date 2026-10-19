@@ -5,7 +5,7 @@
 import type { BotApi, InlineKeyboard } from "./telegram-api.ts";
 import type { BotDb } from "./db.ts";
 import { t, type Strings } from "./i18n.ts";
-import { adminKb, broadcastKb, feedbackAdminKb, feedbackJobKb, feedbackJobsKb, limitsKb, limitStep, strangerKb, userCardKb } from "./keyboards.ts";
+import { adminKb, broadcastKb, feedbackAdminKb, feedbackJobKb, feedbackJobsKb, limitsKb, limitStep, strangerKb, testerKb, userCardKb } from "./keyboards.ts";
 import { formatDisagree, formatFeedbackSummary, formatJobFeedback, formatLowList, summarizeFeedback } from "./feedback.ts";
 import { exists } from "../lib/workspace.ts";
 import { FREE_PLAN_FIELDS, type PlanLimits } from "./plans.ts";
@@ -31,6 +31,8 @@ export interface AdminCtx {
   track(p: Promise<void>): void;
   broadcastDelayMs: number;
   log(line: string): void;
+  /** closed beta (TELEGRAM_ALLOWED_USERS set): the tester slots apply */
+  closedBeta?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -118,7 +120,56 @@ export function adminHandlers(ctx: AdminCtx) {
     return db.findUser(s)?.tg_id;
   };
 
+  const nameOf = (from: { first_name?: string; last_name?: string }) => [from.first_name, from.last_name].filter(Boolean).join(" ") || "—";
+
+  /** the testers block of /admin: auto slots in use, who, and the @usernames waiting for VIP */
+  function testersText(viewer: number): string {
+    const slots = ctx.plan().testerSlots;
+    const testers = db.activeTesters();
+    const pending = db.pendingVips();
+    if (!(ctx.closedBeta && slots > 0) && !testers.length && !pending.length) return "";
+    const label = (t: { tg_id: number; username: string | null; via: string }) => `${t.username ? `@${t.username}` : t.tg_id}${t.via === "pending" ? " (по @)" : ""}`;
+    return ctx.T(viewer).s30.adminTesters(db.testerSlotsUsed(), slots, testers.map(label), pending);
+  }
+
   return {
+    /**
+     * stage 30: an @username the admin made VIP before they ever wrote (`/vip @name on`) — let in with VIP on their
+     * first message (closed beta or not), no auto slot used. Returns true when it applied.
+     */
+    async applyPending(from: { id: number; username?: string; first_name?: string; last_name?: string }): Promise<boolean> {
+      if (!from.username || !db.hasPendingVip(from.username)) return false;
+      db.removePendingVip(from.username);
+      if (!db.getUser(from.id)) db.touchUser(from.id, { username: from.username, first_name: from.first_name }, { plan: "vip" });
+      setVip(from.id, true, 0);
+      db.addTester(from.id, "pending", from.username);
+      for (const a of allAdmins()) await ctx.say(a, ctx.T(a).s30.pendingArrived(from.id, nameOf(from), from.username));
+      return true;
+    },
+
+    /**
+     * stage 30, closed beta: the first N strangers (VEDIT_TESTER_SLOTS, /admin → ⚙️ Лимиты) are let in on their first
+     * message with ⭐ VIP; the admins get «👤 Новый тестировщик …» with [🚫 Отозвать]. A revoked or ignored person is
+     * not let in again this way. Returns true when let in.
+     */
+    async autoAdmit(from: { id: number; username?: string; first_name?: string; last_name?: string }): Promise<boolean> {
+      if (!ctx.closedBeta) return false;
+      const t = db.getTester(from.id);
+      if (t?.revoked_at) return false;
+      try {
+        if ((JSON.parse(db.getKv(`stranger.${from.id}`) ?? "{}") as { state?: string }).state === "ignored") return false;
+      } catch {}
+      const slots = ctx.plan().testerSlots;
+      const used = db.testerSlotsUsed();
+      if (used >= slots) return false;
+      if (!db.getUser(from.id)) db.touchUser(from.id, { username: from.username, first_name: from.first_name }, { plan: "vip" });
+      setVip(from.id, true, 0);
+      db.addTester(from.id, "auto", from.username ?? null);
+      ctx.log(`тестировщик ${from.id} пущен автоматически (слот ${used + 1}/${slots})`);
+      for (const a of allAdmins()) await ctx.say(a, ctx.T(a).s30.testerNotice(from.id, nameOf(from), from.username ?? "", used + 1, slots), testerKb(ctx.T(a), from.id));
+      return true;
+    },
+
     /** a message or a button from someone outside the closed beta: the admins hear about it once */
     async stranger(from: { id: number; username?: string; first_name?: string; last_name?: string }) {
       const key = `stranger.${from.id}`;
@@ -133,8 +184,18 @@ export function adminHandlers(ctx: AdminCtx) {
       const L = ctx.T(uid);
       const m = /^(\S+)\s+(on|off|вкл|выкл)$/i.exec(arg.trim());
       const target = m ? targetOf(m[1]) : undefined;
+      const on = !!m && /^(on|вкл)$/i.test(m[2]);
+      // stage 30: an @username that never wrote — remembered; let in with VIP as soon as they write
+      if (m && target === undefined && /^@?[A-Za-z][A-Za-z0-9_]{3,31}$/.test(m[1]) && !/^\d+$/.test(m[1])) {
+        const name = m[1].replace(/^@/, "");
+        if (on) {
+          db.addPendingVip(name, uid);
+          ctx.log(`админ ${uid}: VIP ждёт @${name}`);
+          return void (await ctx.say(chatId, L.s30.vipPending(name.toLowerCase())));
+        }
+        if (db.removePendingVip(name)) return void (await ctx.say(chatId, L.s30.vipPendingRemoved(name.toLowerCase())));
+      }
       if (!m || target === undefined) return void (await ctx.say(chatId, m ? L.userNotFound(m[1]) : L.vipUsage));
-      const on = /^(on|вкл)$/i.test(m[2]);
       setVip(target, on, uid);
       await ctx.say(chatId, L.vipSet(target, on));
       if (on && target !== uid) await tellVip(target);
@@ -153,7 +214,8 @@ export function adminHandlers(ctx: AdminCtx) {
     },
 
     async menu(uid: number, chatId: number) {
-      await ctx.say(chatId, ctx.T(uid).adminMenu, adminKb(ctx.T(uid)));
+      const extra = testersText(uid);
+      await ctx.say(chatId, extra ? `${ctx.T(uid).adminMenu}\n\n${extra}` : ctx.T(uid).adminMenu, adminKb(ctx.T(uid)));
     },
 
     /** returns a toast text for answerCallbackQuery */
@@ -231,6 +293,17 @@ export function adminHandlers(ctx: AdminCtx) {
           setVip(target, true, uid);
           if (msgId) await ctx.edit(chatId, msgId, L.strangerLet(target));
           await tellVip(target);
+          return;
+        }
+        case "rv": {
+          // stage 30: «🚫 Отозвать» on a new tester's notice — out of the allowlist, back to free, the slot is free again
+          const target = Number(a);
+          if (!Number.isSafeInteger(target) || target <= 0 || ctx.envAdmins.has(target)) return "✖";
+          db.revokeTester(target, uid);
+          db.disallow(target);
+          if (db.getUser(target)) db.updateUser(target, { plan: "free" });
+          ctx.log(`админ ${uid}: доступ тестировщика ${target} отозван`);
+          if (msgId) await ctx.edit(chatId, msgId, L.s30.testerRevoked(target));
           return;
         }
         case "adm": {

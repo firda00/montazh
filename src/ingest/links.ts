@@ -21,7 +21,8 @@ export interface LinkInfo {
   id?: string;
 }
 
-export type LinkErrorCode = "too_big" | "not_video" | "private" | "folder" | "no_ytdlp" | "http" | "timeout" | "cancelled" | "empty";
+/** login: a platform (YouTube / Instagram / TikTok…) wants a signed-in account — we never use anyone's cookies or login */
+export type LinkErrorCode = "too_big" | "not_video" | "private" | "login" | "folder" | "no_ytdlp" | "http" | "timeout" | "cancelled" | "empty";
 export class LinkError extends Error {
   constructor(
     readonly code: LinkErrorCode,
@@ -92,11 +93,23 @@ export function linkMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
 /** stable file name base of a link (the same link twice is downloaded once) */
 export const linkKey = (url: string) => `link_${createHash("sha1").update(url.trim()).digest("hex").slice(0, 16)}`;
 
+/** what the platform says about a video (yt-dlp): for the credit line of a delivered result */
+export interface LinkMeta {
+  title?: string;
+  channel?: string;
+  url?: string;
+  license?: string;
+  duration?: number;
+  extractor?: string;
+}
+
 export interface LinkFile {
   file: string;
   bytes: number;
   /** the name the server or the folder gave it */
   name?: string;
+  /** platform links: title / channel / page (yt-dlp) */
+  meta?: LinkMeta;
 }
 
 export interface DownloadLinkOptions {
@@ -114,8 +127,8 @@ export interface DownloadLinkOptions {
   maxFiles?: number;
   // ── test hooks ──
   fetch?: typeof fetch;
-  /** yt-dlp → the downloaded files (default: the VEDIT_YTDLP / yt-dlp binary) */
-  ytdlp?: (url: string, dir: string, maxBytes: number, signal: AbortSignal) => Promise<string[]>;
+  /** yt-dlp → the downloaded files, with the video's title / channel when known (default: the VEDIT_YTDLP / yt-dlp binary) */
+  ytdlp?: (url: string, dir: string, maxBytes: number, signal: AbortSignal) => Promise<string[] | YtDlpResult>;
   /** does the file hold a video stream (default ffprobe) */
   probe?: (file: string) => Promise<boolean>;
   log?: (line: string) => void;
@@ -409,7 +422,9 @@ async function viaYtDlp(url: string, ctx: Ctx): Promise<LinkFile[]> {
   await fs.mkdir(work, { recursive: true });
   const timer = ctx.onProgress ? setInterval(() => void dirBytes(work).then((b) => b && ctx.onProgress!(b)), ctx.progressMs ?? 2000) : undefined;
   try {
-    const got = await (ctx.ytdlp ?? ytDlp)(url, work, ctx.maxBytes, ctx.signal);
+    const res = await (ctx.ytdlp ?? ytDlp)(url, work, ctx.maxBytes, ctx.signal);
+    const got = Array.isArray(res) ? res : res.files;
+    const meta = Array.isArray(res) ? undefined : res.meta;
     if (!got.length) throw new LinkError("empty", "yt-dlp ничего не скачал");
     const out: LinkFile[] = [];
     for (const [i, f] of got.entries()) {
@@ -417,7 +432,7 @@ async function viaYtDlp(url: string, ctx: Ctx): Promise<LinkFile[]> {
       if (bytes > ctx.maxBytes) throw new LinkError("too_big", `видео ${Math.round(bytes / MB)} МБ`, bytes);
       const dest = path.join(ctx.dir, `${got.length > 1 ? `${ctx.base}_${i + 1}` : ctx.base}${path.extname(f) || ".mp4"}`);
       await fs.rename(f, dest);
-      out.push({ file: dest, bytes, name: path.basename(f) });
+      out.push({ file: dest, bytes, name: path.basename(f), ...(meta ? { meta: { ...meta, url: meta.url ?? url } } : {}) });
     }
     return out;
   } finally {
@@ -429,36 +444,77 @@ async function viaYtDlp(url: string, ctx: Ctx): Promise<LinkFile[]> {
 /** the yt-dlp binary: VEDIT_YTDLP or `yt-dlp` in PATH (optional; Unlicense) */
 export const ytdlpBin = (env: NodeJS.ProcessEnv = process.env) => env.VEDIT_YTDLP?.trim() || "yt-dlp";
 
+export interface YtDlpResult {
+  files: string[];
+  meta?: LinkMeta;
+}
+
+/** yt-dlp's JSON line (`--print after_move:%(.{…})j`) → LinkMeta */
+export function parseYtDlpMeta(line: string): LinkMeta | undefined {
+  try {
+    const j = JSON.parse(line) as Record<string, unknown>;
+    const str = (k: string) => (typeof j[k] === "string" && (j[k] as string).trim() ? (j[k] as string).trim() : undefined);
+    const meta: LinkMeta = { title: str("title"), channel: str("channel") ?? str("uploader"), url: str("webpage_url"), license: str("license"), extractor: str("extractor"), duration: typeof j.duration === "number" ? j.duration : undefined };
+    return Object.values(meta).some((v) => v !== undefined) ? meta : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The yt-dlp arguments. Public content only: no cookies (neither a file nor a browser's), no netrc login, no user
+ * config file that could add them — a video that needs an account is refused (LinkError "login"), never fetched
+ * with someone's session. No DRM circumvention (yt-dlp refuses DRM by itself; we add nothing that would not).
+ */
+export function ytDlpArgs(url: string, dir: string, maxBytes: number): string[] {
+  // a 2-hour 1080p podcast can be over the cap: the format that fits wins (the size is often an estimate), and
+  // the sort prefers 1080 on the short side (a 1080×1920 short, a 1920×1080 podcast) over 1440p/4K
+  const fit = Math.max(1, Math.floor((maxBytes * 0.9) / MB));
+  return [
+    "--ignore-config", "--no-cookies", "--no-cookies-from-browser",
+    "--no-playlist", "--no-progress", "--no-warnings", "--restrict-filenames", "--no-part",
+    "-S", "res:1080",
+    "-f", `bv*[filesize_approx<?${fit}M]+ba/b[filesize_approx<?${fit}M]/bv*+ba/b`,
+    "--merge-output-format", "mp4",
+    "--max-filesize", `${Math.ceil(maxBytes / MB)}M`,
+    "--socket-timeout", "30",
+    "-o", path.join(dir, "%(id).60s.%(ext)s"),
+    "--print", "after_move:%(.{title,channel,uploader,webpage_url,license,duration,extractor})j",
+    "--print", "after_move:filepath",
+    url,
+  ];
+}
+
 /** yt-dlp → files in `dir`: best ≤ 1920 px video + audio merged into MP4, one video (no playlists), size-capped */
-export async function ytDlp(url: string, dir: string, maxBytes: number, signal: AbortSignal): Promise<string[]> {
+export async function ytDlp(url: string, dir: string, maxBytes: number, signal: AbortSignal): Promise<YtDlpResult> {
   const bin = ytdlpBin();
   let out: { stdout: string; stderr: string };
   try {
-    out = await withJobSignal(signal, () =>
-      runProcess(bin, [
-        "--no-playlist", "--no-progress", "--no-warnings", "--restrict-filenames", "--no-part",
-        "-f", "bv*[height<=1920]+ba/b[height<=1920]/bv*+ba/b",
-        "--merge-output-format", "mp4",
-        "--max-filesize", `${Math.ceil(maxBytes / MB)}M`,
-        "--socket-timeout", "30",
-        "-o", path.join(dir, "%(id).60s.%(ext)s"),
-        "--print", "after_move:filepath",
-        url,
-      ]),
-    );
+    out = await withJobSignal(signal, () => runProcess(bin, ytDlpArgs(url, dir, maxBytes)));
   } catch (err) {
     if (signal.aborted) throw err;
     const msg = err instanceof Error ? err.message : String(err);
+    const last = msg.split("\n").slice(-1)[0].slice(0, 200);
     if (/failed to start/i.test(msg)) throw new LinkError("no_ytdlp", `yt-dlp не найден (${bin})`);
-    if (/login|sign in|private|cookies|rate-limit|confirm you.?re not a bot/i.test(msg)) throw new LinkError("private", `сайт требует вход: ${msg.split("\n").slice(-1)[0].slice(0, 200)}`);
+    if (/DRM/i.test(msg)) throw new LinkError("private", "видео защищено DRM — такие не скачиваем");
+    if (/login|log in|sign in|cookies|members-only|confirm you.?re not a bot|age.?restricted|inappropriate for some users/i.test(msg)) throw new LinkError("login", `сайт требует вход: ${last}`);
+    if (/private|rate-limit/i.test(msg)) throw new LinkError("private", `видео закрыто: ${last}`);
     if (/Unsupported URL/i.test(msg)) throw new LinkError("not_video", "на странице нет видео, которое можно скачать");
     throw new LinkError("http", `yt-dlp: ${msg.split("\n").slice(-2).join(" ").slice(0, 300)}`);
   }
   if (/larger than max-filesize|File is larger/i.test(out.stdout + out.stderr)) throw new LinkError("too_big", `видео больше ${Math.round(maxBytes / MB)} МБ`);
-  const files = out.stdout.trim().split(/\r?\n/).filter(Boolean);
+  let meta: LinkMeta | undefined;
   const real: string[] = [];
-  for (const f of files) if (await fs.stat(f).then(() => true, () => false)) real.push(f);
-  return real;
+  for (const raw of out.stdout.trim().split(/\r?\n/)) {
+    const l = raw.trim();
+    if (!l) continue;
+    if (l.startsWith("{")) {
+      meta ??= parseYtDlpMeta(l);
+      continue;
+    }
+    if (await fs.stat(l).then(() => true, () => false)) real.push(l);
+  }
+  return { files: real, meta };
 }
 
 /** is yt-dlp callable (for messages: links to platforms work or not) */

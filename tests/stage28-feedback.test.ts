@@ -62,7 +62,7 @@ async function runOnce(tg: ReturnType<typeof fakeTelegram>, bot: Awaited<ReturnT
 
 test("migration 3: outputs, feedback (one record per job/output/user, editable), self_review", async () => {
   const db = new BotDb(path.join(await tmp(), "vedit.db"));
-  assert.deepEqual(db.migrations(), [1, 2, 3, 4]);
+  assert.deepEqual(db.migrations(), [1, 2, 3, 4, 5]);
   db.putOutputs("j1", [{ id: "reel_1", file: "a.mp4", duration: 31.5, aspect: "9:16" }]);
   db.putOutputs("j1", [{ id: "reel_1", file: "b.mp4", duration: 30 }]);
   assert.deepEqual(
@@ -81,7 +81,7 @@ test("migration 3: outputs, feedback (one record per job/output/user, editable),
   assert.equal(db.selfReviewByHash("abc")?.overall, 4);
   db.close();
   const again = new BotDb(db.file);
-  assert.deepEqual(again.migrations(), [1, 2, 3, 4]);
+  assert.deepEqual(again.migrations(), [1, 2, 3, 4, 5]);
   assert.equal(again.feedbackSince().length, 1);
   again.close();
 });

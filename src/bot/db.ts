@@ -12,7 +12,7 @@ export const isLang = (s: unknown): s is Lang => s === "ru" || s === "uz" || s =
 
 /** onboarding steps: language → purpose (after the intro) → terms → done */
 export type OnboardingStep = "lang" | "purpose" | "terms" | "done";
-export type JobKind = "run" | "make" | "revise" | "avatar" | "avatar_import";
+export type JobKind = "run" | "make" | "revise" | "avatar" | "avatar_import" | "dub";
 export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
 
 export interface UserRow {
@@ -253,7 +253,76 @@ const MIGRATIONS: string[] = [
     created_at TEXT NOT NULL
   );
   `,
+  // 5: stage 30 — testers let in automatically (slots) or by a pending @username; rights confirmations for
+  // third-party links; the takedown blocklist of URLs; what a platform said about a downloaded video (credit line)
+  `
+  CREATE TABLE testers (
+    tg_id INTEGER PRIMARY KEY,
+    via TEXT NOT NULL CHECK (via IN ('auto','pending')),
+    username TEXT,
+    added_at TEXT NOT NULL,
+    revoked_at TEXT,
+    revoked_by INTEGER
+  );
+  CREATE TABLE pending_vip (
+    username TEXT PRIMARY KEY,
+    added_by INTEGER,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE rights (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    url_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX rights_user_hash ON rights (user, url_hash);
+  CREATE TABLE url_blocklist (
+    url_hash TEXT PRIMARY KEY,
+    url TEXT,
+    job TEXT,
+    reason TEXT,
+    by INTEGER,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE link_meta (
+    url_hash TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    title TEXT,
+    channel TEXT,
+    license TEXT,
+    created_at TEXT NOT NULL
+  );
+  `,
 ];
+
+export interface TesterRow {
+  tg_id: number;
+  /** auto: a free slot on /start; pending: an @username the admin made VIP before they wrote */
+  via: "auto" | "pending";
+  username: string | null;
+  added_at: string;
+  revoked_at: string | null;
+  revoked_by: number | null;
+}
+
+export interface LinkMetaRow {
+  url_hash: string;
+  url: string;
+  title: string | null;
+  channel: string | null;
+  license: string | null;
+  created_at: string;
+}
+
+export interface BlockedRow {
+  url_hash: string;
+  url: string | null;
+  job: string | null;
+  reason: string | null;
+  by: number | null;
+  created_at: string;
+}
 
 type Param = string | number | null;
 const nowIso = () => new Date().toISOString();
@@ -533,6 +602,85 @@ export class BotDb {
 
   allowedIds(): number[] {
     return this.all<{ tg_id: number }>("SELECT tg_id FROM allowlist ORDER BY tg_id").map((r) => r.tg_id);
+  }
+
+  // ── stage 30: testers (auto slots, pending @usernames) ───────────────────────
+
+  getTester(id: number): TesterRow | undefined {
+    return this.get<TesterRow>("SELECT * FROM testers WHERE tg_id = ?", id);
+  }
+
+  addTester(id: number, via: TesterRow["via"], username?: string | null) {
+    this.run("INSERT INTO testers (tg_id, via, username, added_at) VALUES (?, ?, ?, ?) ON CONFLICT(tg_id) DO UPDATE SET via = excluded.via, username = excluded.username, added_at = excluded.added_at, revoked_at = NULL, revoked_by = NULL", id, via, username ?? null, nowIso());
+  }
+
+  revokeTester(id: number, by?: number) {
+    this.run("UPDATE testers SET revoked_at = ?, revoked_by = ? WHERE tg_id = ? AND revoked_at IS NULL", nowIso(), by ?? null, id);
+  }
+
+  /** auto slots in use: testers let in by a free slot and not revoked (pending @usernames do not take one) */
+  testerSlotsUsed(): number {
+    return this.get<{ n: number }>("SELECT COUNT(*) AS n FROM testers WHERE via = 'auto' AND revoked_at IS NULL")?.n ?? 0;
+  }
+
+  activeTesters(): TesterRow[] {
+    return this.all<TesterRow>("SELECT * FROM testers WHERE revoked_at IS NULL ORDER BY added_at");
+  }
+
+  addPendingVip(username: string, by?: number) {
+    this.run("INSERT INTO pending_vip (username, added_by, created_at) VALUES (lower(?), ?, ?) ON CONFLICT(username) DO NOTHING", username.replace(/^@/, ""), by ?? null, nowIso());
+  }
+
+  /** true when there was such a pending username */
+  removePendingVip(username: string): boolean {
+    return Number(this.run("DELETE FROM pending_vip WHERE username = lower(?)", username.replace(/^@/, "")).changes) > 0;
+  }
+
+  hasPendingVip(username: string): boolean {
+    return !!this.get<{ username: string }>("SELECT username FROM pending_vip WHERE username = lower(?)", username.replace(/^@/, ""));
+  }
+
+  pendingVips(): string[] {
+    return this.all<{ username: string }>("SELECT username FROM pending_vip ORDER BY created_at").map((r) => r.username);
+  }
+
+  // ── stage 30: compliance (rights confirmations, takedown blocklist, link credits) ──
+
+  confirmRights(user: number, url: string, urlHash: string) {
+    this.run("INSERT INTO rights (user, url, url_hash, created_at) VALUES (?, ?, ?, ?)", user, url, urlHash, nowIso());
+  }
+
+  hasRights(user: number, urlHash: string): boolean {
+    return !!this.get<{ id: number }>("SELECT id FROM rights WHERE user = ? AND url_hash = ? LIMIT 1", user, urlHash);
+  }
+
+  rightsOf(user: number): { url: string; url_hash: string; created_at: string }[] {
+    return this.all("SELECT url, url_hash, created_at FROM rights WHERE user = ? ORDER BY id", user);
+  }
+
+  blockUrl(row: { url_hash: string; url?: string | null; job?: string | null; reason?: string | null; by?: number | null }) {
+    this.run("INSERT INTO url_blocklist (url_hash, url, job, reason, by, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(url_hash) DO UPDATE SET job = COALESCE(excluded.job, job), reason = COALESCE(excluded.reason, reason)", row.url_hash, row.url ?? null, row.job ?? null, row.reason ?? null, row.by ?? null, nowIso());
+  }
+
+  isBlocked(urlHash: string): boolean {
+    return !!this.get<{ url_hash: string }>("SELECT url_hash FROM url_blocklist WHERE url_hash = ?", urlHash);
+  }
+
+  blockedUrls(): BlockedRow[] {
+    return this.all<BlockedRow>("SELECT * FROM url_blocklist ORDER BY created_at DESC");
+  }
+
+  putLinkMeta(row: { url_hash: string; url: string; title?: string | null; channel?: string | null; license?: string | null }) {
+    this.run("INSERT INTO link_meta (url_hash, url, title, channel, license, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(url_hash) DO UPDATE SET title = COALESCE(excluded.title, title), channel = COALESCE(excluded.channel, channel), license = COALESCE(excluded.license, license)", row.url_hash, row.url, row.title ?? null, row.channel ?? null, row.license ?? null, nowIso());
+  }
+
+  /** jobs made from a link (its hash is in the payload's `links`) */
+  jobsByLink(urlHash: string): JobRow[] {
+    return this.all<JobRow>("SELECT * FROM jobs WHERE instr(payload, ?) > 0 ORDER BY created_at", `"hash":"${urlHash}"`);
+  }
+
+  linkMeta(urlHash: string): LinkMetaRow | undefined {
+    return this.get<LinkMetaRow>("SELECT * FROM link_meta WHERE url_hash = ?", urlHash);
   }
 
   // ── stage 28: outputs, feedback, self-review ─────────────────────────────────

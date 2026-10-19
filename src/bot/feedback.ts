@@ -63,7 +63,7 @@ const payloadOf = (job: Pick<JobRow, "payload">): Record<string, unknown> => {
 const str = (p: Record<string, unknown>, k: string) => (typeof p[k] === "string" && p[k] ? (p[k] as string) : undefined);
 
 
-/** montage | highlights | reference | make | revise | avatar */
+/** montage | highlights | reference | make | revise | dub | avatar */
 export function feedbackKind(job: Pick<JobRow, "kind" | "class" | "payload">): string {
   const p = payloadOf(job);
   switch (job.kind) {
@@ -75,6 +75,8 @@ export function feedbackKind(job: Pick<JobRow, "kind" | "class" | "payload">): s
       return "make";
     case "revise":
       return "revise";
+    case "dub":
+      return "dub";
     default:
       return "avatar";
   }

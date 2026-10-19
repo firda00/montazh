@@ -767,6 +767,46 @@ program
     }
   });
 
+program
+  .command("dub")
+  .description("этап 30: перевод и озвучка (закадровый перевод) — видео/подкаст или готовые ролики задачи; метка «Неофициальный перевод»")
+  .argument("<target>", "id задачи (озвучит её готовые ролики output_*.mp4; --full — исходное видео) или путь к видео")
+  .option("--lang <code>", "язык перевода: ru | uz | en", "ru")
+  .option("--voice <id>", "голос (vedit voices): gemini_charon, gemini_kore… или auto — Gemini при ключе Google, иначе Piper языка", "auto")
+  .option("--mode <m>", "voiceover — оригинал тише на −18 дБ под переводом (как на ТВ); replace — оригинал тихим фоном везде", "voiceover")
+  .option("--full", "для задачи: озвучить исходное видео целиком, а не готовые ролики")
+  .option("--out <file>", "куда записать результат (по умолчанию в папку задачи)")
+  .option("--no-captions", "без субтитров на языке перевода (по умолчанию — дорожка субтитров + .srt)")
+  .option("--batch <n>", "фраз на один запрос TTS (по умолчанию VEDIT_DUB_BATCH или 12)", (v) => Number(v))
+  .option("--max-speed <x>", "максимальное ускорение фразы (по умолчанию 1.25)", (v) => Number(v))
+  .action(async (target: string, opts: { lang: string; voice: string; mode: string; full?: boolean; out?: string; captions: boolean; batch?: number; maxSpeed?: number }) => {
+    try {
+      const { dubVideo, dubJobOutputs, isDubLang, dubSummary } = await import("./dub/index.ts");
+      if (!isDubLang(opts.lang)) throw new Error("--lang: ожидается ru | uz | en");
+      if (opts.mode !== "voiceover" && opts.mode !== "replace") throw new Error("--mode: ожидается voiceover | replace");
+      if (opts.maxSpeed !== undefined && !(opts.maxSpeed >= 1 && opts.maxSpeed <= 2)) throw new Error("--max-speed: ожидается 1–2");
+      const common = { lang: opts.lang, voice: opts.voice, mode: opts.mode as "voiceover" | "replace", captions: opts.captions, batch: opts.batch, maxSpeed: opts.maxSpeed, onEvent: (l: string) => console.log(l) };
+      const isJob = /^[\w-]+$/.test(target) && (await exists(path.join(jobDir(target), "job.json")));
+      let results;
+      if (isJob && !opts.full) results = await dubJobOutputs(target, common);
+      else if (isJob) {
+        const media = await readJson(path.join(jobDir(target), "media.json"), MediaSchema);
+        results = [await dubVideo(media.source_path, { ...common, jobId: target, out: opts.out })];
+      } else {
+        if (!(await exists(target))) throw new Error(`нет такого файла или задачи: ${target}`);
+        results = [await dubVideo(target, { ...common, out: opts.out })];
+      }
+      for (const r of results) {
+        console.log(`\n✔ ${r.out}${r.srt ? `\n  субтитры: ${r.srt}` : ""}`);
+        console.log(`  ${dubSummary(r.report)}`);
+        console.log(`  голос ${r.report.voice} (${r.report.engine}${r.report.models.length ? ` ${r.report.models.join(", ")}` : ""}), запросов TTS ${r.report.tts.requests}, речи ${r.report.speech_seconds.toFixed(0)} с из ${r.report.duration.toFixed(0)} с`);
+        for (const w of r.report.warnings) console.log(`  ⚠ ${w}`);
+      }
+    } catch (err) {
+      fail(err);
+    }
+  });
+
 const avatar = program.command("avatar").description("говорящий аватар: текст/тема → avatar_job.zip → Colab (Chatterbox + JoyVASA) → avatar_result.zip → монтаж");
 
 avatar

@@ -1,16 +1,21 @@
 # Terms of Use (draft)
 
-> DRAFT for legal review. Not the final version. Date: 16 Oct 2026.
+> DRAFT for legal review. Not the final version. Date: 19 Oct 2026 (stage 30: links to other people's videos, translation and voice-over, rights holders' complaints).
 
-1. **Service.** The vedit Telegram bot uses AI to edit short clips from users’ videos, make videos on a topic, cut game highlights and create talking avatars.
+1. **Service.** The vedit Telegram bot uses AI to edit short clips from users’ videos, make videos on a topic, cut game highlights, create talking avatars and make translated voice-overs (“Russian version”). It is currently a **non-commercial beta**: access is limited, and the service may change or be interrupted.
 2. **Sign-up.** By using the bot you confirm you are at least 16 (or have parental consent) and accept these Terms and the Privacy Policy.
-3. **Your content.** You keep all rights to the videos, photos, voice recordings and finished clips. You grant the service the right to process them only to perform your tasks.
-4. **Not allowed:** illegal content, violence against people or animals, sexual content involving minors, other people’s videos, photos or voices without their owners’ permission, and using avatars to deceive (impersonating someone).
-5. **AI.** Results are generated automatically and may contain mistakes. Check facts and captions before publishing. Photos and music come from open sources (CC0, CC BY) — the attribution comes with the clip and must be kept when publishing if the license requires it.
-6. **Limits and credits.** The free plan is limited to a number of jobs per day. Credits give extra jobs; they are not money, are non-refundable and non-transferable. Payments will come later — their terms will be published separately.
-7. **Storage.** Uploaded files and finished clips are deleted automatically after 7 days (the period may change — you will be notified). Keep the clips you need.
-8. **Suspension.** We may restrict access for breaking these Terms or abusing the service.
-9. **Liability.** The service is provided “as is”, without guarantees of uninterrupted operation. We are not responsible for how you use the finished clips.
-10. **Changes.** The Terms may change; the current version is always available in the bot. By continuing to use the bot you accept the new version.
+3. **Your content and your warranty.** You keep all rights to the videos, photos, voice recordings and finished clips. You grant the service the right to process them only to perform your tasks. By sending a file or a link **you warrant** that you hold the rights to it or use it for a purpose permitted by law (review, criticism, quotation, education), and you are responsible for that.
+4. **Other people’s videos by link** (YouTube, TikTok, Instagram, VK and other platforms, including films, podcasts and interviews). Before processing such a link the bot asks you to confirm: “I confirm that I have the rights to this video or use it for a permitted purpose (review, quotation, education).” The confirmation is stored (who, which link, when). We download **publicly available** videos only: we never use anyone’s login, cookies or account; if a platform requires signing in, the bot refuses and asks for the file. We do not circumvent copy protection (DRM) and do not remove watermarks. Results made from someone else’s video carry a source line (title, channel, link) — keep it when publishing.
+5. **“Edit like the example”.** The example video is analysed as a style sample only (pace, captions, zooms, sound). The example itself never goes into your video.
+6. **Translation and voice-over.** Translations are automatic and marked “Unofficial translation”. The voice is a synthetic voice from the service’s catalogue; **we never clone third parties’ voices** (including the author of the translated video). Do not present such a translation as official.
+7. **Not allowed:** illegal content, violence against people or animals, sexual content involving minors, other people’s videos, photos or voices without the right to use them, using avatars or voice-overs to deceive (impersonating someone), attempts to circumvent platforms’ restrictions.
+8. **We do not publish or host your content.** Finished clips are sent only to you in your private Telegram chat. You publish them yourself and are responsible for following the platforms’ rules and third parties’ rights.
+9. **Rights holders’ complaints (takedown).** If you believe material infringes your rights, write to the bot administrator (or to [complaints e-mail — to be filled in]) with the link to the original video and/or the job number. Within 72 hours we delete that job’s files and block the link: the bot will never download anything from it again. Users who repeatedly infringe rights are blocked.
+10. **AI.** Results are generated automatically and may contain mistakes. Check facts, translations and captions before publishing. Photos and music come from open sources (CC0, CC BY) — the attribution comes with the clip and must be kept when publishing if the license requires it.
+11. **Limits and credits.** The free plan is limited to a number of jobs per day; beta testers may have no limits. Credits give extra jobs; they are not money, are non-refundable and non-transferable. Payments will come later — their terms will be published separately.
+12. **Storage.** Uploaded and link-downloaded files and finished clips are deleted automatically after 7 days (the period may change — you will be notified). Keep the clips you need.
+13. **Suspension.** We may restrict access for breaking these Terms or abusing the service.
+14. **Liability.** The service is provided “as is”, without guarantees of uninterrupted operation. We are not responsible for how you use the finished clips.
+15. **Changes.** The Terms may change; the current version is always available in the bot. By continuing to use the bot you accept the new version.
 
-Contact: through the bot administrator.
+Contact: through the bot administrator; rights holders’ complaints — see section 9.

@@ -14,15 +14,15 @@ export const SPEECH_FALLBACK_INSTRUCTION =
 
 // same hints as src/cli.ts (cli.ts runs commander on import, so the table is duplicated here)
 export const HINTS: Partial<Record<PlanError["code"], string>> = {
-  no_backend: "варианты: ANTHROPIC_API_KEY в .env (бэкенд api) · `claude /login` (бэкенд agent по подписке) · готовый план: vedit cut <job> --edl <file>",
-  auth: "проверьте ключ/вход: ANTHROPIC_API_KEY в .env или `claude /login`",
+  no_backend: "варианты: GEMINI_API_KEY в .env (бэкенд gemini, достаточно его одного) · ANTHROPIC_API_KEY (бэкенд api) · `claude /login` (бэкенд agent по подписке) · готовый план: vedit cut <job> --edl <file>",
+  auth: "проверьте ключ/вход: ANTHROPIC_API_KEY / GEMINI_API_KEY в .env или `claude /login`",
   refusal: "модель отказалась; переформулируйте инструкцию или выберите другой фрагмент",
   budget: "поднимите лимит: --budget <usd> (по умолчанию 1.50) или упростите инструкцию",
   invalid: "если модель вернула черновик, он сохранён как edl.draft.json — исправьте вручную и запустите vedit cut <job> --edl <file>; иначе уточните инструкцию",
   loop: "лимит запросов исчерпан; попробуйте --effort high или более конкретную инструкцию",
   nothing_to_plan: "запустите понимание видео: vedit understand <job> (или уберите --skip-understand)",
   missing_inputs: "сначала vedit run <video> или vedit ingest + vedit understand",
-  model: "проверьте --model (по умолчанию claude-opus-5-5) и доступ организации к модели",
+  model: "проверьте --model (по умолчанию claude-opus-5-5; для gemini — VEDIT_GEMINI_PLANNER_MODEL, по умолчанию gemini-3.8-flash) и доступ к модели",
 };
 
 // ── pipeline contract (the real one is runFullPipeline/runRevisePipeline; tests inject fakes) ──
@@ -47,6 +47,8 @@ export interface PipelineResult {
   failed?: { id: string; error: string }[];
   reasoning?: string;
   notes?: string[];
+  /** stage 30: «📎 Источник: …» of a video from someone else's platform, shown in the delivered message */
+  credit?: string;
 }
 export interface PipelineArgs {
   source: string;
@@ -432,4 +434,86 @@ ${credits}` : ""}` };
 export const excerpt = (s: string, n: number) => {
   const flat = s.replace(/\s+/g, " ").trim();
   return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat;
+};
+
+// ── stage 30: dubbing («🌐 Русская версия») and an avatar from someone else's video ──
+
+export interface DubArgs {
+  /** the video to dub (an upload or a downloaded link) */
+  source: string;
+  lang: string;
+  voice?: string;
+  mode?: "voiceover" | "replace";
+  progress: (text: string) => Promise<void>;
+  onJob: (jobId: string) => void;
+  signal: AbortSignal;
+  log: (line: string) => void;
+}
+export type DubFn = (args: DubArgs) => Promise<PipelineResult>;
+
+export interface DubOutputsArgs {
+  jobId: string;
+  outputs: PipelineOutput[];
+  lang: string;
+  voice?: string;
+  progress: (text: string) => Promise<void>;
+  signal: AbortSignal;
+  log: (line: string) => void;
+}
+/** dubs the reels of a finished montage: their dubbed copies + a summary line */
+export type DubOutputsFn = (args: DubOutputsArgs) => Promise<{ outputs: PipelineOutput[]; summary: string; notes: string[] }>;
+
+export interface AvatarFromVideoArgs extends Omit<AvatarExportArgs, "input"> {
+  /** the video whose speech becomes the (retold) script */
+  video: string;
+}
+export type AvatarFromVideoFn = (args: AvatarFromVideoArgs) => Promise<PipelineResult>;
+
+const dubEvents = (progress: (t: string) => Promise<void>, log: (l: string) => void, onJob?: (id: string) => void) => (l: string) => {
+  if (/^job /.test(l)) onJob?.(l.slice(4).trim());
+  else if (/^▸/.test(l)) void progress(l);
+  else log(`  ${l.trim()}`);
+};
+
+/** A whole video → its dubbed copy (voice-over), captions as a soft track and an .srt document. */
+export const runDubPipeline: DubFn = async ({ source, lang, voice, mode, progress, onJob, signal, log }) => {
+  const { dubVideo, dubSummary } = await import("../dub/index.ts");
+  const r = await dubVideo(source, { lang, voice, mode, signal, onEvent: dubEvents(progress, log, onJob) });
+  return {
+    jobId: r.jobId,
+    title: `${path.basename(source).replace(/\.[^.]+$/, "")}_${lang}`,
+    outputs: [{ id: `dub_${lang}`, file: r.out, duration: r.report.duration }],
+    documents: r.srt ? [{ file: r.srt, caption: `${r.report.label} · субтитры ${lang}` }] : [],
+    reasoning: dubSummary(r.report),
+    notes: r.report.warnings.slice(0, 3),
+  };
+};
+
+/** The reels of a montage → output_<id>_<lang>.mp4 each (phrases from the plan, the captions' translation cache shared). */
+export const runDubOutputs: DubOutputsFn = async ({ jobId, outputs, lang, voice, progress, signal, log }) => {
+  const { dubJobOutputs, dubSummary } = await import("../dub/index.ts");
+  const rs = await dubJobOutputs(jobId, { lang, voice, signal, outputs: outputs.map((o) => ({ id: o.id, file: o.file })), onEvent: dubEvents(progress, log) });
+  return {
+    outputs: rs.map((r, k) => ({ id: `${outputs[k].id}_${lang}`, file: r.out, duration: outputs[k].duration, aspect: outputs[k].aspect })),
+    summary: rs.length ? dubSummary(rs[0].report) : "",
+    notes: rs.flatMap((r) => r.report.warnings).slice(0, 3),
+  };
+};
+
+/** Someone else's video → its speech → retold in our own words (never copied verbatim) → an avatar bundle. */
+export const runAvatarFromVideo: AvatarFromVideoFn = async (a) => {
+  const fs = await import("node:fs/promises");
+  const { createHash } = await import("node:crypto");
+  const { ffprobe } = await import("../lib/ffmpeg.ts");
+  const { defaultAsr } = await import("../dub/index.ts");
+  const dir = path.join(a.sourceLabel, "from_video", createHash("sha1").update(a.video).digest("hex").slice(0, 12));
+  await fs.mkdir(dir, { recursive: true });
+  await a.progress("▸ анализ речи видео…");
+  const duration = Number((await ffprobe(a.video)).format.duration ?? 0);
+  const t = await defaultAsr(a.video, dir, duration, { onEvent: (l) => a.log(`  ${l}`) });
+  checkCancel(a.signal);
+  const said = t.segments.map((s) => s.text.trim()).filter(Boolean).join(" ");
+  if (said.length < 20) throw new Error("в видео не нашлось речи для сценария");
+  const input = `тема: Перескажи своими словами главную мысль этого видео для короткого ролика — не дословно, без длинных цитат, от своего лица: «${excerpt(said, 3500)}»`;
+  return runAvatarExport({ ...a, input });
 };

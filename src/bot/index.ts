@@ -15,6 +15,8 @@ import { PlanError } from "../plan/backend/types.ts";
 import { CostSchema } from "../schemas/index.ts";
 import { getVoice, isCloud, NO_VOICE, piperVoiceFor, sampleVoiceFor, type VoiceDef } from "../voice/catalog.ts";
 import { downloadLink, findLinks, LinkError, linkKey, linkMaxBytes, textWithoutLinks, type DownloadLinkOptions } from "../ingest/links.ts";
+import { creditLine, needsRights, takedown, urlHash } from "./compliance.ts";
+import { isDubLang, unofficialLabel } from "../dub/index.ts";
 import { isFileTooBig, makeBotApi, TelegramError, type BotApi, type CallMethod, type DownloadFn, type InlineKeyboard, type Limits, type ReplyMarkup, type TgCallbackQuery, type TgMessage, type TgUpdate, type TgUser } from "./telegram-api.ts";
 import { BotDb, isLang, type FeedbackRow, type JobKind, type JobRow, type Lang, type OutputRow, type UserRow } from "./db.ts";
 import { hasGoogleTtsKey, menuAction, STRINGS, t, voiceLabel, type MenuAction, type SendMode, type Strings } from "./i18n.ts";
@@ -31,6 +33,7 @@ import { GUIDE_ACTIONS, GUIDE_DIR, guideCard, guideImageName, renderGuideImage }
 import { dailyBudgetUsdFromEnv, dayStart, freePlanFromEnv, maxJobsFromEnv, retentionDaysFromEnv, tzOffsetFromEnv, userDailyJobsFromEnv, type JobClass, type PlanLimits } from "./plans.ts";
 import {
   cancelKb,
+  dubKb,
   langKb,
   mainMenu,
   makeKb,
@@ -39,12 +42,14 @@ import {
   purposeKb,
   resultKb,
   retryKb,
+  rightsKb,
   settingsKb,
   STYLE_PRESET,
   termsKb,
   voicesKb,
   byteLength,
   CALLBACK_LIMIT,
+  type DubDraft,
   type MakeDraft,
   type MontageDraft,
   type MontageMode,
@@ -54,12 +59,18 @@ import {
   excerpt,
   HINTS,
   runAvatarExport,
+  runAvatarFromVideo,
   runAvatarImport,
+  runDubOutputs,
+  runDubPipeline,
   runFullPipeline,
   runMakePipeline,
   runRevisePipeline,
   type AvatarExportFn,
+  type AvatarFromVideoFn,
   type AvatarImportFn,
+  type DubFn,
+  type DubOutputsFn,
   type MakeFn,
   type PipelineFn,
   type PipelineOutput,
@@ -98,7 +109,7 @@ export const SessionSchema = z.object({
   awaiting: z.string().optional(),
   /** the mode chosen in the menu before uploading (🏀 → hl) */
   intent: z.enum(["reels", "viral", "hl", "pp"]).optional(),
-  draft: z.object({ mode: z.enum(["reels", "viral", "hl", "pp"]), count: z.number(), seconds: z.number(), aspect: z.string(), style: z.string() }).optional(),
+  draft: z.object({ mode: z.enum(["reels", "viral", "hl", "pp"]), count: z.number(), seconds: z.number(), aspect: z.string(), style: z.string(), dub: z.string().optional() }).optional(),
   /** the option card of the open batch: more uploads edit it instead of sending a new card */
   card: z.number().optional(),
   make: z.object({ topic: z.string(), aspect: z.string(), voice: z.string() }).optional(),
@@ -111,6 +122,12 @@ export const SessionSchema = z.object({
   fb_at: z.number().optional(),
   /** what the user is doing (last menu choice or upload): a photo during a montage is not an avatar photo */
   ctx: z.enum(["montage", "avatar", "make"]).optional(),
+  /** stage 30: a downloaded file of the batch → the platform link it came from (credit line, takedown) */
+  link_src: z.record(z.string(), z.string()).default({}),
+  /** stage 30: third-party links waiting for «✅ Подтверждаю» (and the words sent with them) */
+  pending_links: z.object({ urls: z.array(z.string()), task: z.string().optional() }).optional(),
+  /** stage 30: the «🌐 Русская версия» card */
+  dub: z.object({ lang: z.string(), voice: z.string(), mode: z.enum(["voiceover", "replace"]), source: z.string() }).optional(),
 });
 export type Session = z.infer<typeof SessionSchema>;
 
@@ -195,6 +212,29 @@ export function isVideoMessage(m: TgMessage) {
 }
 
 const safeName = (s: string) => s.replace(/[^A-Za-z0-9_-]/g, "_");
+
+/** Text → messages of at most  characters, cut at line breaks (a single over-long line is cut at a space). */
+export function splitMessage(text: string, max = 4000): string[] {
+  const out: string[] = [];
+  let cur = "";
+  const push = () => {
+    if (cur.trim()) out.push(cur.trim());
+    cur = "";
+  };
+  for (const line of text.split("\n")) {
+    let l = line;
+    while (l.length > max) {
+      push();
+      const cut = l.lastIndexOf(" ", max) > max / 2 ? l.lastIndexOf(" ", max) : max;
+      out.push(l.slice(0, cut));
+      l = l.slice(cut).trimStart();
+    }
+    if (cur.length + l.length + 1 > max) push();
+    cur = cur ? `${cur}\n${l}` : l;
+  }
+  push();
+  return out;
+}
 
 /** words sent next to a link read as a montage task ("2 рилса по 20 секунд"), not as small talk ("вот видео") */
 export function looksLikeTask(text: string): boolean {
@@ -308,6 +348,11 @@ export function parseStage(text: string, prev: { stage: StageKey; pct: number })
   else if (/▸ план|правка плана|разбираю, кто бросал/.test(s)) next = { stage: "plan", pct: 40 };
   else if (/нарезк/.test(s)) next = { stage: "cut", pct: 58 };
   else if (/тренды/.test(s)) next = { stage: "script", pct: 10 };
+  else if (/^▸ перевод/.test(s)) next = { stage: "script", pct: 25 };
+  else if (/озвучк\S* (\d+)\/(\d+)/.test(s)) {
+    const m = /озвучк\S* (\d+)\/(\d+)/.exec(s)!;
+    next = { stage: "audio", pct: 30 + Math.round((55 * (Number(m[1]) - 1)) / Math.max(1, Number(m[2]))) };
+  }
   else if (/сценари|монолог/.test(s)) next = { stage: "script", pct: 25 };
   else if (/озвучк/.test(s)) next = { stage: "audio", pct: 35 };
   else if (/арт-директор|композиция|фото|картинк|портрет/.test(s)) next = { stage: "design", pct: 50 };
@@ -349,6 +394,10 @@ export interface BotOptions {
   make?: MakeFn;
   avatarExport?: AvatarExportFn;
   avatarImport?: AvatarImportFn;
+  /** stage 30: «🌐 Русская версия» of a whole video, the dub of a montage's reels, an avatar from someone else's video (tests inject fakes) */
+  dub?: DubFn;
+  dubOutputs?: DubOutputsFn;
+  avatarFromVideo?: AvatarFromVideoFn;
   /** /voice <id>: a short OGG/Opus sample of a Piper voice (tests inject a fake) */
   voiceSample?: (voiceId: string, dest: string) => Promise<string>;
   /** a copy of an output that fits the upload limit (default: ffmpeg re-encode to the size budget) */
@@ -438,6 +487,9 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   const makeFn = o.make ?? runMakePipeline;
   const avatarExportFn = o.avatarExport ?? runAvatarExport;
   const avatarImportFn = o.avatarImport ?? runAvatarImport;
+  const dubFn = o.dub ?? runDubPipeline;
+  const dubOutputsFn = o.dubOutputs ?? runDubOutputs;
+  const avatarFromVideoFn = o.avatarFromVideo ?? runAvatarFromVideo;
   const voiceSampleFn = o.voiceSample ?? defaultVoiceSample;
   const shrinkFn = o.shrinkVideo ?? shrinkForTelegram;
   const probeUpload = o.probeUpload ?? defaultProbeUpload;
@@ -721,6 +773,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     try {
       const result = await withJobSignal(signal, () => execute(job.kind, payload, { progress, onJob, signal, log: ulog, uid }));
       if (signal.aborted) throw new CancelledError();
+      // stage 30: made from someone else's video — the credit line goes with the result
+      if (typeof payload.credit === "string" && payload.credit) result.credit = payload.credit;
       card.stage = "send";
       card.pct = Math.max(card.pct, 97);
       await pushCard(jobId, true);
@@ -764,13 +818,27 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   async function execute(kind: JobKind, p: Record<string, unknown>, x: ExecCtx): Promise<PipelineResult> {
     const s = (k: string) => (typeof p[k] === "string" ? (p[k] as string) : undefined);
     switch (kind) {
-      case "run":
-        return pipelineFn({ source: s("source")!, sources: Array.isArray(p.sources) ? (p.sources as string[]) : undefined, instruction: s("instruction")!, preset: s("preset") ?? preset, progress: x.progress, onJob: x.onJob, signal: x.signal, log: x.log, ...(s("like") ? { like: s("like"), likeFresh: p.likeFresh === true } : {}) });
+      case "run": {
+        const r = await pipelineFn({ source: s("source")!, sources: Array.isArray(p.sources) ? (p.sources as string[]) : undefined, instruction: s("instruction")!, preset: s("preset") ?? preset, progress: x.progress, onJob: x.onJob, signal: x.signal, log: x.log, ...(s("like") ? { like: s("like"), likeFresh: p.likeFresh === true } : {}) });
+        // stage 30: «🌐 Озвучить на русском» on the card — the reels are dubbed before delivery (same job)
+        const dub = s("dub");
+        if (!dub || !r.outputs.length) return r;
+        const d = await dubOutputsFn({ jobId: r.jobId, outputs: r.outputs, lang: dub, voice: s("dubVoice"), progress: x.progress, signal: x.signal, log: x.log });
+        return { ...r, outputs: d.outputs, reasoning: [unofficialLabel(dub), r.reasoning, d.summary].filter(Boolean).join("\n"), notes: [...(r.notes ?? []), ...d.notes] };
+      }
+      case "dub": {
+        const r = await dubFn({ source: s("source")!, lang: s("lang") ?? "ru", voice: s("voice"), mode: s("mode") === "replace" ? "replace" : "voiceover", progress: x.progress, onJob: x.onJob, signal: x.signal, log: x.log });
+        // «Неофициальный перевод» heads the description of every dubbed video
+        const label = unofficialLabel(s("lang") ?? "ru");
+        return { ...r, reasoning: r.reasoning?.startsWith(label) ? r.reasoning : [label, r.reasoning].filter(Boolean).join("\n") };
+      }
       case "make":
         return makeFn({ topic: s("topic")!, voice: s("voice"), aspect: (s("aspect") as Aspect | undefined) ?? "9:16", fromJob: s("fromJob"), progress: x.progress, onJob: x.onJob, signal: x.signal, log: x.log });
       case "revise":
         return reviseFn({ jobId: s("jobId")!, edit: s("edit")!, progress: x.progress, signal: x.signal, log: x.log });
       case "avatar":
+        // stage 30: «🧑 Аватар по этому сценарию» — the speech of a downloaded video, retold
+        if (s("fromVideo")) return avatarFromVideoFn({ video: s("fromVideo")!, photo: s("photo"), voice: s("voice"), voiceId: s("voiceId"), sourceLabel: s("sourceLabel")!, progress: x.progress, onJob: x.onJob, signal: x.signal, log: x.log });
         return avatarExportFn({ input: s("input")!, photo: s("photo"), voice: s("voice"), voiceId: s("voiceId"), sourceLabel: s("sourceLabel")!, progress: x.progress, onJob: x.onJob, signal: x.signal, log: x.log });
       case "avatar_import":
         x.onJob(s("jobId")!);
@@ -849,6 +917,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const lines: string[] = [];
     for (const f of result.failed ?? []) lines.push(tech ? `✖ ${f.id}: ${f.error.split("\n")[0]}` : `✖ ${f.id}`);
     if (tech) for (const n of [...notes, ...(result.notes ?? [])]) lines.push(`⚠ ${n}`);
+    if (result.credit) lines.unshift(result.credit);
     if (result.avatar) {
       await say(chatId, [L.avatarInstructions(result.jobId, result.avatar.lines, result.avatar.warnings), ...lines].join("\n"));
       return;
@@ -1029,7 +1098,18 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     return seconds > plan().longMinutes * 60;
   }
 
-  async function startRun(uid: number, chatId: number, instruction: string, opts: { preset?: string; highlights?: boolean; single?: boolean; like?: string | null } = {}): Promise<JobRow | undefined> {
+  /** stage 30: the platform links behind these files → payload fields (`links` for /takedown, `credit` for the result) */
+  function linkInfo(uid: number, files: string[]): { links?: { url: string; hash: string }[]; credit?: string } {
+    const src = sess(uid).link_src ?? {};
+    const urls = [...new Set(files.map((f) => src[f]).filter((u): u is string => !!u))];
+    if (!urls.length) return {};
+    const L = T(uid);
+    const links = urls.map((url) => ({ url, hash: urlHash(url) }));
+    const credit = links.map((l) => creditLine(db.linkMeta(l.hash) ?? { url: l.url }, L.s30.source)).join("\n");
+    return { links, credit };
+  }
+
+  async function startRun(uid: number, chatId: number, instruction: string, opts: { preset?: string; highlights?: boolean; single?: boolean; like?: string | null; dub?: string } = {}): Promise<JobRow | undefined> {
     const s = sess(uid);
     if (!s.source || !(await exists(s.source))) {
       await say(chatId, T(uid).needVideo);
@@ -1052,7 +1132,10 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       } catch {}
     }
     if (runPreset !== preset) log(`[${uid}] стиль: ${runPreset}${like ? " (как в примере)" : ""}`);
-    const job = await submit(uid, chatId, "run", { source, sources, instruction, preset: runPreset, ...(like ? { like, likeFresh: s.ref_fresh === true && like === s.ref } : {}) }, isLongRun(seconds, highlights) ? "long" : "standard");
+    // stage 30: the reels dubbed after the montage; their captions in the dub's language (one translation for both)
+    const dub = opts.dub && isDubLang(opts.dub) && !highlights ? opts.dub : undefined;
+    const runInstruction = dub ? `${instruction.replace(/,?\s*субтитры на языке речи\.?/i, "")}, субтитры на ${({ ru: "русском", uz: "узбекском", en: "английском" } as Record<string, string>)[dub]}` : instruction;
+    const job = await submit(uid, chatId, "run", { source, sources, instruction: runInstruction, preset: runPreset, ...(like ? { like, likeFresh: s.ref_fresh === true && like === s.ref } : {}), ...(dub ? { dub, dubVoice: voiceOf(uid) === "off" ? undefined : voiceOf(uid) } : {}), ...linkInfo(uid, sources ?? [source]) }, isLongRun(seconds, highlights) ? "long" : "standard");
     // the fresh analysis is billed to this job only
     if (job && like && like === s.ref && s.ref_fresh) patchSess(uid, { ref_fresh: false });
     return job;
@@ -1120,8 +1203,10 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const s = sess(uid);
     // keep the user's choices when the card is refreshed; only the default mode follows the batch size
     const d = s.card && s.draft ? { ...s.draft, mode: n > 1 && (s.draft.mode === "reels" || s.draft.mode === "hl") ? ("viral" as const) : s.draft.mode } : draftFor(uid, n);
-    const text = n > 1 ? L.batchSaved(n) : L.videoSaved;
-    const kb = encodeKb(montageKb(L, d, !!s.ref));
+    // stage 30: a video from a platform link gets the link card (cut the best moments, edit mine like this, dub, avatar)
+    const linkUrl = n === 1 && s.source ? s.link_src?.[s.source] : undefined;
+    const text = linkUrl ? L.s30.linkCard(db.linkMeta(urlHash(linkUrl))?.title ?? undefined) : n > 1 ? L.batchSaved(n) : L.videoSaved;
+    const kb = encodeKb(montageKb(L, d, !!s.ref, { link: !!linkUrl }));
     if (s.card) {
       try {
         await api.editMessageText(chatId, s.card, text, kb);
@@ -1145,6 +1230,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       batch_closed: false,
       ctx: "montage",
       ...(s.batch_closed ? { card: undefined } : {}),
+      // the link of every file still in the batch (credit line, takedown)
+      link_src: Object.fromEntries(Object.entries(s.link_src ?? {}).filter(([f]) => batch.includes(f))),
       durations: { ...(s.batch_closed ? {} : s.durations), ...(seconds ? { [dest]: seconds } : {}) },
     });
     log(`[${uid}] видео сохранено: ${dest} (в подборке ${batch.length})`);
@@ -1316,6 +1403,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       const by: Partial<Record<LinkError["code"], string>> = {
         too_big: L.linkTooBig(err.bytes ? MBn(err.bytes) : 0, MBn(linkMax)),
         private: L.linkPrivate,
+        login: L.s30.linkLogin,
         folder: L.linkFolder,
         not_video: L.linkNotVideo,
         empty: L.linkNotVideo,
@@ -1336,6 +1424,12 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const dir = uploadDir(uid);
     let added = 0;
     for (const url of urls.slice(0, 5)) {
+      // stage 30: a link taken down at the rights holder's request is never downloaded again
+      if (db.isBlocked(urlHash(url))) {
+        log(`[${uid}] ссылка заблокирована (takedown): ${url}`);
+        await say(chatId, L.s30.linkBlocked);
+        continue;
+      }
       const key = linkKey(url);
       let files = await linkFiles(dir, key);
       if (!files.length) {
@@ -1373,7 +1467,10 @@ export async function createBot(o: BotOptions): Promise<Bot> {
             },
           });
           files = got.map((f) => f.file);
-          log(`[${uid}] по ссылке скачано: ${got.map((f) => `${path.basename(f.file)} ${MBn(f.bytes)} МБ`).join(", ")}`);
+          // what the platform said about it (title, channel): the credit line of the results
+          const meta = got.find((f) => f.meta)?.meta;
+          if (meta || needsRights(url)) db.putLinkMeta({ url_hash: urlHash(url), url: meta?.url ?? url, title: meta?.title, channel: meta?.channel, license: meta?.license });
+          log(`[${uid}] по ссылке скачано: ${got.map((f) => `${path.basename(f.file)} ${MBn(f.bytes)} МБ`).join(", ")}${meta?.title ? ` («${meta.title}»${meta.channel ? `, ${meta.channel}` : ""})` : ""}`);
           if (statusId) await edit(chatId, statusId, L.linkDone(got.length, MBn(got.reduce((s, f) => s + f.bytes, 0))));
         } catch (err) {
           log(`[${uid}] ссылка не скачана: ${errMsg(err)}`);
@@ -1389,16 +1486,150 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         // downloaded before: only the durations are needed
         for (const f of files) addToBatch(uid, f, (await probeUpload(f)).duration);
       }
+      // platform links: remember where each file came from (the link card, the credit line, /takedown)
+      if (needsRights(url) && files.length) patchSess(uid, { link_src: { ...(sess(uid).link_src ?? {}), ...Object.fromEntries(files.map((f) => [f, url])) } });
       added += files.length;
     }
     return added > 0;
+  }
+
+  /**
+   * stage 30: links in a message. Blocked ones (takedown) are refused; a platform link the user has not confirmed yet
+   * waits for «✅ Подтверждаю» (rights or a permitted purpose); the rest download as before.
+   */
+  async function gateLinks(uid: number, chatId: number, links: string[], task?: string): Promise<void> {
+    const L = T(uid);
+    const ok = links.filter((u) => !db.isBlocked(urlHash(u)));
+    if (ok.length < links.length) {
+      log(`[${uid}] заблокированная ссылка отклонена`);
+      await say(chatId, L.s30.linkBlocked);
+    }
+    if (!ok.length) return;
+    const ask = ok.filter((u) => needsRights(u) && !db.hasRights(uid, urlHash(u)));
+    if (ask.length) {
+      patchSess(uid, { pending_links: { urls: ok, ...(task ? { task } : {}) } });
+      await say(chatId, L.s30.rightsAsk(ask.length), encodeKb(rightsKb(L)));
+      return;
+    }
+    return bg(queueUpload(uid, chatId, task, () => onLinks(uid, chatId, ok)));
+  }
+
+  /** «✅ Подтверждаю» / «Отмена» under the rights question */
+  async function rightsCallback(uid: number, chatId: number, msgId: number | undefined, op: string): Promise<string | undefined> {
+    const L = T(uid);
+    const pl = sess(uid).pending_links;
+    if (!pl) {
+      if (msgId) await editMarkup(chatId, msgId, undefined);
+      return L.s30.rightsGone;
+    }
+    patchSess(uid, { pending_links: undefined });
+    if (op !== "ok") {
+      if (msgId) await edit(chatId, msgId, L.s30.rightsNo);
+      return undefined;
+    }
+    // the confirmation is the record: who, which link, when
+    for (const u of pl.urls) if (needsRights(u) && !db.hasRights(uid, urlHash(u))) db.confirmRights(uid, u, urlHash(u));
+    log(`[${uid}] права подтверждены: ${pl.urls.filter(needsRights).join(", ")}`);
+    if (msgId) await edit(chatId, msgId, L.s30.rightsOk);
+    await bg(queueUpload(uid, chatId, pl.task, () => onLinks(uid, chatId, pl.urls)));
+    return undefined;
+  }
+
+  /** ✂️ / 🎯 / 🧑 on the card of a video from a platform link */
+  async function linkCallback(uid: number, chatId: number, msgId: number | undefined, op: string): Promise<string | undefined> {
+    const L = T(uid);
+    const s = sess(uid);
+    if (!s.source || !(await exists(s.source))) return L.s30.needLinkVideo;
+    if (msgId && s.card && s.card !== msgId) return L.cardStale;
+    if (op === "cut") {
+      // the best moments as reels: the card's settings, reels mode (a long podcast goes through the shortlist planner)
+      const d: MontageDraft = { ...(s.draft ?? draftFor(uid, s.sources.length)), mode: "reels" };
+      if (d.style === "ref") d.style = PRESET_STYLE[styleOf(uid)] ?? "pop";
+      patchSess(uid, { draft: d });
+      return montageCallback(uid, chatId, msgId, "go");
+    }
+    if (op === "ref") {
+      // the downloaded video becomes the reference: analysed for style only, never part of the output
+      const url = s.link_src?.[s.source];
+      const copy = path.join(usersDir, String(uid), "refs", `link_${path.basename(s.source)}`);
+      await fs.mkdir(path.dirname(copy), { recursive: true });
+      await fs.copyFile(s.source, copy);
+      if (msgId) await editMarkup(chatId, msgId, undefined);
+      await say(chatId, L.s30.refFromLink);
+      await onReference(uid, chatId, { file: copy, url });
+      return undefined;
+    }
+    if (op === "av") {
+      const seconds = s.durations[s.source] ?? 0;
+      const photo = s.avatar_photo && (await exists(s.avatar_photo)) ? s.avatar_photo : undefined;
+      const voice = s.avatar_voice && (await exists(s.avatar_voice)) ? s.avatar_voice : undefined;
+      const chosen = voiceOf(uid);
+      const job = await submit(uid, chatId, "avatar", { input: path.basename(s.source), fromVideo: s.source, photo, voice, voiceId: voice || chosen === "off" ? undefined : chosen, sourceLabel: path.join(usersDir, String(uid), "avatar"), ...linkInfo(uid, [s.source]) }, isLongRun(seconds, false) ? "long" : "standard");
+      if (job) {
+        await say(chatId, L.s30.avatarFromLink);
+        patchSess(uid, { batch_closed: true, card: undefined, draft: undefined });
+        if (msgId) await editMarkup(chatId, msgId, undefined);
+      }
+      return undefined;
+    }
+    return undefined;
+  }
+
+  /** «🌐 Русская версия»: the card (language, voice, mode) and its ▶️ */
+  async function dubCallback(uid: number, chatId: number, msgId: number | undefined, op: string, val?: string): Promise<string | undefined> {
+    const L = T(uid);
+    const s = sess(uid);
+    if (op === "open") {
+      if (!s.source || !(await exists(s.source))) return L.s30.needLinkVideo;
+      const chosen = voiceOf(uid);
+      const d = { lang: "ru", voice: chosen && chosen !== "off" && getVoice(chosen) ? getVoice(chosen)!.id : "auto", mode: "voiceover" as const, source: s.source };
+      patchSess(uid, { dub: d });
+      const url = s.link_src?.[s.source];
+      const name = (url ? db.linkMeta(urlHash(url))?.title : undefined) ?? path.basename(s.source);
+      await say(chatId, L.s30.dubCard(name, Math.round((s.durations[s.source] ?? 0) / 60)), encodeKb(dubKb(L, langOf(uid), d)));
+      return undefined;
+    }
+    const d = s.dub;
+    if (!d) return L.jobGone;
+    if (op === "go") {
+      if (!(await exists(d.source))) return L.s30.needLinkVideo;
+      const seconds = s.durations[d.source] ?? 0;
+      const job = await submit(uid, chatId, "dub", { source: d.source, lang: d.lang, voice: d.voice, mode: d.mode, ...linkInfo(uid, [d.source]) }, isLongRun(seconds, false) ? "long" : "standard");
+      if (job) {
+        patchSess(uid, { dub: undefined, batch_closed: true });
+        if (msgId) await editMarkup(chatId, msgId, undefined);
+      }
+      return undefined;
+    }
+    if (op === "l" && isDubLang(val)) d.lang = val;
+    else if (op === "v" && val && (val === "auto" || getVoice(val))) d.voice = val;
+    else if (op === "m" && (val === "voiceover" || val === "replace")) d.mode = val;
+    patchSess(uid, { dub: d });
+    if (msgId) await editMarkup(chatId, msgId, encodeKb(dubKb(L, langOf(uid), d as DubDraft)));
+    return undefined;
+  }
+
+  /** /takedown <job|url> [reason]: the files of the job are deleted and its links blocked for good */
+  async function takedownCommand(uid: number, chatId: number, arg: string) {
+    const L = T(uid);
+    const [target, ...why] = arg.trim().split(/\s+/);
+    if (!target) return void (await say(chatId, L.s30.takedownUsage));
+    const r = await takedown({ db, target, jobsRoot: WORKSPACE_ROOT, usersDir, by: uid, reason: why.join(" ") || undefined });
+    // a job still waiting or running is cancelled too
+    for (const id of r.jobs) {
+      const j = db.getJob(id);
+      if (j && (j.status === "queued" || j.status === "running")) await cancelJob(id);
+    }
+    log(`админ ${uid}: takedown ${target} — задач ${r.jobs.length}, удалено ${r.removed.length}, заблокировано ${r.blocked.length}${r.errors.length ? `, ошибок ${r.errors.length}` : ""}`);
+    if (!r.jobs.length && !r.blocked.length) return void (await say(chatId, L.s30.takedownNothing(target)));
+    await say(chatId, L.s30.takedownDone(r.jobs.length, r.removed.length, r.blocked.length));
   }
 
   // ── «🎯 Монтаж как в примере»: reference → Style DNA (cached by file_unique_id / link / content) ──
   const styleCache = new StyleCache(path.join(root, "_cache", "style"));
   const refBusy = new Set<number>();
 
-  async function onReference(uid: number, chatId: number, src: { video?: { fileId: string; size?: number; fileUniqueId?: string }; url?: string; name?: string }) {
+  async function onReference(uid: number, chatId: number, src: { video?: { fileId: string; size?: number; fileUniqueId?: string }; url?: string; name?: string; file?: string }) {
     const L = T(uid);
     if (refBusy.has(uid)) return void (await say(chatId, L.refBusy));
     if (src.video?.size !== undefined && src.video.size > uploadLimit(uid)) return tooLargeReply(uid, chatId, src.video.size);
@@ -1415,7 +1646,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         if (!result) {
           await action(chatId, "typing");
           await say(chatId, L.refAnalyzing);
-          let file: string | undefined;
+          // stage 30: a video already downloaded from a link (🎯 on the link card): a copy, deleted after the analysis
+          let file: string | undefined = src.file;
           if (src.video) {
             const f = await api.getFile(src.video.fileId);
             if (f.file_size !== undefined && f.file_size > uploadLimit(uid)) return void (await tooLargeReply(uid, chatId, f.file_size));
@@ -1431,6 +1663,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       } catch (err) {
         log(`[${uid}] пример не разобран: ${err instanceof Error ? (err.stack ?? err.message) : err}`);
         await say(chatId, err instanceof Error && err.name === "RefLinkError" ? L.refLinkFailed : L.refFailed);
+        if (src.file) await fs.rm(src.file, { force: true }).catch(() => {});
       } finally {
         refBusy.delete(uid);
       }
@@ -1659,7 +1892,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     } catch {
       text = T(uid).docMissing;
     }
-    for (let i = 0; i < text.length; i += 4000) await say(chatId, text.slice(i, i + 4000));
+    // a long document goes in several messages, cut between lines (never in the middle of a word)
+    for (const part of splitMessage(text, 4000)) await say(chatId, part);
   }
 
   async function onboardingPrompt(user: UserRow, chatId: number) {
@@ -1699,6 +1933,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     dayStart: today,
     track,
     broadcastDelayMs: o.broadcastDelayMs ?? 50,
+    closedBeta: !!allowed,
     log,
   });
 
@@ -1784,7 +2019,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
           return void (await say(chatId, L.styleSet(want)));
         }
         case "clear":
-          patchSess(uid, { sources: [], batch_closed: false, durations: {}, intent: undefined, draft: undefined, card: undefined, ref: undefined, ref_fresh: undefined });
+          patchSess(uid, { sources: [], batch_closed: false, durations: {}, intent: undefined, draft: undefined, card: undefined, ref: undefined, ref_fresh: undefined, link_src: {}, pending_links: undefined, dub: undefined });
           return void (await say(chatId, L.cleared));
         case "voice":
         case "voices":
@@ -1808,6 +2043,9 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         case "allow":
           if (!isAdmin(uid)) return void (await say(chatId, L.unknownCommand));
           return admin.allowCommand(uid, chatId, arg);
+        case "takedown":
+          if (!isAdmin(uid)) return void (await say(chatId, L.unknownCommand));
+          return takedownCommand(uid, chatId, arg);
         case "guide":
           return onMenu(uid, chatId, "guide");
         default:
@@ -1828,6 +2066,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     }
     if (awaiting === "ref") {
       const url = findUrl(text);
+      if (url && db.isBlocked(urlHash(url))) return void (await say(chatId, L.s30.linkBlocked));
       if (url) return onReference(uid, chatId, { url });
       return void (await say(chatId, L.refNeedFileOrLink));
     }
@@ -1839,7 +2078,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const links = findLinks(text);
     if (links.length) {
       const rest = textWithoutLinks(text);
-      return bg(queueUpload(uid, chatId, looksLikeTask(rest) ? rest : undefined, () => onLinks(uid, chatId, links)));
+      return gateLinks(uid, chatId, links, looksLikeTask(rest) ? rest : undefined);
     }
     return startRun(uid, chatId, text);
   }
@@ -1868,7 +2107,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       await api.answerCallbackQuery(q.id, text).catch(() => {});
     };
     try {
-      if (!allowedIn(uid)) {
+      if (!(await gate(q.from))) {
         log(`[${chatId}] кнопка пропущена: ${uid} не в TELEGRAM_ALLOWED_USERS`);
         return void (await admin.stranger(q.from));
       }
@@ -1929,6 +2168,21 @@ export async function createBot(o: BotOptions): Promise<Bot> {
             break;
           }
           toast = await montageCallback(uid, chatId, msgId, a, b === undefined ? undefined : [b, c].filter(Boolean).join(":"));
+          break;
+        // stage 30: rights confirmation, the link card, «🌐 Русская версия»
+        case "RC":
+          toast = await rightsCallback(uid, chatId, msgId, a);
+          break;
+        case "LK":
+          if (uploadsPending(uid)) {
+            toast = L.uploadsPending;
+            break;
+          }
+          toast = await linkCallback(uid, chatId, msgId, a);
+          break;
+        case "D":
+        case "DB":
+          toast = await dubCallback(uid, chatId, msgId, p === "D" ? "open" : a, b);
           break;
         case "XD": {
           const dl = uploads.get(uid)?.dl;
@@ -2085,7 +2339,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       const hl = d.mode === "hl" || d.mode === "pp";
       const ref = d.style === "ref" && !hl ? s.ref : undefined;
       // 🏀 on a batch: every video goes into the highlights (combined), not only the last one
-      const job = await startRun(uid, chatId, draftInstruction(d), { preset: hl || ref ? undefined : STYLE_PRESET[d.style], highlights: hl, like: ref ?? null });
+      const job = await startRun(uid, chatId, draftInstruction(d), { preset: hl || ref ? undefined : STYLE_PRESET[d.style], highlights: hl, like: ref ?? null, dub: hl ? undefined : d.dub });
       // the card keeps its buttons when the job was not accepted (limit, full queue) — the user can retry
       if (job) {
         patchSess(uid, { draft: undefined, intent: undefined, card: undefined });
@@ -2101,8 +2355,11 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     else if (op === "a" && (val === "9:16" || val === "16:9")) d.aspect = val;
     else if (op === "y" && val === "ref" && s.ref) d.style = d.style === "ref" ? (PRESET_STYLE[styleOf(uid)] ?? "pop") : "ref";
     else if (op === "y" && val && STYLE_PRESET[val]) d.style = val;
+    // stage 30: «🌐 Озвучить на русском» — on/off
+    else if (op === "d") d.dub = d.dub ? undefined : "ru";
     patchSess(uid, { draft: d });
-    if (msgId) await editMarkup(chatId, msgId, encodeKb(montageKb(L, d, !!s.ref)));
+    const linked = s.sources.length === 1 && !!s.source && !!s.link_src?.[s.source];
+    if (msgId) await editMarkup(chatId, msgId, encodeKb(montageKb(L, d, !!s.ref, { link: linked })));
     return undefined;
   }
 
@@ -2181,6 +2438,16 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   }
 
   // ── updates ──
+  /**
+   * stage 30: who gets in. A pending @username (/vip @name on before they wrote) → in with VIP, slot-free; the closed
+   * beta lets the first N strangers in automatically (testerSlots), the rest get the admins' one-tap notice.
+   */
+  async function gate(from: TgUser): Promise<boolean> {
+    if (from.username && db.hasPendingVip(from.username)) await admin.applyPending(from);
+    if (allowedIn(from.id)) return true;
+    return admin.autoAdmit(from);
+  }
+
   function touch(from: TgUser): UserRow {
     const uid = from.id;
     // the operators (TELEGRAM_ADMIN_IDS) skip registration: they run the service
@@ -2202,7 +2469,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       const from = m.from;
       // the bot works in private chats only: in a group every message would become a task
       if (m.chat.type !== "private") return void log(`[${m.chat.id}] пропущено: чат типа ${m.chat.type}`);
-      if (!from || !allowedIn(from.id)) {
+      if (!from || !(await gate(from))) {
         log(`[${m.chat.id}] пропущено: пользователь ${from?.id ?? "?"} не в TELEGRAM_ALLOWED_USERS`);
         // the admins hear about a stranger once, with «✅ Пустить (VIP)»
         if (from) await admin.stranger(from);

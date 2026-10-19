@@ -44,7 +44,7 @@ async function boot(extra: Partial<BotOptions> = {}) {
 
 test("migration 4: the allowlist", async () => {
   const db = new BotDb(path.join(await tmp(), "vedit.db"));
-  assert.deepEqual(db.migrations(), [1, 2, 3, 4]);
+  assert.deepEqual(db.migrations(), [1, 2, 3, 4, 5]);
   db.allow(7, 1);
   db.allow(7, 2);
   db.allow(3);
@@ -58,7 +58,8 @@ test("migration 4: the allowlist", async () => {
 // ── closed beta ────────────────────────────────────────────────────────────────
 
 test("a stranger of the closed beta: admins get ONE notice with «✅ Пустить (VIP)» / «Игнорировать»; one tap lets them in as VIP", async () => {
-  const { tg, bot, logs } = await boot({ allowedUserIds: [1], adminIds: [1, 2] });
+  // no tester slots (stage 30): the one-tap notice is the fallback when the slots are used up
+  const { tg, bot, logs } = await boot({ allowedUserIds: [1], adminIds: [1, 2], plan: { testerSlots: 0 } });
   await bot.handleUpdate(tg.text(9, "привет", 9, { username: "tester", first_name: "Тимур" }));
   await bot.handleUpdate(tg.text(9, "ау"));
   await bot.handleUpdate(tg.press(9, "H:montage", 5));
@@ -94,7 +95,7 @@ test("a stranger of the closed beta: admins get ONE notice with «✅ Пусти
 });
 
 test("/allow and /vip (admins only): DB allowlist on top of TELEGRAM_ALLOWED_USERS, by id or @username, on/off", async () => {
-  const { tg, bot } = await boot({ allowedUserIds: [1, 4] });
+  const { tg, bot } = await boot({ allowedUserIds: [1, 4], plan: { testerSlots: 0 } });
   await bot.handleUpdate(tg.text(4, "/start", 4, { username: "dilya" }));
   await bot.handleUpdate(tg.text(4, "/vip 4 on"));
   assert.equal(tg.texts(4).at(-1), L.unknownCommand, "not for users");
@@ -116,8 +117,9 @@ test("/allow and /vip (admins only): DB allowlist on top of TELEGRAM_ALLOWED_USE
   assert.equal(tg.texts(4).at(-1), L.vipUserOn);
   await bot.handleUpdate(tg.text(1, "/vip 555 on"));
   assert.deepEqual([bot.user(555)?.plan, bot.db.isAllowed(555)], ["vip", true], "an id that never wrote is prepared");
+  // stage 30: an @username that never wrote is remembered as a pending VIP
   await bot.handleUpdate(tg.text(1, "/vip @nobody on"));
-  assert.equal(tg.texts(1).at(-1), L.userNotFound("@nobody"));
+  assert.equal(tg.texts(1).at(-1), L.s30.vipPending("nobody"));
   await bot.handleUpdate(tg.text(1, "/vip 4"));
   assert.equal(tg.texts(1).at(-1), L.vipUsage);
   await bot.handleUpdate(tg.text(1, "/vip 4 off"));

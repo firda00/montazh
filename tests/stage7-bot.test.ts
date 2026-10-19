@@ -226,7 +226,7 @@ test("a second task while busy waits in the queue (max 2 waiting); /cancel stops
 
 test("unauthorized user ids are ignored when allowedUserIds is set", async () => {
   const tg = fakeTelegram();
-  const { running, logs } = await boot(tg, { allowedUserIds: [10], pipeline: async () => assert.fail("pipeline must not run") });
+  const { running, logs } = await boot(tg, { allowedUserIds: [10], plan: { testerSlots: 0 }, pipeline: async () => assert.fail("pipeline must not run") });
   tg.text(20, 20, "/start");
   tg.video(20, 20, "INTRUDER");
   tg.text(10, 10, "/start");

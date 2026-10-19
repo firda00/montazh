@@ -19,6 +19,7 @@ const { classifyLink, downloadLink, findLinks, LinkError, linkKey, parseDriveCon
 const { downloadFile, limitsFor, makeBotApi, TelegramError } = await import("../src/bot/telegram-api.ts");
 const { ffmpeg } = await import("../src/lib/ffmpeg.ts");
 const { fakeTelegram } = await import("./helpers/fake-telegram.ts");
+const { urlHash } = await import("../src/bot/compliance.ts");
 type BotOptions = import("../src/bot/index.ts").BotOptions;
 type PipelineArgs = import("../src/bot/index.ts").PipelineArgs;
 type CallMethod = import("../src/bot/telegram-api.ts").CallMethod;
@@ -439,6 +440,8 @@ test("bot: a link is an upload — progress message, card; link + task runs it; 
     ["https://drive.google.com/drive/folders/1xyzxyzxyzxyz", L.linkFolder],
     ["https://youtu.be/abc", L.linkNoYtdlp],
   ] as const) {
+    // stage 30: a platform link is processed after the rights confirmation (given here up front)
+    if (url.includes("youtu")) bot.db.confirmRights(6, url, urlHash(url));
     await bot.handleUpdate(tg.text(6, url));
     assert.equal(tg.edits(6).at(-1), msg, url);
   }

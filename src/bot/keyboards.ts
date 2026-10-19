@@ -20,7 +20,19 @@ export interface MontageDraft {
   aspect: string;
   /** pop | split | calm | ref (the reference style of «🎯 Монтаж как в примере») */
   style: string;
+  /** stage 30: «🌐 Озвучить на русском» — the reels are dubbed into this language after the montage */
+  dub?: string;
 }
+/** stage 30: the «🌐 Русская версия» card */
+export interface DubDraft {
+  lang: string;
+  /** a catalogue id or "auto" */
+  voice: string;
+  mode: "voiceover" | "replace";
+}
+/** the dub card's language buttons: each language by its own name */
+export const DUB_LANG_NAMES: Record<string, string> = { ru: "Русский", uz: "O‘zbekcha", en: "English" };
+export const DUB_VOICES = ["gemini_charon", "gemini_kore", "gemini_puck", "gemini_aoede"];
 export interface MakeDraft {
   topic: string;
   aspect: string;
@@ -64,8 +76,11 @@ export const purposeKb = (L: Strings): InlineKeyboard => ({
 
 export const termsKb = (L: Strings): InlineKeyboard => ({ inline_keyboard: [[btn(L.btnTerms, "T:terms"), btn(L.btnPrivacy, "T:privacy")], [btn(L.btnAccept, "T:ok")]] });
 
-export function montageKb(L: Strings, d: MontageDraft, hasRef = false): InlineKeyboard {
+export function montageKb(L: Strings, d: MontageDraft, hasRef = false, o: { link?: boolean } = {}): InlineKeyboard {
+  // stage 30: a video from a platform link — what people do with someone else's video comes first
+  const top: InlineButton[][] = o.link ? [[btn(L.s30.btnLinkCut, "LK:cut")], [btn(L.s30.btnLinkRef, "LK:ref")], [btn(L.s30.btnDubOpen, "D:open"), btn(L.s30.btnLinkAvatar, "LK:av")]] : [];
   const rows: InlineButton[][] = [
+    ...top,
     [btn(mark(d.mode === "reels", L.mode.reels), "M:m:reels"), btn(mark(d.mode === "viral", L.mode.viral), "M:m:viral")],
     [btn(mark(d.mode === "hl", L.mode.hl), "M:m:hl"), btn(mark(d.mode === "pp", L.mode.pp), "M:m:pp")],
   ];
@@ -77,9 +92,30 @@ export function montageKb(L: Strings, d: MontageDraft, hasRef = false): InlineKe
     if (hasRef && d.style === "ref") rows.push([btn(mark(true, L.styleRef), "M:y:ref")]);
     else rows.push(...styleRows([...STYLE_CODES.map((s) => btn(mark(d.style === s, L.styleNames[STYLE_PRESET[s]]), `M:y:${s}`)), ...(hasRef ? [btn(L.styleRef, "M:y:ref")] : [])]));
   }
+  if (d.mode === "reels" || d.mode === "viral") rows.push([btn(mark(!!d.dub, L.s30.btnDubToggle), "M:d")]);
+  if (!o.link) rows.push([btn(L.s30.btnDubOpen, "D:open")]);
   rows.push([btn(L.btnStart, "M:go")]);
   return { inline_keyboard: rows };
 }
+
+/** «🌐 Русская версия»: target language, voice (▶️ — a sample), voice-over or replace, start */
+export function dubKb(L: Strings, lang: Lang, d: DubDraft): InlineKeyboard {
+  const rows: InlineButton[][] = [(["ru", "uz", "en"] as const).map((l) => btn(mark(d.lang === l, DUB_LANG_NAMES[l]), `DB:l:${l}`))];
+  rows.push([btn(mark(d.voice === "auto", L.voiceAuto), "DB:v:auto")]);
+  for (const id of DUB_VOICES) {
+    const v = VOICES.find((x) => x.id === id);
+    if (v) rows.push([btn(mark(d.voice === id, voiceLabel(v, lang)), `DB:v:${id}`), btn("▶️", `VP:${id}`)]);
+  }
+  rows.push([btn(mark(d.mode === "voiceover", L.s30.modeVoiceover), "DB:m:voiceover"), btn(mark(d.mode === "replace", L.s30.modeReplace), "DB:m:replace")]);
+  rows.push([btn(L.btnStart, "DB:go")]);
+  return { inline_keyboard: rows };
+}
+
+/** a third-party link: the rights confirmation */
+export const rightsKb = (L: Strings): InlineKeyboard => ({ inline_keyboard: [[btn(L.s30.btnConfirm, "RC:ok"), btn(L.s30.btnCancel, "RC:no")]] });
+
+/** the admin's notice of a tester let in by a free slot */
+export const testerKb = (L: Strings, id: number): InlineKeyboard => ({ inline_keyboard: [[btn(L.s30.btnRevoke, `a:rv:${id}`)]] });
 
 export function makeKb(L: Strings, lang: Lang, d: MakeDraft): InlineKeyboard {
   const rows: InlineButton[][] = [["9:16", "16:9", "1:1"].map((a) => btn(mark(d.aspect === a, a), `K:a:${a}`))];

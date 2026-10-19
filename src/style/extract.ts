@@ -109,7 +109,8 @@ export async function downloadWithYtDlp(url: string, dir: string, bin = process.
   await fs.mkdir(dir, { recursive: true });
   let out: { stdout: string };
   try {
-    out = await runProcess(bin, ["--no-playlist", "--no-progress", "--no-warnings", "-f", "mp4/bestvideo*+bestaudio/best", "--merge-output-format", "mp4", "--max-filesize", "300M", "-o", path.join(dir, "reference.%(ext)s"), "--print", "after_move:filepath", url]);
+    // public content only: no cookies, no login, no user config (stage 30)
+    out = await runProcess(bin, ["--ignore-config", "--no-cookies", "--no-cookies-from-browser", "--no-playlist", "--no-progress", "--no-warnings", "-f", "mp4/bestvideo*+bestaudio/best", "--merge-output-format", "mp4", "--max-filesize", "300M", "-o", path.join(dir, "reference.%(ext)s"), "--print", "after_move:filepath", url]);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (/failed to start/i.test(msg)) throw new RefLinkError(`yt-dlp не найден (${bin}): ссылки не скачиваются — пришлите сам ролик файлом`, "no_ytdlp");
