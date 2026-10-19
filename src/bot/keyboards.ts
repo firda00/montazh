@@ -48,6 +48,7 @@ export function mainMenu(L: Strings): InlineKeyboard {
       [btn(m.make, "H:make"), btn(m.highlights, "H:highlights")],
       [btn(m.avatar, "H:avatar"), btn(m.settings, "H:settings")],
       [btn(m.balance, "H:balance"), btn(m.help, "H:help")],
+      [btn(m.guide, "H:guide")],
     ],
   };
 }
@@ -155,14 +156,17 @@ export const feedbackJobsKb = (jobs: string[]): InlineKeyboard => ({ inline_keyb
 
 export const feedbackJobKb = (L: Strings, jobId: string): InlineKeyboard => ({ inline_keyboard: [[btn(L.fbAdmin.btnVideo, `a:fv:${jobId}`)]] });
 
-export function userCardKb(L: Strings, u: { tg_id: number; status: string; role: string }): InlineKeyboard {
+export function userCardKb(L: Strings, u: { tg_id: number; status: string; role: string; plan?: string }): InlineKeyboard {
   return {
     inline_keyboard: [
-      [1, 5, 20].map((n) => btn(L.btnCredits(n), `a:c:${u.tg_id}:${n}`)),
+      [...[1, 5, 20].map((n) => btn(L.btnCredits(n), `a:c:${u.tg_id}:${n}`)), btn(u.plan === "vip" ? L.btnVipOn : L.btnVipOff, `a:vip:${u.tg_id}`)],
       [btn(u.status === "banned" ? L.btnUnban : L.btnBan, `a:ban:${u.tg_id}`), btn(u.role === "admin" ? L.btnRemoveAdmin : L.btnMakeAdmin, `a:adm:${u.tg_id}`)],
     ],
   };
 }
+
+/** a stranger knocked on the closed beta: one tap lets them in as a VIP tester */
+export const strangerKb = (L: Strings, id: number): InlineKeyboard => ({ inline_keyboard: [[btn(L.btnLetIn, `a:let:${id}`), btn(L.btnIgnore, `a:ign:${id}`)]] });
 
 export const broadcastKb = (L: Strings): InlineKeyboard => ({ inline_keyboard: [[btn(L.btnSend, "a:bs"), btn(L.btnCancelPlain, "a:bx")]] });
 

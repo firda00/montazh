@@ -1,10 +1,11 @@
 // /admin: statistics, user lookup (credits, ban, admin role), broadcast (≤ 20 msg/s, opt-out respected),
-// live free-plan limits, ratings with the AI self-review (stage 28). Admins = TELEGRAM_ADMIN_IDS (or the first TELEGRAM_ALLOWED_USERS id) + users given
+// live free-plan limits, ratings with the AI self-review (stage 28), VIP testers and the DB allowlist (strangers of the
+// closed beta are announced to the admins once, with «✅ Пустить (VIP)»). Admins = TELEGRAM_ADMIN_IDS (or the first TELEGRAM_ALLOWED_USERS id) + users given
 // the admin role here. Every admin callback re-checks the role.
 import type { BotApi, InlineKeyboard } from "./telegram-api.ts";
 import type { BotDb } from "./db.ts";
 import { t, type Strings } from "./i18n.ts";
-import { adminKb, broadcastKb, feedbackAdminKb, feedbackJobKb, feedbackJobsKb, limitsKb, limitStep, userCardKb } from "./keyboards.ts";
+import { adminKb, broadcastKb, feedbackAdminKb, feedbackJobKb, feedbackJobsKb, limitsKb, limitStep, strangerKb, userCardKb } from "./keyboards.ts";
 import { formatDisagree, formatFeedbackSummary, formatJobFeedback, formatLowList, summarizeFeedback } from "./feedback.ts";
 import { exists } from "../lib/workspace.ts";
 import { FREE_PLAN_FIELDS, type PlanLimits } from "./plans.ts";
@@ -33,6 +34,8 @@ export interface AdminCtx {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** to someone let in before they chose a language */
+export const INVITE = "✅ Доступ открыт · Ruxsat berildi · Access granted — /start";
 
 export function adminHandlers(ctx: AdminCtx) {
   const { db } = ctx;
@@ -61,7 +64,7 @@ export function adminHandlers(ctx: AdminCtx) {
       todayStd: db.countFreeJobs(uid, "standard", since),
       todayLong: db.countFreeJobs(uid, "long", since),
     });
-    return { text, kb: userCardKb(L, { tg_id: u.tg_id, status: u.status, role: ctx.isAdmin(uid) ? "admin" : u.role }) };
+    return { text, kb: userCardKb(L, { tg_id: u.tg_id, status: u.status, role: ctx.isAdmin(uid) ? "admin" : u.role, plan: u.plan }) };
   }
 
   function limitsText(viewer: number) {
@@ -92,7 +95,63 @@ export function adminHandlers(ctx: AdminCtx) {
     await ctx.say(chatId, ctx.T(admin).broadcastDone(ok, fail));
   }
 
+  const allAdmins = () => [...new Set([...ctx.envAdmins, ...db.adminIds()])];
+
+  /** VIP on/off: no daily limits, no credit charges; on also lets the user in (closed beta) */
+  function setVip(target: number, on: boolean, by: number) {
+    if (!db.getUser(target)) db.touchUser(target, {}, { plan: on ? "vip" : "free" });
+    else db.updateUser(target, { plan: on ? "vip" : "free" });
+    if (on) db.allow(target, by);
+    ctx.log(`админ ${by}: VIP ${on ? "вкл." : "выкл."} для ${target}`);
+  }
+
+  async function tellVip(target: number) {
+    const u = db.getUser(target);
+    // a user who never finished registration gets the trilingual invitation instead
+    await ctx.say(target, u?.onboarding === "done" ? t(u.lang).vipUserOn : INVITE).catch(() => undefined);
+  }
+
+  /** "123" | "@name" → a tg id (a bare number does not need to be a known user) */
+  const targetOf = (q: string): number | undefined => {
+    const s = q.trim();
+    if (/^\d+$/.test(s)) return Number(s);
+    return db.findUser(s)?.tg_id;
+  };
+
   return {
+    /** a message or a button from someone outside the closed beta: the admins hear about it once */
+    async stranger(from: { id: number; username?: string; first_name?: string; last_name?: string }) {
+      const key = `stranger.${from.id}`;
+      if (db.getKv(key) !== undefined || db.isAllowed(from.id)) return;
+      db.setKv(key, JSON.stringify({ username: from.username ?? null, first_name: from.first_name ?? null, at: new Date().toISOString(), state: "new" }));
+      const name = [from.first_name, from.last_name].filter(Boolean).join(" ") || "—";
+      for (const a of allAdmins()) await ctx.say(a, ctx.T(a).strangerNotice(from.id, name, from.username ?? ""), strangerKb(ctx.T(a), from.id));
+    },
+
+    /** /vip <id|@username> on|off */
+    async vipCommand(uid: number, chatId: number, arg: string) {
+      const L = ctx.T(uid);
+      const m = /^(\S+)\s+(on|off|вкл|выкл)$/i.exec(arg.trim());
+      const target = m ? targetOf(m[1]) : undefined;
+      if (!m || target === undefined) return void (await ctx.say(chatId, m ? L.userNotFound(m[1]) : L.vipUsage));
+      const on = /^(on|вкл)$/i.test(m[2]);
+      setVip(target, on, uid);
+      await ctx.say(chatId, L.vipSet(target, on));
+      if (on && target !== uid) await tellVip(target);
+    },
+
+    /** /allow <id> [off] */
+    async allowCommand(uid: number, chatId: number, arg: string) {
+      const L = ctx.T(uid);
+      const m = /^(\S+)(?:\s+(off|выкл))?$/i.exec(arg.trim());
+      const target = m ? targetOf(m[1]) : undefined;
+      if (!m || target === undefined) return void (await ctx.say(chatId, m ? L.userNotFound(m[1]) : L.allowUsage));
+      if (m[2]) db.disallow(target);
+      else db.allow(target, uid);
+      ctx.log(`админ ${uid}: допуск ${m[2] ? "снят" : "дан"} ${target}`);
+      await ctx.say(chatId, L.allowSet(target, !m[2]));
+    },
+
     async menu(uid: number, chatId: number) {
       await ctx.say(chatId, ctx.T(uid).adminMenu, adminKb(ctx.T(uid)));
     },
@@ -137,6 +196,42 @@ export function adminHandlers(ctx: AdminCtx) {
             await ctx.edit(chatId, msgId, c.text, c.kb);
           }
           return L.saved;
+        }
+        case "vip": {
+          const target = Number(a);
+          const u = db.getUser(target);
+          if (!u) return L.userNotFound(a);
+          const on = u.plan !== "vip";
+          setVip(target, on, uid);
+          if (msgId) {
+            const c = card(target, uid);
+            await ctx.edit(chatId, msgId, c.text, c.kb);
+          }
+          if (on && target !== uid) await tellVip(target);
+          return L.vipSet(target, on);
+        }
+        case "let":
+        case "ign": {
+          const target = Number(a);
+          if (!Number.isSafeInteger(target) || target <= 0) return;
+          const key = `stranger.${target}`;
+          const seen = (() => {
+            try {
+              return JSON.parse(db.getKv(key) ?? "{}") as { username?: string | null; first_name?: string | null };
+            } catch {
+              return {};
+            }
+          })();
+          db.setKv(key, JSON.stringify({ ...seen, state: op === "let" ? "let" : "ignored", by: uid }));
+          if (op === "ign") {
+            if (msgId) await ctx.edit(chatId, msgId, L.strangerIgnored(target));
+            return;
+          }
+          if (!db.getUser(target)) db.touchUser(target, { username: seen.username ?? undefined, first_name: seen.first_name ?? undefined }, { plan: "vip" });
+          setVip(target, true, uid);
+          if (msgId) await ctx.edit(chatId, msgId, L.strangerLet(target));
+          await tellVip(target);
+          return;
         }
         case "adm": {
           const target = Number(a);

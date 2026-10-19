@@ -38,7 +38,7 @@ async function boot(extra: Partial<BotOptions> = {}) {
 
 test("db: migrations table, users with credits that never go negative, lookup by @username, settings and sessions", async () => {
   const db = new BotDb(path.join(await tmp(), "vedit.db"));
-  assert.deepEqual(db.migrations(), [1, 2, 3]);
+  assert.deepEqual(db.migrations(), [1, 2, 3, 4]);
   const u = db.touchUser(42, { username: "Alisher", first_name: "Алишер" });
   assert.equal(u.onboarding, "lang");
   assert.equal(u.lang, "ru");
@@ -55,7 +55,7 @@ test("db: migrations table, users with credits that never go negative, lookup by
   // a second open of the same file does not re-run migrations
   db.close();
   const again = new BotDb(db.file);
-  assert.deepEqual(again.migrations(), [1, 2, 3]);
+  assert.deepEqual(again.migrations(), [1, 2, 3, 4]);
   assert.equal(again.getUser(42)?.credits, 0);
   again.close();
 });
@@ -167,7 +167,9 @@ test("onboarding in Uzbek: language → intro + purpose → terms (with the text
   assert.equal(u.onboarding, "done");
   assert.ok(u.accepted_terms_at);
   assert.equal(u.credits, 4);
-  const welcome = [...tg.calls].reverse().find((c) => c.method === "sendMessage")!;
+  // the welcome with the menu, then (once) the first card of the guide
+  const welcome = tg.sent(50, STRINGS.uz.welcome(4, 3, 1, 15))!;
+  assert.match(tg.texts(50).at(-1)!, /^📘 Qanday foydalanish · 1\/7/);
   assert.equal(welcome.params.text, STRINGS.uz.welcome(4, 3, 1, 15));
   assert.deepEqual((welcome.params.reply_markup as { inline_keyboard: { text: string }[][] }).inline_keyboard.flat().map((b) => b.text), Object.values(STRINGS.uz.menu));
   // a user registered after the switch never gets the "remove the old keyboard" message
@@ -440,7 +442,7 @@ test("admin: stats, find a user, +credits (user notified in their language), ban
   await bot.handleUpdate(tg.text(1, "@Dilnoza"));
   const card = tg.sent(1, "👤 Dilnoza @dilnoza · id 20")!;
   const cardId = tg.messageIdOf(card)!;
-  assert.deepEqual(tg.buttons(tg.keyboardOf(card)), ["+1 кр.=a:c:20:1", "+5 кр.=a:c:20:5", "+20 кр.=a:c:20:20", "🚫 Заблокировать=a:ban:20", "⭐ Сделать админом=a:adm:20"]);
+  assert.deepEqual(tg.buttons(tg.keyboardOf(card)), ["+1 кр.=a:c:20:1", "+5 кр.=a:c:20:5", "+20 кр.=a:c:20:20", "⭐ VIP=a:vip:20", "🚫 Заблокировать=a:ban:20", "⭐ Сделать админом=a:adm:20"]);
   await bot.handleUpdate(tg.press(1, "a:c:20:5", cardId));
   assert.equal(bot.user(20)!.credits, 5);
   assert.equal(tg.texts(20).at(-1), STRINGS.uz.creditsGrantedUser(5, 5));

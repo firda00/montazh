@@ -137,7 +137,7 @@ export interface TgFile {
   file_size?: number;
   file_path?: string;
 }
-export type ChatAction = "typing" | "upload_video" | "upload_document" | "record_video" | "upload_voice";
+export type ChatAction = "typing" | "upload_video" | "upload_document" | "record_video" | "upload_voice" | "upload_photo";
 
 // ── errors & transport ─────────────────────────────────────────────────────────
 
@@ -288,6 +288,8 @@ export interface BotApi {
   sendDocument(chatId: number, filePath: string, caption?: string, opts?: DocumentOptions): Promise<TgMessage>;
   /** a voice message: OGG with Opus audio */
   sendVoice(chatId: number, filePath: string, caption?: string): Promise<TgMessage>;
+  /** a picture (PNG / JPEG ≤ 10 MB) */
+  sendPhoto(chatId: number, filePath: string, caption?: string): Promise<TgMessage>;
   sendChatAction(chatId: number, action: ChatAction): Promise<void>;
 }
 
@@ -380,6 +382,8 @@ export function makeBotApi(token: string, o: BotApiOptions = {}): BotApi {
       ),
     sendVoice: async (chatId, filePath, caption) =>
       call<TgMessage>(token, "sendVoice", { chat_id: chatId, voice: await readAsFile(filePath, "audio/ogg"), caption: caption ? clip(caption, CAPTION_LIMIT) : undefined }, base),
+    sendPhoto: async (chatId, filePath, caption) =>
+      call<TgMessage>(token, "sendPhoto", { chat_id: chatId, photo: await readAsFile(filePath, filePath.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg"), caption: caption ? clip(caption, CAPTION_LIMIT) : undefined }, base),
     sendChatAction: async (chatId, action) => {
       await call<boolean>(token, "sendChatAction", { chat_id: chatId, action }, base);
     },

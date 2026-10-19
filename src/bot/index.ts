@@ -27,6 +27,7 @@ import { StyleProfileSchema } from "../style/profile.ts";
 import { runRetention, type RetentionReport } from "./retention.ts";
 import { commentKb, COMMENT_WINDOW_MS, feedbackKb, feedbackMeta, isLow, parseReasons, reasonsFor, reviewContext, transcribeNote, VOICE_NOTE_MAX_S } from "./feedback.ts";
 import { likelyIssue, parseReview, type SelfReviewFn } from "../review/self-review.ts";
+import { GUIDE_ACTIONS, GUIDE_DIR, guideCard, guideImageName, renderGuideImage } from "./guide.ts";
 import { dailyBudgetUsdFromEnv, dayStart, freePlanFromEnv, maxJobsFromEnv, retentionDaysFromEnv, tzOffsetFromEnv, userDailyJobsFromEnv, type JobClass, type PlanLimits } from "./plans.ts";
 import {
   cancelKb,
@@ -393,6 +394,8 @@ export interface BotOptions {
   selfReviewMax?: number;
   /** a voice-note comment → text (default whisper.cpp; tests inject a fake) */
   transcribeNote?: (file: string) => Promise<string>;
+  /** where the cheat-sheet pictures guide-<lang>.png live (default docs/) */
+  guideDir?: string;
   /** legal texts (terms|privacy).<lang>.md (default docs/legal) */
   docsDir?: string;
   env?: NodeJS.ProcessEnv;
@@ -460,6 +463,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   const reviewFn = o.selfReview || undefined;
   const reviewMax = o.selfReviewMax ?? (Number(env.VEDIT_SELF_REVIEW_MAX) > 0 ? Number(env.VEDIT_SELF_REVIEW_MAX) : 3);
   const transcribeFn = o.transcribeNote ?? transcribeNote;
+  const guideDir = o.guideDir ?? GUIDE_DIR;
 
   await fs.mkdir(botDir, { recursive: true });
   const db = new BotDb(path.join(botDir, "vedit.db"));
@@ -474,6 +478,11 @@ export async function createBot(o: BotOptions): Promise<Bot> {
 
   // ── users, sessions, settings ──
   const isAdmin = (uid: number) => envAdmins.has(uid) || db.getUser(uid)?.role === "admin";
+  /** VIP testers: no daily limits, no credit charges, every feature; still in the shared queue and under the global budget */
+  const isVip = (uid: number) => db.getUser(uid)?.plan === "vip";
+  const unlimited = (uid: number) => isAdmin(uid) || isVip(uid);
+  /** closed beta: TELEGRAM_ALLOWED_USERS + the env admins + the DB allowlist (/allow, /vip, «✅ Пустить (VIP)») */
+  const allowedIn = (uid: number) => !allowed || allowed.has(uid) || envAdmins.has(uid) || db.isAllowed(uid);
   const langOf = (uid: number): Lang => db.getUser(uid)?.lang ?? "ru";
   const T = (uid: number): Strings => t(langOf(uid));
   const plan = (): PlanLimits => db.planLimits(basePlan);
@@ -639,13 +648,13 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         await say(chatId, L.budgetPaused);
         return undefined;
       }
-      if (userDailyJobs > 0 && db.countJobs(uid, today()) >= userDailyJobs) {
+      if (userDailyJobs > 0 && !isVip(uid) && db.countJobs(uid, today()) >= userDailyJobs) {
         await say(chatId, L.userDailyCap(userDailyJobs));
         return undefined;
       }
     }
     let paid = 0;
-    if (quotasOn && !isAdmin(uid) && cls !== "light") {
+    if (quotasOn && !unlimited(uid) && cls !== "light") {
       const { used, limit } = freeLeft(uid, cls);
       if (used >= limit) {
         const p = plan();
@@ -860,6 +869,29 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     }
   }
 
+  // ── the guide's cheat sheet ──
+  async function sendGuideSheet(uid: number, chatId: number) {
+    const lang = langOf(uid);
+    const L = T(uid);
+    let file = path.join(guideDir, guideImageName(lang));
+    try {
+      if (!(await exists(file))) {
+        // not shipped for this language: render it once with headless Chrome
+        file = path.join(botDir, "_guide", guideImageName(lang));
+        if (!(await exists(file))) await renderGuideImage(L, file);
+      }
+      await action(chatId, "upload_photo");
+      try {
+        await api.sendPhoto(chatId, file, L.guide.sheetCaption);
+      } catch {
+        await api.sendDocument(chatId, file, L.guide.sheetCaption);
+      }
+    } catch (err) {
+      log(`[${uid}] шпаргалка: ${errMsg(err)}`);
+      await say(chatId, L.guide.sheetMissing);
+    }
+  }
+
   // ── stage 28: self-review (the AI critic) ──
   let reviewChain: Promise<void> = Promise.resolve();
   function scheduleReview(jobId: string) {
@@ -1063,7 +1095,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   }
 
   // ── uploads ──
-  const uploadLimit = (uid: number) => (isAdmin(uid) ? api.limits.downloadBytes : Math.min(api.limits.downloadBytes, plan().uploadMb * 1024 * 1024));
+  const uploadLimit = (uid: number) => (unlimited(uid) ? api.limits.downloadBytes : Math.min(api.limits.downloadBytes, plan().uploadMb * 1024 * 1024));
   const MBn = (n: number) => Math.round(n / 1024 / 1024);
   async function tooLargeReply(uid: number, chatId: number, size: number) {
     const L = T(uid);
@@ -1569,6 +1601,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const p = plan();
     const u = db.getUser(uid);
     await say(chatId, L.balance({ plan: u?.plan ?? "free", credits: u?.credits ?? 0, usedStd: freeLeft(uid, "standard").used, std: p.standardPerDay, usedLong: freeLeft(uid, "long").used, long: p.longPerDay, cs: p.creditsStandard, cl: p.creditsLong, longMinutes: p.longMinutes, admin: isAdmin(uid) || !quotasOn }));
+    // (a VIP sees «Тариф: VIP (без лимитов и списаний)» from the plan field)
   }
 
   async function onMenu(uid: number, chatId: number, a: MenuAction) {
@@ -1600,6 +1633,10 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         return balance(uid, chatId);
       case "help":
         return sayMenu(uid, chatId, L.help);
+      case "guide": {
+        const g = guideCard(L, 0);
+        return void (await say(chatId, g.text, encodeKb(g.kb)));
+      }
     }
   }
 
@@ -1639,6 +1676,9 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     if (quotasOn && p.trialCredits) db.addUsage({ user: uid, kind: "credits:trial", units: -p.trialCredits, cost_usd: 0 });
     const L = T(uid);
     await sayMenu(uid, chatId, L.welcome(credits, p.standardPerDay, p.longPerDay, p.longMinutes));
+    // the short guide, once: right after registration
+    const g = guideCard(L, 0);
+    await say(chatId, g.text, encodeKb(g.kb));
     log(`[${uid}] регистрация завершена`);
   }
 
@@ -1762,6 +1802,14 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         case "admin":
           if (!isAdmin(uid)) return void (await say(chatId, L.unknownCommand));
           return admin.menu(uid, chatId);
+        case "vip":
+          if (!isAdmin(uid)) return void (await say(chatId, L.unknownCommand));
+          return admin.vipCommand(uid, chatId, arg);
+        case "allow":
+          if (!isAdmin(uid)) return void (await say(chatId, L.unknownCommand));
+          return admin.allowCommand(uid, chatId, arg);
+        case "guide":
+          return onMenu(uid, chatId, "guide");
         default:
           return void (await say(chatId, L.unknownCommand));
       }
@@ -1820,7 +1868,10 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       await api.answerCallbackQuery(q.id, text).catch(() => {});
     };
     try {
-      if (allowed && !allowed.has(uid)) return void log(`[${chatId}] кнопка пропущена: ${uid} не в TELEGRAM_ALLOWED_USERS`);
+      if (!allowedIn(uid)) {
+        log(`[${chatId}] кнопка пропущена: ${uid} не в TELEGRAM_ALLOWED_USERS`);
+        return void (await admin.stranger(q.from));
+      }
       const user = touch(q.from);
       const L = t(user.lang);
       if (user.status === "banned" && !isAdmin(uid)) return void (await answer(L.banned));
@@ -1902,6 +1953,25 @@ export async function createBot(o: BotOptions): Promise<Bot> {
           if (v) {
             await answer(toast);
             await sendSample(uid, chatId, v);
+          }
+          break;
+        }
+        case "G": {
+          // the guide: ◀️ ▶️ edit the card in place, «Попробовать» opens the flow, «🖼 Шпаргалка» sends the picture
+          if (a === "p") {
+            const g = guideCard(L, Number(b));
+            if (msgId) await edit(chatId, msgId, g.text, encodeKb(g.kb));
+            break;
+          }
+          if (a === "t") {
+            await answer();
+            const act = GUIDE_ACTIONS[Number(b)];
+            if (act === "menu" || !act) return showMenu(uid, chatId);
+            return onMenu(uid, chatId, act);
+          }
+          if (a === "img") {
+            await answer();
+            await sendGuideSheet(uid, chatId);
           }
           break;
         }
@@ -2132,8 +2202,10 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       const from = m.from;
       // the bot works in private chats only: in a group every message would become a task
       if (m.chat.type !== "private") return void log(`[${m.chat.id}] пропущено: чат типа ${m.chat.type}`);
-      if (!from || (allowed && !allowed.has(from.id))) {
+      if (!from || !allowedIn(from.id)) {
         log(`[${m.chat.id}] пропущено: пользователь ${from?.id ?? "?"} не в TELEGRAM_ALLOWED_USERS`);
+        // the admins hear about a stranger once, with «✅ Пустить (VIP)»
+        if (from) await admin.stranger(from);
         return;
       }
       const user = touch(from);
@@ -2245,9 +2317,9 @@ export interface RunningBot {
 /** the Telegram command menu, per language */
 async function setCommands(api: BotApi, log: (l: string) => void) {
   const sets: Record<Lang, [string, string][]> = {
-    ru: [["start", "Меню"], ["make", "Ролик по теме"], ["viral", "Один вирусный ролик из видео"], ["settings", "Настройки"], ["balance", "Баланс и лимиты"], ["status", "Что сейчас делается"], ["cancel", "Отменить"], ["help", "Помощь"]],
-    uz: [["start", "Menyu"], ["make", "Mavzu bo‘yicha rolik"], ["viral", "Videolardan bitta virusli rolik"], ["settings", "Sozlamalar"], ["balance", "Balans va limitlar"], ["status", "Hozir nima bajarilmoqda"], ["cancel", "Bekor qilish"], ["help", "Yordam"]],
-    en: [["start", "Menu"], ["make", "Video on a topic"], ["viral", "One viral clip from videos"], ["settings", "Settings"], ["balance", "Balance and limits"], ["status", "What is running"], ["cancel", "Cancel"], ["help", "Help"]],
+    ru: [["start", "Меню"], ["make", "Ролик по теме"], ["viral", "Один вирусный ролик из видео"], ["settings", "Настройки"], ["balance", "Баланс и лимиты"], ["status", "Что сейчас делается"], ["cancel", "Отменить"], ["guide", "Как пользоваться"], ["help", "Помощь"]],
+    uz: [["start", "Menyu"], ["make", "Mavzu bo‘yicha rolik"], ["viral", "Videolardan bitta virusli rolik"], ["settings", "Sozlamalar"], ["balance", "Balans va limitlar"], ["status", "Hozir nima bajarilmoqda"], ["cancel", "Bekor qilish"], ["guide", "Qanday foydalanish"], ["help", "Yordam"]],
+    en: [["start", "Menu"], ["make", "Video on a topic"], ["viral", "One viral clip from videos"], ["settings", "Settings"], ["balance", "Balance and limits"], ["status", "What is running"], ["cancel", "Cancel"], ["guide", "How to use"], ["help", "Help"]],
   };
   for (const [lang, cmds] of Object.entries(sets) as [Lang, [string, string][]][]) {
     try {

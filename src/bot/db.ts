@@ -245,6 +245,14 @@ const MIGRATIONS: string[] = [
     cost_usd, COALESCE(finished_at, created_at), COALESCE(finished_at, created_at)
   FROM jobs WHERE rating BETWEEN 1 AND 5;
   `,
+  // 4: testers let in from the bot (on top of TELEGRAM_ALLOWED_USERS): /allow, /vip, «✅ Пустить (VIP)»
+  `
+  CREATE TABLE allowlist (
+    tg_id INTEGER PRIMARY KEY,
+    added_by INTEGER,
+    created_at TEXT NOT NULL
+  );
+  `,
 ];
 
 type Param = string | number | null;
@@ -507,6 +515,24 @@ export class BotDb {
 
   putStyleKey(alias: string, key: string, summary?: string) {
     this.run("INSERT INTO style_cache (alias, key, summary, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(alias) DO UPDATE SET key = excluded.key, summary = excluded.summary", alias, key, summary ?? null, nowIso());
+  }
+
+  // ── allowlist (closed beta without editing .env) ─────────────────────────────
+
+  allow(id: number, by?: number) {
+    this.run("INSERT INTO allowlist (tg_id, added_by, created_at) VALUES (?, ?, ?) ON CONFLICT(tg_id) DO NOTHING", id, by ?? null, nowIso());
+  }
+
+  disallow(id: number) {
+    this.run("DELETE FROM allowlist WHERE tg_id = ?", id);
+  }
+
+  isAllowed(id: number): boolean {
+    return !!this.get<{ tg_id: number }>("SELECT tg_id FROM allowlist WHERE tg_id = ?", id);
+  }
+
+  allowedIds(): number[] {
+    return this.all<{ tg_id: number }>("SELECT tg_id FROM allowlist ORDER BY tg_id").map((r) => r.tg_id);
   }
 
   // ── stage 28: outputs, feedback, self-review ─────────────────────────────────

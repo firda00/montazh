@@ -230,7 +230,10 @@ test("unauthorized user ids are ignored when allowedUserIds is set", async () =>
   tg.text(20, 20, "/start");
   tg.video(20, 20, "INTRUDER");
   tg.text(10, 10, "/start");
-  await waitFor(() => tg.messages(10).length === 1, "allowed user served");
+  await waitFor(() => tg.messages(10).includes(MSG.menuText), "allowed user served");
+  // 10 is also the admin: the stranger is announced once (with «✅ Пустить (VIP)»), however many times they write
+  assert.equal(tg.messages(10).filter((m) => m === MSG.strangerNotice(20, "—", "")).length, 1);
+  assert.equal(tg.messages(10).length, 2);
   assert.equal(tg.messages(20).length, 0);
   assert.equal(tg.downloads.length, 0);
   assert.equal(tg.calls.filter((c) => c.params.chat_id === 20).length, 0);
