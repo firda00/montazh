@@ -11,11 +11,16 @@ import { z } from "zod";
  */
 
 export const GRAPHIC_KINDS = ["counter", "bars", "line", "quote", "timeline", "compare", "chat", "search", "post", "list"] as const;
-export type GraphicKind = (typeof GRAPHIC_KINDS)[number];
+/**
+ * Stage 26 (make, product UI drawn in code): a terminal session (Claude Code, Codex…), an exchange ticker board (Nasdaq,
+ * IPO) and a funding-round card. Not offered to the split_news director (its schema keeps GRAPHIC_KINDS).
+ */
+export const EXTRA_GRAPHIC_KINDS = ["terminal", "ticker", "round"] as const;
+export type GraphicKind = (typeof GRAPHIC_KINDS)[number] | (typeof EXTRA_GRAPHIC_KINDS)[number];
 
 export const GraphicItemSchema = z.object({ label: z.string().default(""), value: z.string().default("") });
 export const GraphicSchema = z.object({
-  kind: z.enum(GRAPHIC_KINDS),
+  kind: z.enum([...GRAPHIC_KINDS, ...EXTRA_GRAPHIC_KINDS]),
   /** heading / search query / post author / quote author */
   title: z.string().default(""),
   /** counter: [{label, value}]; bars/line: [{label, value: number}]; timeline: [{label: date, value: event}];
@@ -242,11 +247,13 @@ export function renderGraphic(g: Graphic, c: GraphicContext): GraphicOut {
       body = `<span class="gx-chart" style="width:${W}px;height:${H + 60}px"><svg class="gx-svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}"><defs><linearGradient id="${id}-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${c.accent}" stop-opacity="0.45"/><stop offset="1" stop-color="${c.accent}" stop-opacity="0"/></linearGradient></defs>${[0.25, 0.5, 0.75].map((f) => `<line x1="0" x2="${W}" y1="${r1(H * f)}" y2="${r1(H * f)}" stroke="rgba(255,255,255,0.08)" stroke-width="2"/>`).join("")}<path id="${id}-area" d="${area}" fill="url(#${id}-grad)"/><path id="${id}-path" d="${d}" fill="none" stroke="${c.accent}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="${len}" stroke-dashoffset="${len}"/></svg>${xy
         .map((p, i) => `<span class="gx-dot" id="${id}-p${i}" style="left:${r1(p.x - 11)}px;top:${r1(p.y - 11)}px"></span><span class="gx-xl" style="left:${r1(p.x - 80)}px;top:${H + 14}px">${esc(clampText(pts[i].label, 12))}</span>`)
         .join("")}<span class="gx-tip" id="${id}-tip" style="left:${r1(Math.min(W - 230, Math.max(0, (xy.at(-1)?.x ?? 0) - 115)))}px;top:${r1(Math.max(0, (xy.at(-1)?.y ?? 0) - 110))}px">${esc(clampText(pts.at(-1)?.raw ?? "", 12))}</span></span>`;
-      tw.push(`tl.fromTo("#${id}-path", { strokeDashoffset: ${len} }, { strokeDashoffset: 0, duration: 1.6, ease: "power2.inOut" }, ${fmt(t0 + 0.3)});`);
-      tw.push(`tl.fromTo("#${id}-area", { opacity: 0 }, { opacity: 1, duration: 0.8, ease: "power1.out" }, ${fmt(t0 + 1.2)});`);
-      xy.forEach((_, i) => tw.push(`tl.fromTo("#${id}-p${i}", { scale: 0 }, { scale: 1, duration: 0.35, ease: "back.out(3)" }, ${fmt(t0 + 0.3 + (pts.length > 1 ? (1.6 * i) / (pts.length - 1) : 0))});`));
-      tw.push(`tl.fromTo("#${id}-tip", { opacity: 0, y: 20, scale: 0.85 }, { opacity: 1, y: 0, scale: 1, duration: 0.45, ease: "back.out(2)" }, ${fmt(t0 + 1.9)});`);
-      body += note(g.note, t0 + 2.1);
+      // the line draws in half of a short panel (make sub-shots last ~2 s), never slower than 1.6 s
+      const dd = Math.max(0.6, Math.min(1.6, c.duration * 0.5));
+      tw.push(`tl.fromTo("#${id}-path", { strokeDashoffset: ${len} }, { strokeDashoffset: 0, duration: ${fmt(dd)}, ease: "power2.inOut" }, ${fmt(t0 + 0.3)});`);
+      tw.push(`tl.fromTo("#${id}-area", { opacity: 0 }, { opacity: 1, duration: 0.8, ease: "power1.out" }, ${fmt(t0 + 0.3 + dd * 0.55)});`);
+      xy.forEach((_, i) => tw.push(`tl.fromTo("#${id}-p${i}", { scale: 0 }, { scale: 1, duration: 0.35, ease: "back.out(3)" }, ${fmt(t0 + 0.3 + (pts.length > 1 ? (dd * i) / (pts.length - 1) : 0))});`));
+      tw.push(`tl.fromTo("#${id}-tip", { opacity: 0, y: 20, scale: 0.85 }, { opacity: 1, y: 0, scale: 1, duration: 0.45, ease: "back.out(2)" }, ${fmt(t0 + 0.3 + dd)});`);
+      body += note(g.note, t0 + 0.5 + dd);
       break;
     }
     case "quote": {
@@ -339,6 +346,65 @@ export function renderGraphic(g: Graphic, c: GraphicContext): GraphicOut {
       tw.push(`tl.fromTo("#${id}-card", { opacity: 0, y: 60, scale: 0.94 }, { opacity: 1, y: 0, scale: 1, duration: 0.6, ease: "expo.out" }, ${fmt(t0)});`);
       tw.push(...wordsIn(words.ids, t0 + 0.4, Math.min(0.06, 1.5 / Math.max(1, words.ids.length))));
       stats.forEach((_, k) => tw.push(`tl.fromTo("#${id}-st${k}", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.35, ease: "power2.out" }, ${fmt(t0 + 1.2 + k * 0.15)});`));
+      tw.splice(tw.findIndex((x) => x.includes(`#${id}-t"`)), title ? 1 : 0);
+      return wrap(c, id, "", body, tw);
+    }
+    case "terminal": {
+      // a generic coding-agent session: the command, the task, tool steps ticking in, a working spinner (no copied UI)
+      const cmd = clampText(g.title || "agent", 24);
+      const task = clampText(g.note || items[0]?.value || "", 90);
+      const steps = (g.note ? items : items.slice(1)).slice(0, 4);
+      const lines = [
+        `<span class="gx-tln" id="${id}-l0"><b class="gx-pr">$</b>&nbsp;<span class="gx-typ" id="${id}-c0">${esc(cmd)}</span></span>`,
+        task ? `<span class="gx-tln task" id="${id}-l1"><b class="gx-pr acc">&gt;</b>&nbsp;<span class="gx-typ" id="${id}-c1">${esc(task)}</span></span>` : "",
+        ...steps.map((x, k) => `<span class="gx-tln" id="${id}-s${k}"><b class="gx-ok">✓</b>&nbsp;${esc(clampText(x.label, 34))}${x.value ? `&nbsp;<i class="gx-dim">${esc(clampText(x.value, 26))}</i>` : ""}</span>`),
+        `<span class="gx-tln" id="${id}-w"><b class="gx-spin" id="${id}-sp">✻</b>&nbsp;<span class="gx-dim">Working…</span></span>`,
+      ];
+      body = `<span class="gx-term"><span class="gx-tbar"><i class="gx-tdot r"></i><i class="gx-tdot y"></i><i class="gx-tdot g"></i><span class="gx-ttl" style="font-family:${c.monoFamily}">${esc(cmd)} — ~/project</span></span><span class="gx-tbody" style="font-family:${c.monoFamily}">${lines.filter(Boolean).join("")}</span></span>`;
+      const t1 = Math.min(0.5, 0.05 * cmd.length + 0.1);
+      tw.push(`tl.fromTo("#${id}-c0", { clipPath: "inset(0% 100% 0% 0%)" }, { clipPath: "inset(0% 0% 0% 0%)", duration: ${fmt(t1)}, ease: "steps(${Math.max(3, cmd.length)})" }, ${fmt(t0)});`);
+      let at = t0 + t1 + 0.15;
+      if (task) {
+        const t2 = Math.min(0.8, 0.02 * task.length + 0.15);
+        tw.push(`tl.fromTo("#${id}-l1", { opacity: 0 }, { opacity: 1, duration: 0.05, ease: "none" }, ${fmt(at)});`);
+        tw.push(`tl.fromTo("#${id}-c1", { clipPath: "inset(0% 100% 0% 0%)" }, { clipPath: "inset(0% 0% 0% 0%)", duration: ${fmt(t2)}, ease: "steps(${Math.max(4, Math.round(task.length / 2))})" }, ${fmt(at)});`);
+        at += t2 + 0.15;
+      }
+      const room = Math.max(0.25, Math.min(0.45, (c.start + c.duration - 0.6 - at) / Math.max(1, steps.length + 1)));
+      steps.forEach((_, k) => tw.push(`tl.fromTo("#${id}-s${k}", { opacity: 0, x: -20 }, { opacity: 1, x: 0, duration: 0.2, ease: "power2.out" }, ${fmt(at + k * room)});`));
+      tw.push(`tl.fromTo("#${id}-w", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "none" }, ${fmt(at + steps.length * room)});`);
+      tw.push(`tl.fromTo("#${id}-sp", { rotation: 0 }, { rotation: 540, duration: ${fmt(Math.max(1, c.duration))}, ease: "none" }, ${fmt(c.start)});`);
+      // these kinds have no heading: drop the heading tween pushed above
+      tw.splice(tw.findIndex((x) => x.includes(`#${id}-t"`)), title ? 1 : 0);
+      return wrap(c, id, "", body, tw);
+    }
+    case "ticker": {
+      // an exchange board: the venue, a highlighted line with the script's fact, a tape of the script's facts scrolling
+      const venue = clampText(g.title || "EXCHANGE", 16);
+      const hi = items[0] ?? { label: "", value: "" };
+      const tape = (items.length > 1 ? items.slice(1) : items).slice(0, 4);
+      const cells = tape.map((x) => `<span class="gx-tc"><b>${esc(clampText(x.label, 18))}</b>&nbsp;${esc(clampText(x.value, 16))}<i class="gx-up">▲</i></span>`).join("");
+      body = `<span class="gx-tk"><span class="gx-tkh"><span class="gx-tkn" id="${id}-vn" style="font-family:${c.monoFamily}">${esc(venue)}</span><span class="gx-live" id="${id}-lv"><i></i>LIVE</span></span><span class="gx-tkbig" id="${id}-hi"><span class="gx-tkl">${esc(clampText(hi.label, 22))}</span><span class="gx-tkv" id="${id}-hv">${esc(clampText(hi.value, 16))}</span>${g.note ? `<span class="gx-tknote">${esc(clampText(g.note, 30))}</span>` : ""}</span><span class="gx-tape" style="font-family:${c.monoFamily}"><span class="gx-tapein" id="${id}-tp">${cells}${cells}${cells}</span></span></span>`;
+      tw.push(`tl.fromTo("#${id}-vn", { opacity: 0, letterSpacing: "0.6em" }, { opacity: 1, letterSpacing: "0.12em", duration: 0.6, ease: "power3.out" }, ${fmt(t0)});`);
+      tw.push(`tl.fromTo("#${id}-hi", { opacity: 0, y: 50 }, { opacity: 1, y: 0, duration: 0.5, ease: "expo.out" }, ${fmt(t0 + 0.25)});`);
+      tw.push(`tl.fromTo("#${id}-hv", { scale: 1.35 }, { scale: 1, duration: 0.45, ease: "back.out(2.5)" }, ${fmt(t0 + 0.5)});`);
+      tw.push(`tl.fromTo("#${id}-lv", { opacity: 0.25 }, { opacity: 1, duration: 0.4, ease: "steps(2)", repeat: ${Math.max(1, Math.floor(c.duration / 0.4))}, yoyo: true }, ${fmt(c.start)});`);
+      tw.push(`tl.fromTo("#${id}-tp", { xPercent: 0 }, { xPercent: -33.333, duration: ${fmt(Math.max(1.5, c.duration))}, ease: "none" }, ${fmt(c.start)});`);
+      // these kinds have no heading: drop the heading tween pushed above
+      tw.splice(tw.findIndex((x) => x.includes(`#${id}-t"`)), title ? 1 : 0);
+      return wrap(c, id, "", body, tw);
+    }
+    case "round": {
+      // a funding round card: the amount, the valuation, the investors named in the script
+      const main = items[0] ?? { label: "", value: g.note };
+      const rows = items.slice(1, 4);
+      const chips = g.note.split(/\s*[,;·]\s*/).map((x) => x.trim()).filter(Boolean).slice(0, 4);
+      body = `<span class="gx-round" id="${id}-card"><span class="gx-rk">${esc(clampText(g.title || "Раунд", 28))}</span><span class="gx-ramt" id="${id}-amt">${esc(clampText(main.value, 14))}</span>${main.label ? `<span class="gx-rlab">${esc(clampText(main.label, 34))}</span>` : ""}${rows.map((r, k) => `<span class="gx-rrow" id="${id}-r${k}"><span>${esc(clampText(r.label, 22))}</span><b>${esc(clampText(r.value, 16))}</b></span>`).join("")}${chips.length ? `<span class="gx-chips">${chips.map((x, k) => `<span class="gx-chip" id="${id}-ch${k}">${esc(clampText(x, 18))}</span>`).join("")}</span>` : ""}</span>`;
+      tw.push(`tl.fromTo("#${id}-card", { opacity: 0, y: 70, scale: 0.92 }, { opacity: 1, y: 0, scale: 1, duration: 0.55, ease: "expo.out" }, ${fmt(t0)});`);
+      tw.push(`tl.fromTo("#${id}-amt", { scale: 1.5, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.5, ease: "back.out(2.2)" }, ${fmt(t0 + 0.3)});`);
+      rows.forEach((_, k) => tw.push(`tl.fromTo("#${id}-r${k}", { opacity: 0, x: -30 }, { opacity: 1, x: 0, duration: 0.35, ease: "power3.out" }, ${fmt(t0 + 0.7 + k * 0.2)});`));
+      chips.forEach((_, k) => tw.push(`tl.fromTo("#${id}-ch${k}", { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2)" }, ${fmt(t0 + 0.9 + rows.length * 0.2 + k * 0.12)});`));
+      // these kinds have no heading: drop the heading tween pushed above
       tw.splice(tw.findIndex((x) => x.includes(`#${id}-t"`)), title ? 1 : 0);
       return wrap(c, id, "", body, tw);
     }
@@ -438,5 +504,42 @@ export function graphicsCss(o: { w: number; h: number; accent: string; bg: strin
       .gx-li { display: flex; flex: 1 1 0; max-height: 220px; align-items: center; gap: 30px; padding: 20px 34px; border-radius: 30px; background: rgba(255,255,255,0.09); border-left: 12px solid ${A}; }
       .gx-num { display: block; font-family: ${o.monoFamily}; font-size: 52px; font-weight: 700; color: ${A}; }
       .gx-lt { display: flex; flex-direction: column; gap: 6px; font-size: 56px; font-weight: 900; line-height: 1.06; }
-      .gx-lv { display: block; font-size: 38px; font-weight: 600; color: rgba(255,255,255,0.7); }`;
+      .gx-lv { display: block; font-size: 38px; font-weight: 600; color: rgba(255,255,255,0.7); }
+      .gx-term { position: absolute; left: 0; right: 0; top: 0; min-height: 62%; display: flex; flex-direction: column; border-radius: 30px; overflow: hidden; background: #0E1116; border: 2px solid rgba(255,255,255,0.12); box-shadow: 0 40px 100px rgba(0,0,0,0.55); }
+      .gx-tbar { display: flex; align-items: center; gap: 14px; height: 74px; padding: 0 28px; background: #1A1F27; }
+      .gx-tdot { display: block; width: 22px; height: 22px; border-radius: 50%; background: #FF5F57; }
+      .gx-tdot.y { background: #FEBC2E; }
+      .gx-tdot.g { background: #28C840; }
+      .gx-ttl { display: block; margin-left: 18px; font-size: 26px; color: rgba(255,255,255,0.55); }
+      .gx-tbody { display: flex; flex-direction: column; gap: 22px; padding: 40px 38px; font-size: 38px; line-height: 1.3; color: #E6EDF3; }
+      .gx-tln { display: block; }
+      .gx-tln.task { color: #FFFFFF; font-weight: 700; }
+      .gx-typ { display: inline-block; white-space: nowrap; }
+      .gx-pr { color: #7EE787; }
+      .gx-pr.acc { color: ${A}; }
+      .gx-ok { color: #7EE787; }
+      .gx-dim { color: rgba(230,237,243,0.55); font-style: normal; }
+      .gx-spin { display: inline-block; color: ${A}; }
+      .gx-tk { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 34px; }
+      .gx-tkh { display: flex; align-items: center; justify-content: space-between; padding: 0 10px; }
+      .gx-tkn { display: block; font-size: 64px; font-weight: 700; letter-spacing: 0.12em; color: #FFFFFF; }
+      .gx-live { display: flex; align-items: center; gap: 12px; font-size: 30px; font-weight: 800; letter-spacing: 0.14em; color: #FF4D4D; }
+      .gx-live i { display: block; width: 20px; height: 20px; border-radius: 50%; background: #FF4D4D; }
+      .gx-tkbig { display: flex; flex-direction: column; gap: 12px; padding: 44px 46px; border-radius: 30px; background: rgba(0,0,0,0.55); border: 3px solid ${A}; box-shadow: 0 0 60px ${A}55; }
+      .gx-tkl { display: block; font-size: 44px; font-weight: 800; color: rgba(255,255,255,0.85); text-transform: uppercase; letter-spacing: 0.04em; }
+      .gx-tkv { display: block; font-size: 112px; font-weight: 900; line-height: 1; color: #3DDC84; transform-origin: 0% 50%; }
+      .gx-tknote { display: block; font-size: 34px; font-weight: 700; color: rgba(255,255,255,0.7); }
+      .gx-tape { display: block; overflow: hidden; white-space: nowrap; padding: 22px 0; border-top: 2px solid rgba(255,255,255,0.15); border-bottom: 2px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.45); }
+      .gx-tapein { display: inline-flex; gap: 60px; padding-left: 30px; }
+      .gx-tc { display: inline-block; font-size: 40px; color: #FFFFFF; }
+      .gx-tc b { color: ${A}; }
+      .gx-up { margin-left: 10px; color: #3DDC84; font-style: normal; }
+      .gx-round { position: absolute; left: 0; right: 0; top: 50%; margin-top: -330px; display: flex; flex-direction: column; gap: 22px; padding: 54px 56px; border-radius: 40px; background: #F7F6F2; color: #15122A; box-shadow: 0 40px 100px rgba(0,0,0,0.5); }
+      .gx-rk { display: block; font-size: 34px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: #6B6880; }
+      .gx-ramt { display: block; font-size: 150px; font-weight: 900; line-height: 0.95; letter-spacing: -0.03em; color: #15122A; transform-origin: 0% 60%; }
+      .gx-rlab { display: block; font-size: 40px; font-weight: 700; color: #3B3850; }
+      .gx-rrow { display: flex; justify-content: space-between; align-items: baseline; padding-top: 18px; border-top: 2px solid rgba(21,18,42,0.12); font-size: 40px; font-weight: 600; color: #3B3850; }
+      .gx-rrow b { font-size: 48px; font-weight: 900; color: #15122A; }
+      .gx-chips { display: flex; flex-wrap: wrap; gap: 14px; }
+      .gx-chip { display: block; padding: 12px 24px; border-radius: 40px; background: ${A}; color: #15122A; font-size: 32px; font-weight: 800; }`;
 }

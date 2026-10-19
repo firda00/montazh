@@ -143,3 +143,57 @@ export async function alignTake(pcm: Int16Array, rate: number, paragraphs: strin
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 }
+
+/**
+ * Stage 26: real word times for the written words of a narration on the video timeline. The voiceover's own word times
+ * are estimates (a sentence's time shared out by spoken length), good for revealing words, a few hundred ms off for
+ * cutting the picture on a name. Whisper's words (canonical spoken tokens) are aligned to the written words by edit
+ * distance; a written word takes the start of its first heard token, an unheard one is interpolated between heard
+ * neighbours. Null when less than 60 % of the words are heard (then the estimates stay).
+ */
+export function refineWordTimes<T extends { text: string; start: number; end: number }>(words: T[], heard: TimedWord[], language = "ru"): T[] | null {
+  // a lone Latin word is left as is by the Russian rules; a Cyrillic neighbour makes «Anthropic» and «Антропик» meet
+  const canon = (x: string) => (language === "ru" && /[a-z]/i.test(x) ? canonicalWords(`и ${x}`, language).slice(1) : canonicalWords(x, language));
+  const ref: { t: string; w: number }[] = [];
+  words.forEach((w, k) => canon(w.text).forEach((t) => ref.push({ t, w: k })));
+  const hyp: { t: string; start: number }[] = [];
+  for (const h of heard) for (const t of canon(h.w)) hyp.push({ t, start: h.start });
+  const n = ref.length;
+  const m = hyp.length;
+  if (!n || !m || n * m > 4_000_000) return null;
+  const eq = (a: string, b: string) => a === b || (Math.max(a.length, b.length) >= 4 && similarity(a, b) >= 0.7);
+  const d: Uint16Array[] = Array.from({ length: n + 1 }, (_, i) => {
+    const row = new Uint16Array(m + 1);
+    row[0] = i;
+    return row;
+  });
+  for (let j = 0; j <= m; j++) d[0][j] = j;
+  for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (eq(ref[i - 1].t, hyp[j - 1].t) ? 0 : 1));
+  const match = new Array<number>(n).fill(-1);
+  let i = n;
+  let j = m;
+  while (i > 0 && j > 0) {
+    if (d[i][j] === d[i - 1][j - 1] + (eq(ref[i - 1].t, hyp[j - 1].t) ? 0 : 1)) {
+      if (eq(ref[i - 1].t, hyp[j - 1].t)) match[i - 1] = j - 1;
+      i--;
+      j--;
+    } else if (d[i][j] === d[i - 1][j] + 1) i--;
+    else j--;
+  }
+  const at: (number | null)[] = words.map((_, k) => {
+    const x = ref.findIndex((r, q) => r.w === k && match[q] >= 0);
+    return x >= 0 ? hyp[match[x]].start : null;
+  });
+  const heardN = at.filter((x) => x !== null).length;
+  if (heardN < words.length * 0.6) return null;
+  // an unheard word: shifted like its nearest heard neighbours
+  const out = words.map((w, k) => {
+    if (at[k] !== null) return { ...w, start: Math.round(at[k]! * 1000) / 1000 };
+    let p = k - 1;
+    while (p >= 0 && at[p] === null) p--;
+    const shift = p >= 0 ? at[p]! - words[p].start : 0;
+    return { ...w, start: Math.round((w.start + shift) * 1000) / 1000 };
+  });
+  for (let k = 1; k < out.length; k++) if (out[k].start < out[k - 1].start) out[k] = { ...out[k], start: out[k - 1].start };
+  return out.map((w, k) => ({ ...w, end: Math.round(Math.max(w.start + 0.05, k + 1 < out.length ? Math.min(w.end + (w.start - words[k].start), out[k + 1].start) : w.end) * 1000) / 1000 }));
+}

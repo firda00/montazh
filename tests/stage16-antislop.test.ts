@@ -168,7 +168,9 @@ test("photos: search → download → cover crop to the frame, one photo per bea
   assert.ok(calls.some((u) => /license=cc0%2Cpdm%2Cby|license=cc0,pdm,by/.test(u) && /mature=false/.test(u) && /page_size=20/.test(u)));
   const line = photoCreditLine(r.credits[1]);
   assert.match(line, /«Espresso machine» — Bob \(CC BY 2\.0, flickr\) https:\/\/flickr\.example\/x/);
-  assert.match(creditsText({ photo_credits: r.credits.map(photoCreditLine), music_attribution: "" }), /^Фото \(Openverse\): .*CC0.*CC BY 2\.0/);
+  assert.match(creditsText({ photo_credits: r.credits.map(photoCreditLine), music_attribution: "" }), /^Фото: .*CC0.*CC BY 2\.0/);
+  // stage 26: brand marks are credited too (licence of the path data + the trademark note)
+  assert.match(creditsText({ photo_credits: [], music_attribution: "", brand_credits: ["Знак Anthropic: Simple Icons 16.30.0 (CC0-1.0)"] }), /^Знак Anthropic: Simple Icons/);
   // offline: nothing is fetched
   const off = await findPhotos([{ beat: 0, query: "coffee" }], out, { frame: frameFor("9:16"), offline: true, fetchFn: stubFetch({}, calls) });
   assert.deepEqual(off.missing, [0]);

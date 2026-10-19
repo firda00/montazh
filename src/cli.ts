@@ -736,7 +736,9 @@ program
   .option("--voice-speed <x>", "темп голоса: 0.8 — быстрее, 1.2 — медленнее", (v) => Number(v))
   .option("--presenter [photo]", "ведущий-аватар: задание для Colab (озвучка ролика + портрет: фото или сгенерированный)")
   .option("--presenter-video <file>", "готовый ведущий из Colab (avatar_result.zip или avatar.mp4) в нижнем углу; вместе с --from")
-  .action(async (topic: string, opts: { lang: string; seconds: number; audience?: string; trends: boolean; music?: string; sfx: boolean; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: string | boolean; aspect: string; voice: string; voiceCaptions?: boolean; voiceSpeed?: number; presenter?: boolean | string; presenterVideo?: string }) => {
+  .option("--no-visuals", "без картинок по смыслу (этап 26: фото названных компаний/мест/людей из Commons, знаки, UI, смена кадра на каждом названии)")
+  .option("--keep-design", "с --from: оставить сохранённый дизайн, даже если он сделан без вариантов картинок")
+  .action(async (topic: string, opts: { visuals: boolean; keepDesign?: boolean; lang: string; seconds: number; audience?: string; trends: boolean; music?: string; sfx: boolean; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: string | boolean; aspect: string; voice: string; voiceCaptions?: boolean; voiceSpeed?: number; presenter?: boolean | string; presenterVideo?: string }) => {
     try {
       if (!["draft", "looks", "delivery"].includes(opts.quality)) throw new Error("--quality: ожидается draft | looks | delivery");
       if (!Number.isFinite(opts.seconds) || opts.seconds < 15 || opts.seconds > 90) throw new Error("--seconds: ожидается 15–90");
@@ -747,7 +749,7 @@ program
       const { requireVoice, NO_VOICE, AUTO_VOICE } = await import("./voice/catalog.ts");
       if (!NO_VOICE.test(opts.voice) && !AUTO_VOICE.test(opts.voice)) requireVoice(opts.voice);
       const { make, creditsText } = await import("./make/index.ts");
-      const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, sfx: opts.sfx, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images as boolean | "photo" | "ai" | "none", aspect: isAspect(opts.aspect) ? opts.aspect : undefined, voice: opts.voice, voiceCaptions: opts.voiceCaptions, voiceLengthScale: opts.voiceSpeed, presenter: opts.presenter, presenterVideo: opts.presenterVideo, onEvent: (l) => console.log(l) });
+      const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, sfx: opts.sfx, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images as boolean | "photo" | "ai" | "none", aspect: isAspect(opts.aspect) ? opts.aspect : undefined, voice: opts.voice, voiceCaptions: opts.voiceCaptions, voiceLengthScale: opts.voiceSpeed, presenter: opts.presenter, presenterVideo: opts.presenterVideo, visuals: opts.visuals === false ? false : undefined, keepDesign: opts.keepDesign, onEvent: (l) => console.log(l) });
       console.log(`\n✔ ${r.output} (${r.aspect} ${r.width}×${r.height}, ${r.duration.toFixed(1)} с, ${r.beats} битов${r.voice ? `, голос ${r.voice}` : ""}, рендер ${r.render_seconds.toFixed(0)} с${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""})`);
       if (r.script.hashtags.length) console.log(`  #${r.script.hashtags.join(" #")}`);
       const credits = creditsText(r);

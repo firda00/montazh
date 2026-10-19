@@ -64,10 +64,13 @@ export const SceneSchema = z.object({
   entrance: z.enum(ENTRANCES).default("rise"),
   anchor: z.enum(ANCHORS).default("center"),
   transition: z.enum(TRANSITIONS).default("cut"),
+  /** stage 26: the visual options (ids from the resolver) this scene shows as sub-shots, in order */
+  shots: z.array(z.string()).default([]),
 });
 export type Scene = z.infer<typeof SceneSchema>;
 
-export const DesignSchema = z.object({ identity: IdentitySchema, scenes: z.array(SceneSchema) });
+/** visuals: true when the director saw the resolved visual options (stage 26); older designs are re-directed */
+export const DesignSchema = z.object({ identity: IdentitySchema, scenes: z.array(SceneSchema), visuals: z.boolean().default(false) });
 export type Design = z.infer<typeof DesignSchema>;
 
 /** What the model returns (strict, everything present; nulls for unused fields). */
@@ -97,6 +100,7 @@ const DesignOut = z.object({
       entrance: z.enum(ENTRANCES),
       anchor: z.enum(ANCHORS).default("center"),
       transition: z.enum(TRANSITIONS).default("cut"),
+      shots: z.array(z.string()).default([]),
     }),
   ),
 });
@@ -134,7 +138,7 @@ const cut = (s: string, n: number) => {
  * headline, layouts downgraded when they lack what they need (number, items, image), readable
  * text colour, no two identical layouts in a row.
  */
-export function normalizeDesign(raw: unknown, script: Script): { design: Design; notes: string[] } {
+export function normalizeDesign(raw: unknown, script: Script, optionIds?: Set<string>): { design: Design; notes: string[] } {
   const notes: string[] = [];
   const out = DesignOut.parse(raw);
   const p = out.identity.palette;
@@ -176,13 +180,17 @@ export function normalizeDesign(raw: unknown, script: Script): { design: Design;
     let layout: Layout = s.layout;
     const items = (s.items ?? []).map((t) => cut(t, 64)).filter(Boolean);
     const image = s.image && (s.image.prompt.trim() || s.image.query.trim()) ? { query: photoQuery(s.image.query || s.image.prompt), prompt: cut(s.image.prompt || s.image.query, 400), motion: s.image.motion } : null;
+    // stage 26: picked visual options of THIS beat only; a media scene may show them instead of a searched photo
+    const shots = optionIds ? (s.shots ?? []).filter((x) => optionIds.has(x) && x.startsWith(`b${i}.`)).slice(0, 4) : [];
+    if (optionIds && (s.shots ?? []).length > shots.length) notes.push(`бит ${i}: неизвестные варианты картинок убраны`);
+    const visual = !!image || shots.length > 0;
     if ((layout === "hero_number" || layout === "tunnel_number") && !s.number?.value.trim()) layout = "headline";
     // the orbit title is a giant word or two: a long sentence reads better as a plain headline
     if (layout === "orbit_title" && headline.length > 64) layout = "headline";
     if (layout === "depth_cards" && items.length < 3) layout = items.length === 2 ? "list" : "headline";
-    if (layout === "media_number" && !s.number?.value.trim()) layout = image ? "media_full" : "headline";
-    if (layout === "media_number" && !image) layout = "hero_number";
-    if (layout.startsWith("media_") && !image) layout = "headline";
+    if (layout === "media_number" && !s.number?.value.trim()) layout = visual ? "media_full" : "headline";
+    if (layout === "media_number" && !visual) layout = "hero_number";
+    if (layout.startsWith("media_") && !visual) layout = "headline";
     if (layout === "list" && items.length < 2) layout = "headline";
     if (layout === "chat" && items.length < 2) layout = "headline";
     if (layout === "timeline" && items.length < 3) layout = items.length >= 2 ? "list" : "headline";
@@ -201,6 +209,7 @@ export function normalizeDesign(raw: unknown, script: Script): { design: Design;
       entrance: s.entrance,
       anchor: s.anchor,
       transition: s.transition,
+      shots,
     };
   });
   // stage 25: each typographic device once per video (a second list or statement reads as a template); the repeat
@@ -224,7 +233,7 @@ export function normalizeDesign(raw: unknown, script: Script): { design: Design;
     }
   }
   varyComposition(scenes, notes);
-  return { design: DesignSchema.parse({ identity, scenes }), notes };
+  return { design: DesignSchema.parse({ identity, scenes, visuals: !!optionIds }), notes };
 }
 
 const STYLE_WORDS = /\b(cinematic|photo(graph)?|photorealistic|realistic|shot|35mm|film|look|style|lighting|light|shallow|depth|field|bokeh|vertical|horizontal|composition|frame|close-?up|wide|angle|moody|warm|cold|dramatic|high|low|key|quality|detailed|4k|8k|hd|render|of|the|a|an|and|with|in|on|at|for|from)\b/gi;
@@ -295,11 +304,12 @@ export interface DesignResult {
 
 const FRAME_WORDS: Record<Aspect, string> = { "9:16": "vertical 9:16 (1080×1920, Reels/Shorts/TikTok)", "16:9": "landscape 16:9 (1920×1080, YouTube)", "1:1": "square 1:1 (1080×1080)" };
 
-export async function directDesign(topic: string, script: Script, llm: StructuredFn, opts: { model?: string; aspect?: Aspect } = {}): Promise<DesignResult> {
+export async function directDesign(topic: string, script: Script, llm: StructuredFn, opts: { model?: string; aspect?: Aspect; options?: string; optionIds?: Set<string> } = {}): Promise<DesignResult> {
   const beats = script.beats.map((b, i) => `${i} (${b.seconds}s): ${b.text}${b.emphasis ? `  [emphasis: ${b.emphasis}]` : ""}${b.voiceover ? `  — narrator: ${b.voiceover}` : ""}`).join("\n");
-  const prompt = fill(loadPrompt("make.design.user"), { topic, language: LANGUAGE_NAMES[script.language] ?? script.language, frame: FRAME_WORDS[opts.aspect ?? "9:16"], title: script.title, beats, count: script.beats.length });
-  const res = await llm({ system: loadPrompt("make.design.system"), prompt, schema: zodToApiSchema(DesignOut), model: opts.model, effort: "medium", maxTokens: 8000 });
-  const { design, notes } = normalizeDesign(res.data, script);
+  const visuals = opts.options ? fill(loadPrompt("make.design.visuals"), { options: opts.options }) : "";
+  const prompt = fill(loadPrompt("make.design.user"), { topic, language: LANGUAGE_NAMES[script.language] ?? script.language, frame: FRAME_WORDS[opts.aspect ?? "9:16"], title: script.title, beats, count: script.beats.length, visuals });
+  const res = await llm({ system: loadPrompt("make.design.system"), prompt, schema: zodToApiSchema(DesignOut), model: opts.model, effort: "medium", maxTokens: 9000 });
+  const { design, notes } = normalizeDesign(res.data, script, opts.optionIds);
   return { design, notes, usd: res.usd, usage: { input_tokens: res.usage.input_tokens, output_tokens: res.usage.output_tokens }, model: res.model, provider: res.provider, estimate: res.estimate };
 }
 

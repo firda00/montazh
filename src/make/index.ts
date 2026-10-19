@@ -18,7 +18,7 @@ import { researchTrends, trendsBackend, trendsText, TrendsSchema, type Trends, t
 import { DesignSchema, directDesign, fallbackDesign, type Design } from "./design.ts";
 import { generateImages, imageBackend, type ImageOptions } from "./images.ts";
 import { creditRejected, findPhotos, photoCreditLine, type PhotoCredit, type PhotoOptions } from "./photos.ts";
-import { composeScenes, FPS, type BeatSpeech, type ComposedScenes } from "./scenes.ts";
+import { composeScenes, FPS, timeScenes, type BeatSpeech, type ComposedScenes, type SceneShot } from "./scenes.ts";
 import { detectAspect, frameFor, stripAspectWords, type Aspect, type Frame } from "../lib/aspect.ts";
 import { installFonts } from "./fonts.ts";
 import { presenterBox, presenterClip, presenterSource, type PresenterBox } from "./presenter.ts";
@@ -30,6 +30,12 @@ import type { SfxCue } from "../audio/sfx.ts";
 import { NO_VOICE } from "../voice/catalog.ts";
 import type { SentenceSynth } from "../voice/piper.ts";
 import { layVoiceover, makeVoiceover, snapBeatsToMusic, speechSeconds, ttsUsd, type CaptionCue, type VoiceoverResult } from "../voice/voiceover.ts";
+import { optionsForDirector, planShots, resolveVisuals, visualReport, writeVisualsReport, type ResolveOptions, type VisualPlan } from "./visual-resolve.ts";
+import { checkRelevance, relevanceDecision } from "./relevance.ts";
+import { shotStats, type PlannedShot } from "./visuals.ts";
+import { shotSheet } from "./sheet.ts";
+import { refineWordTimes, whisperWords } from "../voice/align.ts";
+import { languageCode } from "../voice/catalog.ts";
 
 /**
  * MAKE: a topic → a vertical video built from nothing (text, generated images, motion; music optional).
@@ -76,6 +82,25 @@ export const MakeReportSchema = z.object({
   /** music bed: tempo and how many scene cuts landed on its beats */
   music_bpm: z.number().nullable().default(null),
   cuts_on_beat: z.number().int().default(0),
+  /** stage 26: brand marks shown (Simple Icons licence + trademark note) */
+  brand_credits: z.array(z.string()).default([]),
+  /** stage 26: sub-shots and how well the pictures follow the narration */
+  visuals: z
+    .object({
+      shots: z.number().int(),
+      mean_shot: z.number(),
+      /** entity mentions (per beat, unique) and how many of them had that entity on screen when it was said */
+      mentions: z.number().int(),
+      mentions_shown: z.number().int(),
+      numbers: z.number().int(),
+      numbers_shown: z.number().int(),
+      photo_candidates: z.number().int(),
+      photos_checked: z.number().int(),
+      photos_passed: z.number().int(),
+      usd: z.number(),
+    })
+    .nullable()
+    .default(null),
   usd: z.number(),
   wall_seconds: z.number(),
   render_seconds: z.number(),
@@ -132,6 +157,14 @@ export interface MakeOptions {
   presenter?: boolean | string;
   /** stage 25: the animated presenter (avatar_result.zip or avatar.mp4) laid in the bottom corner (use with fromJob) */
   presenterVideo?: string;
+  /**
+   * stage 26: entity-aware pictures and sub-shots (real photos of what the narrator names, brand marks, product UI,
+   * number cards; the picture changes when the next name or number is said). Default on (VEDIT_VISUALS=off disables);
+   * off by default when a writer is injected (`llm`, tests) unless asked. An object passes resolver options.
+   */
+  visuals?: boolean | Partial<ResolveOptions>;
+  /** with fromJob: keep the saved design even if it was made without the visual options (no new director call) */
+  keepDesign?: boolean;
   /** test hook: skip the real render and write this file as the output */
   fakeRender?: (projectDir: string, outFile: string) => Promise<void>;
   onEvent?: (line: string) => void;
@@ -180,7 +213,7 @@ export function speechByBeat(vo: Pick<VoiceoverResult, "beats" | "words">, beats
   });
 }
 
-export async function writeDirectorProject(script: Script, design: Design, images: Record<number, string>, dir: string, o: { gsapFile?: string; captions?: CaptionCue[]; frame?: Frame; speech?: (BeatSpeech | null)[]; presenter?: { file: string; box: PresenterBox } } = {}): Promise<ComposedScenes & { entry: string; overflow: string[] }> {
+export async function writeDirectorProject(script: Script, design: Design, images: Record<number, string>, dir: string, o: { gsapFile?: string; captions?: CaptionCue[]; frame?: Frame; speech?: (BeatSpeech | null)[]; presenter?: { file: string; box: PresenterBox }; shots?: (SceneShot[] | null)[]; shotFiles?: string[] } = {}): Promise<ComposedScenes & { entry: string; overflow: string[] }> {
   const frame = o.frame ?? frameFor("9:16");
   await fs.mkdir(path.join(dir, "assets", "img"), { recursive: true });
   await linkOrCopy(o.gsapFile ?? DEFAULT_GSAP, path.join(dir, "assets", "gsap.min.js"));
@@ -195,12 +228,14 @@ export async function writeDirectorProject(script: Script, design: Design, image
     await linkOrCopy(file, path.join(dir, r));
     rel[Number(beat)] = r;
   }
+  // stage 26: the photos the sub-shots show (entity photos from Commons), same assets folder
+  for (const file of new Set(o.shotFiles ?? [])) await linkOrCopy(file, path.join(dir, "assets", "img", path.basename(file)));
   const I = design.identity;
   const fontIds = [I.display_font, I.accent_font, I.kicker_font === "mono" ? "mono" : I.display_font, "mono", "inter"] as const;
   const fontFaces = await installFonts(dir, [...fontIds]);
   const entry = path.join(dir, "index.html");
   // pass 1: default sizes → measure in Chrome → pass 2 with the fitted sizes
-  const base = { images: rel, fontFaces, gsapRel: "assets/gsap.min.js", captions: o.captions, frame, speech: o.speech, presenter };
+  const base = { images: rel, fontFaces, gsapRel: "assets/gsap.min.js", captions: o.captions, frame, speech: o.speech, presenter, shots: o.shots };
   let composed = composeScenes(script, design, base);
   await fs.writeFile(entry, composed.html);
   const fit = await fitText(entry, { width: frame.w, height: frame.h });
@@ -340,6 +375,14 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
   let presenterVideo: string | null = null;
   let imagesUsed: string[] = [];
   let credits: PhotoCredit[] = [];
+  let visuals: VisualPlan | null = null;
+  let usdVisuals = 0;
+  let musicBeats: number[] = [];
+  let shotPlan: (PlannedShot[] | null)[] = [];
+  let shotList: (SceneShot[] | null)[] = [];
+  let visualStats: MakeReport["visuals"] = null;
+  let brandCredits: string[] = [];
+  let layoutNames: string[] = [];
   if (opts.director === false) {
     say("▸ композиция (простая)…");
     if (aspect !== "9:16") warnings.push(`простая композиция (--no-director) бывает только 9:16 — кадр ${aspect} доступен с арт-директором`);
@@ -350,16 +393,43 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
       return c;
     });
   } else {
+    // stage 26: what the narrator names → verified pictures of exactly that (before the director, who picks among them)
+    const mode = imagesMode(opts.images);
+    const wantVisuals = mode !== "none" && (opts.visuals !== undefined ? opts.visuals !== false : !opts.llm && process.env.VEDIT_VISUALS?.trim().toLowerCase() !== "off");
+    if (wantVisuals) {
+      say("▸ картинки по смыслу (сущности → Commons / знаки / UI → проверка Gemini)…");
+      try {
+        const vOpts = typeof opts.visuals === "object" ? opts.visuals : {};
+        visuals = await resolveVisuals(s.script, vo ? speechByBeat(vo, s.script.beats.length) : [], { frame, outDir: path.join(dir, "make", "visuals"), onEvent: say, fetchFn: opts.photoOptions?.fetchFn, ...vOpts });
+        const vUsd = (visuals.llm?.usd ?? 0) + visuals.checks.usd;
+        if (visuals.llm && !visuals.llm.cached) await addCost(job.id, { step: "design", provider: "gemini", model: visuals.llm.model, units: { calls: 1 }, usd: visuals.llm.usd });
+        if (visuals.checks.requests) await addCost(job.id, { step: "design", provider: "gemini vision", model: visuals.checks.model, units: { calls: visuals.checks.requests, images: visuals.checks.checked - visuals.checks.cached }, usd: visuals.checks.usd });
+        usdVisuals += vUsd;
+        say(`  варианты: ${visuals.beats.map((b) => `${b.beat}:${b.options.length}`).join(" ")}; фото прошли проверку ${visuals.checks.passed}/${visuals.checks.candidates}${vUsd ? `, ≈$${vUsd.toFixed(4)}` : ""}`);
+      } catch (err) {
+        warnings.push(`картинки по смыслу не собраны: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+        say(`  ⚠ ${warnings.at(-1)}`);
+        visuals = null;
+      }
+    }
+
     say("▸ арт-директор…");
     let design: Design | null = null;
     // a saved design is reused for the same frame; another frame gets its own composition (the script stays)
     const oldAspect = reuseDir ? await readJson(path.join(reuseDir, "make.json"), MakeReportSchema).then((r) => r.aspect, () => "9:16" as Aspect) : null;
     const savedDesign = reuseDir ? path.join(reuseDir, "design.json") : null;
-    if (savedDesign && oldAspect === aspect && (await exists(savedDesign))) design = await readJson(savedDesign, DesignSchema);
+    if (savedDesign && oldAspect === aspect && (await exists(savedDesign))) {
+      const old = await readJson(savedDesign, DesignSchema);
+      // a design made without the visual options cannot pick them: the director runs again (unless asked to keep it)
+      if (!visuals || old.visuals || opts.keepDesign) design = old;
+      else say("  сохранённый дизайн сделан без вариантов картинок — арт-директор заново (оставить: --keep-design)");
+    }
+    const designReused = !!design;
     if (!design) {
       try {
         const llm = opts.llm ?? selectStructuredLlm();
-        const d = await directDesign(topicClean, s.script, llm, { model: opts.model, aspect });
+        const optionIds = visuals ? new Set(visuals.beats.flatMap((b) => b.options.map((x) => x.id))) : undefined;
+        const d = await directDesign(topicClean, s.script, llm, { model: opts.model, aspect, options: visuals ? optionsForDirector(visuals) : undefined, optionIds });
         design = d.design;
         usd += d.usd;
         await addCost(job.id, { step: "design", provider: d.provider === "anthropic" ? "anthropic" : d.provider, model: d.model, units: { ...d.usage, calls: 1, estimate: d.estimate ? 1 : 0 }, usd: d.usd });
@@ -370,19 +440,19 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
       }
     }
     await writeJson(path.join(dir, "design.json"), DesignSchema, design);
+    layoutNames = design.scenes.map((sc) => sc.layout);
     const I = design.identity;
     mood = energeticMood(I.music, `${topic} ${opts.audience ?? ""}`);
     if (mood !== I.music) say(`  музыка: «${I.music}» → «${mood}» (под голос нужен бодрый ровный трек, не нарастающий эпик)`);
     say(`  айдентика: ${I.palette.bg}/${I.palette.accent}, ${I.display_font} + ${I.accent_font}, ${I.texture}${I.chrome === "header" ? ", шапка" : ""}`);
-    for (const sc of design.scenes) say(`    ${sc.beat}: ${sc.layout} [${sc.anchor}, ${sc.transition}]${sc.image ? ` +фото «${sc.image.query}»` : ""} — ${sc.headline}`);
+    for (const sc of design.scenes) say(`    ${sc.beat}: ${sc.layout} [${sc.anchor}, ${sc.transition}]${sc.image ? ` +фото «${sc.image.query}»` : ""}${sc.shots.length ? ` +кадры ${sc.shots.join(", ")}` : ""} — ${sc.headline}`);
 
     // pictures: real photos (default) → generated fallback → typography
-    const mode = imagesMode(opts.images);
     const imgDir = path.join(dir, "make", "images");
     const images: Record<number, string> = {};
     const wanted = design.scenes.filter((sc) => sc.image).map((sc) => ({ beat: sc.beat, query: sc.image!.query || sc.image!.prompt, prompt: sc.image!.prompt }));
-    // reuse the pictures of an earlier job of the same frame (re-render after code/style changes)
-    const reuseImgDir = reuseDir && oldAspect === aspect ? path.join(reuseDir, "make", "images") : null;
+    // reuse the pictures of an earlier job of the same frame and design (re-render after code/style changes)
+    const reuseImgDir = reuseDir && oldAspect === aspect && designReused ? path.join(reuseDir, "make", "images") : null;
     const oldCredits: PhotoCredit[] = reuseDir && oldAspect === aspect ? await fs.readFile(path.join(reuseDir, "credits.json"), "utf8").then((t) => JSON.parse(t) as PhotoCredit[], () => []) : [];
     let todo = wanted;
     if (reuseImgDir) {
@@ -408,11 +478,42 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     if (todo.length && mode === "photo") {
       say(`▸ фото (${todo.length}, Openverse: CC0 / PD / CC BY)…`);
       const hint = photoHint(wanted.map((w) => w.query));
-      const r = await findPhotos(todo.map((w) => ({ beat: w.beat, query: w.query })), imgDir, { frame, topicHint: hint, onEvent: say, ...opts.photoOptions });
-      for (const [beat, file] of r.files) images[beat] = file;
-      credits.push(...r.credits);
-      if (r.files.size) imagesUsed.push("photo");
-      say(`  найдено ${r.files.size}/${todo.length}${r.missing.length ? `, без фото: ${r.missing.join(", ")}` : ""}`);
+      const exclude = new Set<string>();
+      let r = await findPhotos(todo.map((w) => ({ beat: w.beat, query: w.query })), imgDir, { frame, topicHint: hint, onEvent: say, ...opts.photoOptions });
+      // stage 26: the generic photos go through the same vision check (batched); a refused beat searches once more
+      if (visuals && r.files.size) {
+        for (let round = 0; round < 2 && r.files.size; round++) {
+          const cands = [...r.files].map(([beat, file]) => ({ id: String(beat), file, subject: `a photo that fits: ${todo.find((w) => w.beat === beat)?.prompt || todo.find((w) => w.beat === beat)?.query}`, title: r.credits.find((c) => c.beat === beat)?.title }));
+          const rel = await checkRelevance(cands.map((c) => ({ ...c, title: undefined })), { onLog: (l) => say(`  ${l}`) });
+          usdVisuals += rel.usd;
+          visuals.checks.candidates += cands.length;
+          visuals.checks.checked += [...rel.verdicts.values()].filter((v) => v.checked).length;
+          if (rel.requests) await addCost(job.id, { step: "design", provider: "gemini vision", model: rel.model, units: { calls: rel.requests, images: rel.images }, usd: rel.usd });
+          const refused: number[] = [];
+          for (const c of cands) {
+            const v = rel.verdicts.get(c.id);
+            const ok = !v || relevanceDecision(v);
+            if (ok) visuals.checks.passed++;
+            visuals.decisions.push({ beat: Number(c.id), entity: "(generic)", title: c.title ?? "", shows: v?.shows ?? true, score: v?.score ?? 0, sees: v?.sees ?? "", accepted: ok, checked: !!v?.checked, cached: !!v?.cached });
+            say(`    ${ok ? "✓" : "✗"} фото ${c.id}: «${(c.title ?? "").slice(0, 60)}» ${v?.checked ? `${v.score}/10 — ${v.sees}` : "(без проверки)"}`);
+            if (!ok) refused.push(Number(c.id));
+          }
+          for (const beat of [...r.files.keys()]) if (!refused.includes(beat)) images[beat] = r.files.get(beat)!;
+          credits.push(...r.credits.filter((c) => !refused.includes(c.beat)));
+          if (!refused.length || round) {
+            r = { ...r, missing: [...r.missing, ...refused] };
+            break;
+          }
+          for (const c of r.credits) if (refused.includes(c.beat)) exclude.add(c.id);
+          const again = await findPhotos(todo.filter((w) => refused.includes(w.beat)).map((w) => ({ beat: w.beat, query: w.query })), imgDir, { frame, topicHint: hint, onEvent: say, ...opts.photoOptions, exclude });
+          r = { ...again, missing: [...r.missing, ...again.missing] };
+        }
+      } else {
+        for (const [beat, file] of r.files) images[beat] = file;
+        credits.push(...r.credits);
+      }
+      if (Object.keys(images).length) imagesUsed.push("photo");
+      say(`  найдено ${todo.filter((w) => images[w.beat]).length}/${todo.length}${r.missing.length ? `, без фото: ${[...new Set(r.missing)].join(", ")}` : ""}`);
       todo = todo.filter((w) => r.missing.includes(w.beat));
     }
     if (todo.length && mode !== "none") {
@@ -449,6 +550,7 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
         musicBpm = bed.bpm;
         if (vo && bed.bpm) {
           const grid = await detectBeats(track.file, { offset: bed.offset, seconds: scriptDuration(s.script) + 3 });
+          if (grid.strength >= 0.08) musicBeats = grid.beats;
           if (grid.strength >= 0.08 && grid.beats.length >= 4) {
             const snap = snapBeatsToMusic(s.script, speechSeconds(vo), grid.beats);
             cutsOnBeat = snap.snapped;
@@ -481,9 +583,52 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     }
 
     say("▸ композиция…");
+    // stage 26: the picture cuts on names, so the word times matter: whisper re-times the narration on the timeline
+    if (vo && visuals && process.env.VEDIT_SHOT_ALIGN?.trim().toLowerCase() !== "off") {
+      try {
+        const lang = languageCode(s.script.language);
+        const heard = await whisperWords(vo.track, lang);
+        const refined = refineWordTimes(vo.words, heard, lang);
+        if (refined) {
+          const moved = refined.reduce((n, w, k) => n + Math.abs(w.start - vo!.words[k].start), 0) / Math.max(1, refined.length);
+          vo = { ...vo, words: refined };
+          say(`  слова озвучки по whisper: ${refined.length}, сдвиг в среднем ${moved.toFixed(2)} с`);
+        }
+      } catch (err) {
+        say(`  ⚠ слова по whisper не получены (${err instanceof Error ? err.message.split("\n")[0].slice(0, 120) : err}) — оценки по длине`);
+      }
+    }
     const speech = vo ? speechByBeat(vo, s.script.beats.length) : undefined;
+    // stage 26: sub-shots on the final timeline (after the cuts moved onto the music): a cut when the next name or number is said
+    const shotFiles: string[] = [];
+    if (visuals) {
+      const { timings } = timeScenes(s.script);
+      const genericRel: Record<number, string> = {};
+      for (const [beat, file] of Object.entries(images)) genericRel[Number(beat)] = `assets/img/${path.basename(file)}`;
+      const r = planShots(s.script, design, visuals, { timings, speech: speech ?? [], genericImages: genericRel, srcOf: (x) => `assets/img/${path.basename(x.file!)}`, musicBeats });
+      shotPlan = r.planned;
+      shotList = r.shots;
+      for (const list of r.shots) for (const sh of list ?? []) if (sh.option !== "layout" && sh.option.kind === "photo" && sh.option.file && !sh.option.id.endsWith(".gen")) shotFiles.push(sh.option.file);
+      visualStats = visualReport(visuals, r.shots, timings, speech ?? [], s.script, design, usdVisuals);
+      const st = shotStats(r.planned.map((p, i) => p ?? [{ start: timings[i].start, end: timings[i].start + timings[i].duration, option: "layout", anchor: "fill" }]));
+      say(`  кадров ${st.shots} (было ${s.script.beats.length}), средний ${st.mean} с; названное в кадре: ${visualStats.mentions_shown}/${visualStats.mentions}, числа: ${visualStats.numbers_shown}/${visualStats.numbers}`);
+      for (const [i, p] of r.planned.entries()) if (p) say(`    ${i}: ${p.map((x) => `${x.start.toFixed(1)}–${x.end.toFixed(1)} ${x.option}`).join(" | ")}`);
+      await writeVisualsReport(path.join(dir, "visuals.json"), visuals, r.planned);
+      // the entity photos are credited like the searched ones
+      const shown = new Set(shotFiles);
+      // only pictures that are on screen are credited: a searched photo replaced by sub-shots drops out
+      credits = credits.filter((c) => {
+        const plan = r.shots[c.beat];
+        return !plan || plan.some((sh) => sh.option !== "layout" && sh.option.id === `b${c.beat}.gen`);
+      });
+      credits.push(...visuals.credits.filter((c) => shown.has(c.file)));
+      credits.sort((a, b) => a.beat - b.beat);
+      await fs.writeFile(path.join(dir, "credits.json"), JSON.stringify(credits, null, 1));
+      brandCredits = [...new Set(r.shots.flatMap((l) => (l ?? []).flatMap((sh) => (sh.option !== "layout" && sh.option.kind === "logo" && sh.option.slug && visuals!.brandBySlug[sh.option.slug] ? [visuals!.brandBySlug[sh.option.slug]] : []))))];
+      if (shotFiles.length) imagesUsed.push("photo");
+    }
     composed = await runStep(job.id, "design", async () => {
-      const c = await writeDirectorProject(s.script, design!, images, projectDir, { captions: vo && opts.voiceCaptions ? vo.captions : undefined, frame, speech, presenter });
+      const c = await writeDirectorProject(s.script, design!, images, projectDir, { captions: vo && opts.voiceCaptions ? vo.captions : undefined, frame, speech, presenter, shots: shotList, shotFiles });
       if (c.overflow.length) warnings.push(`текст не влез даже на минимальном размере: ${c.overflow.join(", ")}`);
       warnings.push(...(await lintProject(projectDir)));
       return c;
@@ -513,6 +658,17 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
   else say(`  эффектов ${mixed.cues}${voiceNote}`);
   // contact sheet: a frame late in every scene (after the words are in), for a quick look (and for the bot)
   await contactSheet(rendered, path.join(projectDir, "layout.json"), path.join(dir, "make"), frame).catch(() => {});
+  // stage 26: one frame per sub-shot with the words said under it
+  if (shotList.some((l) => l?.length)) {
+    try {
+      const words = vo ? vo.words.map((w) => ({ text: w.text, start: w.start })) : [];
+      const { timings } = timeScenes(s.script);
+      const entries = timings.flatMap((t, i) => (shotList[i]?.length ? shotList[i]!.map((sh) => ({ start: sh.start, end: sh.end, label: sh.option === "layout" ? "layout" : `${sh.option.kind}${sh.detail ? " detail" : ""}: ${sh.option.name ?? sh.option.label}` })) : [{ start: t.start, end: t.start + t.duration, label: layoutNames[i] ?? "scene" }]));
+      await shotSheet(rendered, entries, words, path.join(dir, "make", "shots_sheet.jpg"), frame);
+    } catch (err) {
+      warnings.push(`лист кадров не собран: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    }
+  }
   const preview = path.join(dir, "output_make_preview.jpg");
   await ffmpeg(["-ss", String(Math.min(1.2, composed.duration / 2)), "-i", output, "-frames:v", "1", "-q:v", "3", preview]).catch(() => {});
   const probe = await ffprobe(output);
@@ -565,7 +721,9 @@ export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeR
     hook_seconds: s.script.beats[0]?.seconds ?? 0,
     music_bpm: musicBpm,
     cuts_on_beat: cutsOnBeat,
-    usd,
+    brand_credits: brandCredits,
+    visuals: visualStats,
+    usd: usd + usdVisuals,
     wall_seconds: (Date.now() - t0) / 1000,
     render_seconds: renderSeconds,
     warnings,
@@ -635,9 +793,10 @@ export function energeticMood(mood: Mood, topic: string): Mood {
 }
 
 /** Text that credits the pictures and the music (CC BY needs it): for the description under the video. */
-export function creditsText(r: Pick<MakeReport, "photo_credits" | "music_attribution">): string {
+export function creditsText(r: Pick<MakeReport, "photo_credits" | "music_attribution"> & { brand_credits?: string[] }): string {
   const lines: string[] = [];
-  if (r.photo_credits.length) lines.push(`Фото (Openverse): ${r.photo_credits.join("; ")}`);
+  if (r.photo_credits.length) lines.push(`Фото: ${r.photo_credits.join("; ")}`);
+  if (r.brand_credits?.length) lines.push(...r.brand_credits);
   if (r.music_attribution) lines.push(r.music_attribution);
   return lines.join("\n");
 }

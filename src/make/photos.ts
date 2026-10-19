@@ -71,6 +71,8 @@ export interface PhotoOptions {
   offline?: boolean;
   /** a topic word or two appended to fallback queries ("coffee") */
   topicHint?: string;
+  /** result ids not to pick again (stage 26: photos the relevance check refused) */
+  exclude?: Iterable<string>;
   onEvent?: (l: string) => void;
 }
 
@@ -257,7 +259,7 @@ export async function findPhotos(requests: PhotoRequest[], outDir: string, o: Ph
   const cacheDir = o.cacheDir ?? PHOTO_CACHE;
   const used = new Set<string>();
   /** results already downloaded and rejected (not retried under another query) */
-  const tried = new Set<string>();
+  const tried = new Set<string>(o.exclude ?? []);
   const shrinking = new Set<string>();
   let calls = 0;
   let failures = 0;

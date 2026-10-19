@@ -3,6 +3,8 @@ import { contrast, LAYOUTS_3D, type Design, type Scene } from "./design.ts";
 import type { Script } from "./script.ts";
 import type { SfxCue } from "../audio/sfx.ts";
 import { FRAMES, type Frame } from "../lib/aspect.ts";
+import { paneCss, paneIn, paneOff, pickTransition, renderPane, type PaneTransition, type Rect } from "./shots.ts";
+import type { VisualOption } from "./visuals.ts";
 
 /**
  * Design + script (+ photos) → one HyperFrames composition. Every scene is a section on track 1 holding its
@@ -58,7 +60,29 @@ export interface ComposeScenesOptions {
   speech?: (BeatSpeech | null | undefined)[];
   /** stage 25: a talking presenter (circle with alpha, src relative to the project) in the bottom corner over every scene */
   presenter?: { src: string; box: { size: number; right: number; bottom: number } };
+  /**
+   * stage 26: sub-shots per beat (index = beat). Media scenes show them as a stack of panes under the headline;
+   * number-led typographic scenes (hero_number, compare, tunnel_number) put their own layout in as the "layout" shot.
+   */
+  shots?: (SceneShot[] | null | undefined)[];
 }
+
+/** One sub-shot of a scene on the video timeline (stage 26). */
+export interface SceneShot {
+  start: number;
+  end: number;
+  /** a resolved visual, or the scene's own typographic layout */
+  option: VisualOption | "layout";
+  /** a punch-in on the same photo */
+  detail?: boolean;
+  /** photo src relative to the project */
+  src?: string;
+  /** when the number on the pane is said */
+  numberAt?: number;
+}
+
+/** typographic layouts whose content can be one of the scene's sub-shots */
+export const SHOT_LAYOUTS = ["hero_number", "compare", "tunnel_number"] as const;
 
 export interface ComposedScenes {
   html: string;
@@ -463,6 +487,51 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
     return `<span class="scrim" id="${id}-scrim" style="background:${dim ? `linear-gradient(rgba(0,0,0,${dim}), rgba(0,0,0,${dim})), ` : ""}${g}"></span>`;
   };
 
+  // stage 26: sub-shot panes. Shot sounds are kept at least 1.5 s apart over the whole video.
+  let lastShotCue = -9;
+  const anyShots = (o.shots ?? []).some((p) => !!p?.length);
+  const paneFonts = { display: fontStack(display), displayWeight: FONTS[display].weight, mono: fontStack("mono"), serif: fontStack(accentFont) };
+  /** where designed pane content sits inside a media area, clear of the scene's text block */
+  const contentRect = (anchor: Scene["anchor"], rw: number, rh: number, full: boolean): Rect => {
+    if (!full) return { x: Math.round(rw * 0.07), y: Math.round(rh * 0.08), w: Math.round(rw * 0.86), h: Math.round(rh * 0.84) };
+    if (LS) return { x: Math.round(F.w * 0.5), y: S.top, w: Math.round(F.w * 0.5 - S.x), h: S.bottom - S.top };
+    if (anchor === "top") {
+      const y = Math.round(F.h * (SQ ? 0.5 : 0.46));
+      return { x: S.x, y, w: textW, h: S.bottom - y };
+    }
+    return { x: S.x, y: S.top, w: textW, h: Math.round(F.h * (SQ ? 0.5 : 0.52)) - S.top };
+  };
+  /** the pane stack of a scene: panes in time order, each later one cutting in over the one before */
+  const paneStack = (i: number, sid: string, plan: SceneShot[], rw: number, rh: number, content: Rect, layoutHtml = ""): string => {
+    const rnd = seeded(`shots:${i}:${design.scenes[i]?.headline ?? ""}`);
+    const html: string[] = [];
+    let prevT: PaneTransition | null = null;
+    plan.forEach((s, q) => {
+      const pid = `${sid}-p${q}`;
+      // later panes start hidden inline (the linter reads inline opacity, not class rules)
+      const hide = (h: string) => (q ? h.replace(/^<div class="pane ([^"]*)" id="([^"]+)"(?: style="([^"]*)")?>/, (_m, cls: string, pidm: string, st?: string) => `<div class="pane later ${cls}" id="${pidm}" style="opacity:0;${st ?? ""}">`) : h);
+      if (s.option === "layout") html.push(hide(`<div class="pane pk-lay" id="${pid}">${layoutHtml}</div>`));
+      else {
+        const out = renderPane(s.option, !!s.detail, { id: pid, start: s.start, end: s.end, w: rw, h: rh, content, palette: P, fonts: paneFonts, src: s.src, rnd, numberAt: s.numberAt, k });
+        html.push(hide(out.html));
+        tw.push(...out.tw);
+        cues.push(...out.cues);
+      }
+      if (q > 0) {
+        const tr = pickTransition(rnd, prevT);
+        prevT = tr;
+        const inn = paneIn(pid, tr, s.start, rw, rh, rnd);
+        tw.push(...inn.tw);
+        tw.push(paneOff(`${sid}-p${q - 1}`, s.start + inn.d + 0.04));
+        if (s.start - lastShotCue >= 1.5) {
+          cues.push({ t: r3(Math.max(0, s.start - (tr === "cut" ? 0 : 0.06))), kind: tr === "wipe" || tr === "iris" ? "swipe" : tr === "cut" ? "tick" : "whoosh", gain: tr === "cut" ? -8 : -10 });
+          lastShotCue = s.start;
+        }
+      }
+    });
+    return html.join("");
+  };
+
   design.scenes.forEach((given, i) => {
     const scene = dropRepeatedNumber(given);
     const t = timings[i];
@@ -471,12 +540,20 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
     const img = o.images[i];
     const body: string[] = [];
     const at = r3(t.start + 0.1);
+    const plan = o.shots?.[i]?.length ? o.shots[i]! : null;
     let layout = scene.layout;
-    if (layout === "media_number" && !img) layout = scene.number ? "hero_number" : "headline";
-    if (layout.startsWith("media_") && !img) layout = "headline";
+    // a plain headline with pictures to show becomes a full-frame media scene (the headline stays on top)
+    if (plan && layout === "headline") layout = "media_full";
+    if (!plan) {
+      if (layout === "media_number" && !img) layout = scene.number ? "hero_number" : "headline";
+      if (layout.startsWith("media_") && !img) layout = "headline";
+    }
     // the presenter sits in the bottom corner: text blocks that would sit there move to the top
-    const anchor = o.presenter && scene.anchor === "bottom" ? "top" : scene.anchor;
-    const photo = `<span class="ph full" id="${id}-ph"><img class="img" id="${id}-img" src="${img}" alt="" /></span>`;
+    let anchor = o.presenter && scene.anchor === "bottom" ? "top" : scene.anchor;
+    // designed panes (marks, numbers, UI) need a free half of the frame: a centred headline moves to an edge
+    if (plan && layout.startsWith("media_") && anchor === "center" && plan.some((s) => s.option !== "layout" && s.option.kind !== "photo")) anchor = design.scenes[i - 1]?.anchor === "bottom" || o.presenter ? "top" : "bottom";
+    const media = (rw: number, rh: number, full: boolean) => (plan ? paneStack(i, id, plan, rw, rh, contentRect(anchor, rw, rh, full)) : `<img class="img" id="${id}-img" src="${img}" alt="" />`);
+    const photo = () => `<span class="ph full" id="${id}-ph">${media(F.w, F.h, true)}</span>`;
 
     const headline = (cls: string, def: number, maxw: number, maxh: number, min: number, align: "left" | "center") =>
       `<div class="hl ${cls}" style="font-size:${size(`${id}-hl`, def)}px;width:${Math.round(maxw)}px;text-align:${align}" ${fitAttrs(`${id}-hl`, maxw, maxh, min)} id="${id}-hl">${words(scene, `${id}-hl`, scene.entrance)}</div>`;
@@ -519,7 +596,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
         break;
       }
       case "media_full": {
-        body.push(photo);
+        body.push(photo());
         if (LS) {
           body.push(scrim(id, anchor, "left"));
           const w = Math.min(1080, Math.round(textW * 0.62));
@@ -533,7 +610,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       }
       case "media_number": {
         const n = scene.number!;
-        body.push(photo);
+        body.push(photo());
         body.push(scrim(id, anchor, LS ? "left" : "v", 0.22));
         const w = LS ? Math.min(1100, Math.round(textW * 0.64)) : textW;
         body.push(block(anchor, S.x, w, "left", [kicker(scene.kicker, `${id}-k`), numEl(id, n, LS ? 280 : SQ ? 260 : 330, w, LS ? 380 : SQ ? 300 : 420), headline("hl-mnum", LS ? 84 : SQ ? 76 : 92, w, LS ? 340 : SQ ? 300 : 460, 42, "left"), subEl(scene, id)], { cls: "onphoto" }));
@@ -545,13 +622,13 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       }
       case "media_card": {
         if (LS) {
-          body.push(`<span class="ph card" id="${id}-ph" style="left:${visX}px;top:${S.top}px;width:${visW}px;height:${S.bottom - S.top}px"><img class="img" id="${id}-img" src="${img}" alt="" /></span>`);
+          body.push(`<span class="ph card" id="${id}-ph" style="left:${visX}px;top:${S.top}px;width:${visW}px;height:${S.bottom - S.top}px">${media(visW, S.bottom - S.top, false)}</span>`);
           body.push(block(anchor, S.x, colW, "left", [kicker(scene.kicker, `${id}-k`), headline("hl-card", hook ? 104 : 92, colW, 640, 44, "left"), subEl(scene, id)]));
         } else {
           const cardH = SQ ? 520 : 900;
           const textTop = anchor === "top";
           const cardTop = textTop ? (SQ ? 440 : 660) : SQ ? S.top : 200;
-          body.push(`<span class="ph card" id="${id}-ph" style="left:${S.x + (SQ ? 0 : 38)}px;top:${cardTop}px;width:${textW - (SQ ? 0 : 76)}px;height:${cardH}px"><img class="img" id="${id}-img" src="${img}" alt="" /></span>`);
+          body.push(`<span class="ph card" id="${id}-ph" style="left:${S.x + (SQ ? 0 : 38)}px;top:${cardTop}px;width:${textW - (SQ ? 0 : 76)}px;height:${cardH}px">${media(textW - (SQ ? 0 : 76), cardH, false)}</span>`);
           const band = textTop ? { top: bandTop, bottom: cardTop - 40 } : { top: cardTop + cardH + 50, bottom: S.bottom };
           body.push(block(textTop ? "bottom" : "top", S.x, textW, "left", [kicker(scene.kicker, `${id}-k`), headline("hl-card", hook ? 104 : 92, textW, band.bottom - band.top - 10, 42, "left")], band));
         }
@@ -562,7 +639,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       case "media_split": {
         if (LS) {
           const x0 = Math.round(F.w * 0.5);
-          body.push(`<span class="ph" id="${id}-ph" style="left:${x0}px;top:0;width:${F.w - x0}px;height:${F.h}px"><img class="img" id="${id}-img" src="${img}" alt="" /></span>`);
+          body.push(`<span class="ph" id="${id}-ph" style="left:${x0}px;top:0;width:${F.w - x0}px;height:${F.h}px">${media(F.w - x0, F.h, false)}</span>`);
           body.push(`<span class="splitline v" id="${id}-line" style="left:${x0 - 4}px;top:0;width:8px;height:${F.h}px"></span>`);
           body.push(block(anchor, S.x, x0 - S.x - 70, "left", [kicker(scene.kicker, `${id}-k`), headline("hl-split", 92, x0 - S.x - 70, 640, 42, "left"), subEl(scene, id)]));
           tw.push(`tl.fromTo("#${id}-ph", { clipPath: "inset(0% 0% 0% 100%)" }, { clipPath: "inset(0% 0% 0% 0%)", duration: 0.6, ease: "power4.out" }, ${fmt(t.start)});`);
@@ -572,7 +649,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
           const textTop = anchor === "top";
           const splitY = Math.round(F.h * (textTop ? (SQ ? 0.5 : 0.44) : SQ ? 0.5 : 0.54));
           const ph = textTop ? `left:0;top:${splitY}px;width:${F.w}px;height:${F.h - splitY}px` : `left:0;top:0;width:${F.w}px;height:${splitY}px`;
-          body.push(`<span class="ph" id="${id}-ph" style="${ph}"><img class="img" id="${id}-img" src="${img}" alt="" /></span>`);
+          body.push(`<span class="ph" id="${id}-ph" style="${ph}">${media(F.w, textTop ? F.h - splitY : splitY, false)}</span>`);
           body.push(`<span class="splitline" id="${id}-line" style="left:0;top:${splitY - 4}px;width:${F.w}px;height:8px"></span>`);
           const band = textTop ? { top: bandTop, bottom: splitY - 40 } : { top: splitY + 44, bottom: S.bottom };
           body.push(block(textTop ? "bottom" : anchor === "bottom" ? "bottom" : "center", S.x, textW, "left", [kicker(scene.kicker, `${id}-k`), headline("hl-split", SQ ? 80 : 96, textW, band.bottom - band.top - 10, 42, "left")], band));
@@ -790,10 +867,15 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
         enter(scene, `${id}-hl`, at, i);
       }
     }
+    // stage 26: a number-led typographic scene becomes one sub-shot among the scene's pictures
+    if (plan && (SHOT_LAYOUTS as readonly string[]).includes(layout)) {
+      const inner = body.splice(0).filter(Boolean).join("");
+      body.push(paneStack(i, id, plan, F.w, F.h, { x: S.x, y: S.top, w: textW, h: S.bottom - S.top }, inner));
+    }
     // shared: kicker / sub entrance, Ken Burns on photos
     if (scene.kicker && layout !== "orbit_title") tw.push(`tl.fromTo("#${id}-k", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.4, ease: "power2.out" }, ${fmt(t.start + 0.05)});`);
     if (scene.sub && body.some((b) => b.includes(`id="${id}-sub"`))) tw.push(`tl.fromTo("#${id}-sub", { opacity: 0 }, { opacity: 1, duration: 0.5 }, ${fmt(Math.min(at + 0.9, t.start + t.duration - 0.6))});`);
-    if (layout.startsWith("media_") && scene.image) {
+    if (layout.startsWith("media_") && scene.image && !plan) {
       const m = scene.image.motion;
       const [from, to] = m === "zoom_out" ? ["scale: 1.16", "scale: 1"] : m === "pan_left" ? ["scale: 1.14, xPercent: 3", "scale: 1.14, xPercent: -3"] : m === "pan_right" ? ["scale: 1.14, xPercent: -3", "scale: 1.14, xPercent: 3"] : ["scale: 1", "scale: 1.14"];
       tw.push(`tl.fromTo("#${id}-img", { ${from} }, { ${to}, duration: ${fmt(t.duration)}, ease: "none" }, ${fmt(t.start)});`);
@@ -1019,7 +1101,7 @@ export function composeScenes(script: Script, design: Design, o: ComposeScenesOp
       .caps { position: absolute; inset: 0; pointer-events: none; }
       .cap { position: absolute; left: ${S.x}px; right: ${S.x}px; bottom: ${F.h - S.bottom + 6}px; display: flex; justify-content: center; opacity: 0; }
       .capt { display: block; max-width: ${textW}px; padding: 14px 28px; border-radius: 22px; background: rgba(0,0,0,0.62); color: #FFFFFF; font-family: ${fontStack("inter")}; font-weight: 700; font-size: ${px(50)}px; line-height: 1.18; text-align: center; text-wrap: balance; }${presenterCss}
-      .hl-quote { font-family: ${fontStack(accentFont === "mono" ? display : accentFont)}; font-weight: ${(accentFont === "mono" ? D : A).weight}; font-style: ${(accentFont === "mono" ? D : A).style}; line-height: 1.12; }
+      .hl-quote { font-family: ${fontStack(accentFont === "mono" ? display : accentFont)}; font-weight: ${(accentFont === "mono" ? D : A).weight}; font-style: ${(accentFont === "mono" ? D : A).style}; line-height: 1.12; }${anyShots ? paneCss({ w: F.w, h: F.h, accent: P.accent, bg: P.bg, display: fontStack(display), displayWeight: D.weight, mono: fontStack("mono"), text: P.text, muted: P.muted, k }) : ""}
     </style>
   </head>
   <body>

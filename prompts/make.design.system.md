@@ -46,10 +46,12 @@ WHAT YOU DESIGN
    - anchor: where the text block sits: "top", "center" or "bottom". Vary it: two consecutive scenes never share an anchor. On photos put the text where the photo is calm (sky → top, table/floor → bottom). On vertical frames "bottom" means just above the phone UI, so the lower third is used, not empty.
    - entrance: how the headline arrives: "rise", "mask", "pop", "type", "slide". With a narrator the words appear as they are spoken; the entrance is the motion of each word.
    - transition: how this scene arrives from the previous one: "cut" (default: a hard cut on the beat), "whip" (fast whip pan), "zoom" (zoom-through), "fade" (rare, max once). Mostly cuts; 1–3 whips/zooms per video where the energy changes; never the same move twice in a row.
+   - shots: when the user turn lists VISUAL OPTIONS, the ids this scene shows as sub-shots, in order (1–4, same beat only); a media layout with shots needs no image. Empty list when there are no options for the beat.
 
 RULES
 - No template feel: never the same layout twice in a row; at least 4 different layouts in a 6–8 beat video; consecutive scenes differ in layout AND anchor AND density (a full photo after a typographic frame, a dense list after a single number).
-- Photo-led: at least half of the beats are media_* with a concrete photo query; numbers can sit over photos (media_number).
+- Photo-led: at least half of the beats are media_* with a concrete photo query or with shots from the VISUAL OPTIONS; numbers can sit over photos (media_number).
+- On topic: a beat that names a company, product, person, place or exchange shows THAT thing (its option), never a generic look-alike.
 - The hook (first beat) is the strongest real image or number: media_full or media_number with the key fact, or hero_number. Not orbit_title by default. It lasts only 2–3 seconds: one huge number or 3–6 big words, nothing else on screen (no kicker, no sub).
 - The second scene comes around the third second and is a pattern interrupt: a different layout family, colour field or photo than the hook, arriving with "whip" or "zoom".
 - Each typographic device (list, chat, timeline, compare, statement, quote, hero_number, any 3D layout) appears at most once per video; photos (media_*) may repeat.
