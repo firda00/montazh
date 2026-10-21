@@ -1,6 +1,7 @@
 import type { DesignSpec } from "../../schemas/index.ts";
 import type { Card, Panels } from "../panels.ts";
 import { graphicsCss, renderGraphic } from "../panel-graphics.ts";
+import { fullSpeakerFrom, hookPlateLayer, hookPlateLines, paneBackground, paneCss, renderPane, type Pane, type Section } from "../abror.ts";
 
 /**
  * Split-screen layer for the montage overlay: the speaker video moves into the bottom half, the top
@@ -37,6 +38,12 @@ export interface SplitInput {
    * breaking over the top panel; 0 = none)
    */
   cutout?: { plateHeight: number; popHeight: number };
+  /** stage 33: per-section layout (split → full-frame speaker for the moral and CTA, full-frame inserts) */
+  sections?: Section[];
+  /** stage 33: insert-pane files (absolute) → project-relative src */
+  paneRel?: Record<string, string>;
+  /** stage 33: text advance width of the composition font (hook plate sizing) */
+  measure?: (text: string, size: number) => number;
 }
 
 export interface SplitLayer {
@@ -45,6 +52,32 @@ export interface SplitLayer {
   videoCss: string;
   sections: string[];
   tweens: string[];
+  /**
+   * stage 33: one video element per section instead of the single #a-roll (the same rough cut, offset with
+   * data-media-start): the bottom box during the split, the whole frame afterwards; none during a full-frame insert
+   */
+  videos?: { id: string; start: number; end: number; css: string }[];
+}
+
+/** stage 33: the abror hook (blue plate) instead of the three magazine lines */
+const usesPlate = (D: DesignSpec) => D.split.hook === "plate" && D.hook_plate.enabled;
+
+/** stage 33: the pane of a panel, when it carries a valid one */
+export function panelPane(p: { pane?: Record<string, unknown> }): Pane | null {
+  const k = p.pane?.kind;
+  return typeof k === "string" && ["article", "site", "ui", "logo", "number", "text", "photo"].includes(k) ? (p.pane as unknown as Pane) : null;
+}
+
+/** stage 33: files the panes show (absolute), for the project's assets */
+export function paneFiles(panels: Panels): string[] {
+  const out = new Set<string>();
+  for (const p of panels.panels) {
+    const pane = panelPane(p);
+    if (!pane) continue;
+    if ((pane.kind === "site" || pane.kind === "ui" || pane.kind === "photo") && pane.image) out.add(pane.image);
+    if (pane.kind === "article" && pane.image) out.add(pane.image);
+  }
+  return [...out];
 }
 
 /** object-position % that keeps the face at ~42% of the bottom box */
@@ -93,13 +126,26 @@ export function panelFrame(W: number, H: number, seamFrac: number): { x: number;
 }
 
 /** Where the hook title sits on the seam and for how long (fractions of the frame) — an obstacle for the captions. */
-export function hookExtent(W: number, H: number, design: DesignSpec, panels: Panels, duration: number): { start: number; end: number; lo: number; hi: number } | null {
+export function hookExtent(W: number, H: number, design: DesignSpec, panels: Panels, duration: number, sections?: Section[]): { start: number; end: number; lo: number; hi: number } | null {
   const hook = panels.hook_title;
   if (!hook.length) return null;
+  if (usesPlate(design)) {
+    const p = plateFor(W, H, design, panels, duration, sections);
+    return { start: p.timing.start, end: p.timing.end, lo: p.extent.lo, hi: p.extent.hi };
+  }
   const seam = Math.round(design.split.seam * H);
   const total = hook.reduce((n, l) => n + Math.min(118, (W - 140) / Math.max(1, l.text.length * (l.style === "serif" ? 0.5 : 0.66))), 0);
   const top = Math.round(seam - total * 0.55);
   return { start: 0, end: Math.min(4.5, panels.panels[0]?.end ?? 4.5, duration), lo: top / H, hi: (top + total * 0.98 + 12) / H };
+}
+
+/** stage 33: the hook plate of a split reel (lines from the panels' hook title, placed over the seam or under the face) */
+export function plateFor(W: number, H: number, D: DesignSpec, panels: Panels, duration: number, sections?: Section[], font = "'Montserrat', sans-serif", measure?: (t: string, size: number) => number) {
+  const hl = panels.hook_title.map((l) => l.text.trim()).filter(Boolean);
+  const lines = hookPlateLines(hl.length === 2 ? hl.join(" / ") : hl.join(" "), D.hook_plate.max_words);
+  const first = sections?.[0]?.layout ?? "split";
+  const anchorY = first === "split" ? D.hook_plate.anchor_y : D.hook_plate.anchor_y_full;
+  return hookPlateLayer({ W, H, spec: D.hook_plate, lines, anchorY, start: 0, duration, font, ...(measure ? { measure } : {}), id: "sp-plate", trackIndex: 6 });
 }
 
 export function buildSplitLayer(s: SplitInput): SplitLayer {
@@ -110,17 +156,43 @@ export function buildSplitLayer(s: SplitInput): SplitLayer {
   const accent = SP.accent;
   const sections: string[] = [];
   const tweens: string[] = [];
-  const cardX = 54;
-  const cardY = 150;
+  // stage 33: "edge" — the top panel is the whole top box (his editors: cover crop, no frame)
+  const edge = SP.panel_frame === "edge";
+  const cardX = edge ? 0 : 54;
+  const cardY = edge ? 0 : 150;
   const cardW = s.W - 2 * cardX;
-  const cardH = seam - cardY - 60;
+  const cardH = edge ? seam : seam - cardY - 60;
+  const k = s.W / 1080;
+  // stage 33: the split part ends where the speaker takes the whole frame
+  const tSplit = Math.min(s.duration, fullSpeakerFrom(s.sections) ?? s.duration);
+  const abror = edge || usesPlate(D) || !!s.sections?.length;
+  let paneUsed = false;
 
-  // background of the top half (grid + glow), the whole duration
-  sections.push(`      <section id="sp-bg" class="clip sp-bg" data-start="0" data-duration="${fmt(s.duration)}" data-track-index="4"></section>`);
+  // background of the top half (grid + glow) for the split part
+  sections.push(`      <section id="sp-bg" class="clip sp-bg" data-start="0" data-duration="${fmt(tSplit)}" data-track-index="4"></section>`);
 
   s.panels.panels.forEach((p, i) => {
     const id = `sp${i}`;
-    const dur = Math.max(0.1, p.end - p.start);
+    const end = Math.min(p.end, tSplit);
+    const dur = Math.max(0.1, end - p.start);
+    if (end - p.start < 0.1) return;
+    const pane = panelPane(p);
+    if (pane) {
+      // stage 33 insert pane: article / site / UI / logo / number / text / photo, a hard cut like his top panel
+      paneUsed = true;
+      const full = p.layout === "full";
+      const box = full ? { x: 0, y: 0, w: s.W, h: s.H } : { x: cardX, y: cardY, w: cardW, h: cardH };
+      const content = full
+        ? { x: 0.07 * s.W, y: 0.1 * s.H, w: 0.86 * s.W, h: 0.52 * s.H }
+        : edge
+          ? { x: 0.07 * s.W, y: 0.085 * s.H, w: 0.86 * s.W, h: Math.max(200, seam - 0.085 * s.H - 44 * k) }
+          : { x: cardX + 24, y: cardY + 24, w: cardW - 48, h: cardH - 48 };
+      const r = renderPane(pane, { id: `${id}-pn`, start: p.start, end, box, content, rel: (f) => s.paneRel?.[f] ?? f, font: s.displayFamily, k });
+      sections.push(`      <section id="${id}" class="clip sp-panel${full ? " sp-full" : ""}" data-start="${fmt(p.start)}" data-duration="${fmt(dur)}" data-track-index="${full ? 9 : 5}">\n        <span class="ab-pane ${paneBackground(pane)}${edge || full ? "" : " sp-rounded"}" id="${id}-frame" style="left:${r1(box.x)}px;top:${r1(box.y)}px;width:${r1(box.w)}px;height:${r1(box.h)}px">${r.html}</span>\n      </section>`);
+      tweens.push(`tl.fromTo("#${id}-frame", { opacity: 0 }, { opacity: 1, duration: 0.1, ease: "none" }, ${fmt(p.start)});`);
+      tweens.push(...r.tweens);
+      return;
+    }
     const img = s.images[i];
     // a graphic panel (or a photo/AI panel whose picture is missing) shows its code-rendered graphic
     const gfx = !img && p.graphic ? renderGraphic(p.graphic, { id, w: cardW, h: cardH, start: p.start, duration: dur, accent, bg: SP.panel_bg, displayFamily: s.displayFamily, serifFamily: s.serifFamily, monoFamily: s.monoFamily }) : null;
@@ -130,8 +202,9 @@ export function buildSplitLayer(s: SplitInput): SplitLayer {
     sections.push(
       `      <section id="${id}" class="clip sp-panel" data-start="${fmt(p.start)}" data-duration="${fmt(dur)}" data-track-index="5">\n        <span class="sp-glow" id="${id}-glow"></span>\n        <span class="sp-frame" id="${id}-frame">${inner}</span>\n        ${cards}\n      </section>`,
     );
-    // panel change: the new card pushes in from below with a slight scale (a cut, not a fade)
-    tweens.push(`tl.fromTo("#${id}-frame", { opacity: 0, y: 70, scale: 0.94 }, { opacity: 1, y: 0, scale: 1, duration: 0.5, ease: "expo.out" }, ${fmt(p.start)});`);
+    // panel change: the new card pushes in from below with a slight scale (a cut, not a fade); edge panels just cut
+    if (edge) tweens.push(`tl.fromTo("#${id}-frame", { opacity: 0 }, { opacity: 1, duration: 0.1, ease: "none" }, ${fmt(p.start)});`);
+    else tweens.push(`tl.fromTo("#${id}-frame", { opacity: 0, y: 70, scale: 0.94 }, { opacity: 1, y: 0, scale: 1, duration: 0.5, ease: "expo.out" }, ${fmt(p.start)});`);
     if (img) {
       // Ken Burns with a drift direction that alternates per panel
       const dir = i % 2 ? -1 : 1;
@@ -143,14 +216,21 @@ export function buildSplitLayer(s: SplitInput): SplitLayer {
       // bottom-corner cards of the first panel wait for the hook title on the seam to leave
       const lower = c.corner === "bl" || c.corner === "br";
       const at = Math.max(p.start + 0.45 + k * 0.35, lower && p.start < hookEnd ? hookEnd + 0.1 : 0);
-      if (at < p.end - 0.3) tweens.push(`tl.fromTo("#${id}-c${k}", { opacity: 0, y: 24, scale: 0.9 }, { opacity: 1, y: 0, scale: 1, duration: 0.45, ease: "back.out(1.7)" }, ${fmt(at)});`);
+      if (at < end - 0.3) tweens.push(`tl.fromTo("#${id}-c${k}", { opacity: 0, y: 24, scale: 0.9 }, { opacity: 1, y: 0, scale: 1, duration: 0.45, ease: "back.out(1.7)" }, ${fmt(at)});`);
       else tweens.push(`tl.set("#${id}-c${k}", { opacity: 0 }, ${fmt(p.start)});`);
     });
   });
 
-  // hook title on the seam during the first panel (max 4.5 s)
   const hook = s.panels.hook_title;
-  if (hook.length) {
+  let plateCss = "";
+  if (hook.length && usesPlate(D)) {
+    // stage 33: the blue plate over the seam, 3–5 s, out to the left with a blur
+    const plate = plateFor(s.W, s.H, D, s.panels, s.duration, s.sections, s.displayFamily, s.measure);
+    sections.push(plate.html);
+    tweens.push(...plate.tweens);
+    plateCss = plate.css;
+  } else if (hook.length) {
+    // hook title on the seam during the first panel (max 4.5 s)
     const hookDur = Math.min(4.5, s.panels.panels[0]?.end ?? 4.5, s.duration);
     const lines = hook.map((l, k) => {
       const em = l.style === "serif" ? 0.5 : 0.66;
@@ -215,12 +295,27 @@ export function buildSplitLayer(s: SplitInput): SplitLayer {
       .sp-hook { position: absolute; inset: 0; pointer-events: none; }
       .sp-hookin { position: absolute; left: 60px; right: 60px; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 0; }
       .sp-hl { display: block; white-space: nowrap; line-height: 0.98; letter-spacing: -0.02em; text-shadow: 0 6px 30px rgba(0,0,0,0.85), 0 2px 6px rgba(0,0,0,0.9); }
-      .sp-seam { position: absolute; left: 0; top: ${seam - 1}px; width: ${s.W}px; height: 2px; display: block; background: linear-gradient(90deg, transparent, ${accent}, transparent); }${cutCss}`;
+      .sp-seam { position: absolute; left: 0; top: ${seam - 1}px; width: ${s.W}px; height: 2px; display: block; background: linear-gradient(90deg, transparent, ${accent}, transparent); }${cutCss}${
+        abror
+          ? `
+      .sp-full { height: ${s.H}px; }
+      .sp-rounded { border-radius: 30px; }${edge ? `
+      .sp-frame { border-radius: 0; border: 0; box-shadow: none; } .sp-glow { display: none; }` : ""}
+      .cap, .shade { z-index: 4; } .sp-full { z-index: 3; } .hp { z-index: 5; } .outro, .cta { z-index: 6; }${plateCss}${paneUsed ? paneCss({ font: s.displayFamily, k }) : ""}`
+          : ""
+      }`;
   // with a cutout the a-roll is the plate, already cut to the bottom box. No CSS filter on the videos: a
   // drop-shadow rim drew a purple halo around the hair and cost ~70 ms a frame
-  const videoCss = cut
-    ? `#a-roll { position: absolute; left: 0; top: ${seam}px; width: ${s.W}px; height: ${cut.plateHeight}px; object-fit: fill; z-index: 2; }`
-    : `#a-roll { position: absolute; left: 0; top: ${seam}px; width: ${s.W}px; height: ${s.H - seam}px; object-fit: cover; object-position: 50% ${videoOffset(s.faceY, s.H, seam)}%; }`;
-  sections.push(`      <section id="sp-seam" class="clip sp-seam" data-start="0" data-duration="${fmt(s.duration)}" data-track-index="7"></section>`);
-  return { css, videoCss, sections, tweens };
+  const splitVideo = `position: absolute; left: 0; top: ${seam}px; width: ${s.W}px; height: ${s.H - seam}px; object-fit: cover; object-position: 50% ${videoOffset(s.faceY, s.H, seam)}%;`;
+  const videoCss = cut ? `#a-roll { position: absolute; left: 0; top: ${seam}px; width: ${s.W}px; height: ${cut.plateHeight}px; object-fit: fill; z-index: 2; }` : `#a-roll { ${splitVideo} }`;
+  // stage 33: sections → one video element each (no cutout: the plate is cut to the bottom box only)
+  let videos: SplitLayer["videos"];
+  const secs = s.sections ?? [];
+  if (!cut && secs.length && (secs.length > 1 || secs[0].layout !== "split")) {
+    videos = secs
+      .filter((x) => x.layout !== "full_insert" && x.end - x.start > 0.05)
+      .map((x, n) => ({ id: n === 0 ? "a-roll" : `a-roll-${n}`, start: x.start, end: x.end, css: x.layout === "split" ? splitVideo : `position: absolute; left: 0; top: 0; width: ${s.W}px; height: ${s.H}px; object-fit: cover; object-position: 50% 40%;` }));
+  }
+  if (!edge) sections.push(`      <section id="sp-seam" class="clip sp-seam" data-start="0" data-duration="${fmt(tSplit)}" data-track-index="7"></section>`);
+  return { css, videoCss: videos ? videos.map((v) => `#${v.id} { ${v.css} }`).join("\n      ") : videoCss, sections, tweens, ...(videos ? { videos } : {}) };
 }

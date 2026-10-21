@@ -36,6 +36,13 @@ export const PanelSchema = z.object({
   /** always present after normalisation: shown when the panel is a graphic or its photo/image is missing */
   graphic: GraphicSchema.nullable().default(null),
   cards: z.array(CardSchema).default([]),
+  /**
+   * stage 33 (abror_split): an insert pane drawn instead of the photo/graphic — article (key line under a marker), site
+   * scroll, product UI, logo, number, text card, photo (src/design/abror.ts Pane); the graphic stays as the fallback
+   */
+  pane: z.record(z.string(), z.unknown()).optional(),
+  /** stage 33: "full" = this panel takes the whole frame (a striking insert; the speaker is hidden meanwhile) */
+  layout: z.enum(["split", "full"]).optional(),
 });
 export const HookLineSchema = z.object({ text: z.string(), style: z.enum(["display", "accent", "serif"]) });
 export const PanelsSchema = z.object({ hook_title: z.array(HookLineSchema), panels: z.array(PanelSchema), image_style: z.string().default(""), notes: z.array(z.string()).default([]) });

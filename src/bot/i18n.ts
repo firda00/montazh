@@ -6,6 +6,7 @@ import { geminiApiKey } from "../voice/gemini.ts";
 import { cloudApiKey } from "../voice/cloudtts.ts";
 import { TTS_KEYS_HELP } from "../voice/piper.ts";
 import type { Lang } from "./db.ts";
+import { CP_EN, CP_RU, CP_UZ } from "./i18n-cp.ts";
 
 export type { Lang } from "./db.ts";
 
@@ -95,7 +96,7 @@ const ru = {
   welcome: (credits: number, std: number, long: number, longMinutes: number) =>
     `Готово, вы зарегистрированы! Пробных кредитов: ${credits}. Бесплатно каждый день: ${std} обычн. задачи и ${long} длинная (видео дольше ${longMinutes} минут или хайлайты игры).\nВыберите, что сделать, — кнопки внизу.`,
   menuText: "Главное меню — выберите, что сделать:",
-  menu: { montage: "🎬 Монтаж из моих видео", ref: "🎯 Монтаж как в примере", make: "✨ Ролик по теме", highlights: "🏀 Хайлайты игры", avatar: "🧑 Аватар", settings: "⚙️ Настройки", balance: "💳 Баланс", help: "❓ Помощь", guide: "📘 Как пользоваться" },
+  menu: { montage: "🎬 Монтаж из моих видео", ref: "🎯 Монтаж как в примере", make: "✨ Ролик по теме", highlights: "🏀 Хайлайты игры", plan: "🗓 Контент-план", avatar: "🧑 Аватар", settings: "⚙️ Настройки", balance: "💳 Баланс", help: "❓ Помощь", guide: "📘 Как пользоваться" },
   needStart: "Сначала закончим регистрацию — это пара нажатий. /start",
   banned: "Доступ к боту ограничен. Если это ошибка — напишите администратору.",
   docMissing: "Текст пока недоступен.",
@@ -431,6 +432,10 @@ ${TTS_KEYS_HELP}`
     criteria: { hook: "хук", visual_relevance: "картинки", dynamics: "динамика", captions: "субтитры", audio: "звук", text_accuracy: "текст", overall: "общая" } as Record<string, string>,
   },
   // stage 30: testers, links as the starting point, «Русская версия» (dubbing), compliance
+  // stage 31: the promo / explainer format (clean UI, 16:9 for YouTube)
+  s31: { promo: "🎬 Промо / объяснялка (YouTube)" },
+  // stage 32: «🗓 Контент-план» (src/bot/i18n-cp.ts)
+  cp: CP_RU,
   s30: {
     // testers
     testerNotice: (id: number, name: string, username: string, slot: number, slots: number) => `👤 Новый тестировщик: ${name}${username ? ` @${username}` : ""} · id ${id} (слот ${slot}/${slots})`,
@@ -499,7 +504,7 @@ const uz: Strings = {
   welcome: (credits: number, std: number, long: number, longMinutes: number) =>
     `Tayyor, siz ro‘yxatdan o‘tdingiz! Sinov kreditlari: ${credits}. Har kuni bepul: ${std} ta oddiy vazifa va ${long} ta uzun vazifa (${longMinutes} daqiqadan uzun video yoki o‘yin xaylaytlari).\nNima qilishni tanlang — tugmalar pastda.`,
   menuText: "Asosiy menyu — nima qilamiz?",
-  menu: { montage: "🎬 Videolarimdan montaj", ref: "🎯 Namunadagidek montaj", make: "✨ Mavzu bo‘yicha rolik", highlights: "🏀 O‘yin xaylaytlari", avatar: "🧑 Avatar", settings: "⚙️ Sozlamalar", balance: "💳 Balans", help: "❓ Yordam", guide: "📘 Qanday foydalanish" },
+  menu: { montage: "🎬 Videolarimdan montaj", ref: "🎯 Namunadagidek montaj", make: "✨ Mavzu bo‘yicha rolik", highlights: "🏀 O‘yin xaylaytlari", plan: "🗓 Kontent-reja", avatar: "🧑 Avatar", settings: "⚙️ Sozlamalar", balance: "💳 Balans", help: "❓ Yordam", guide: "📘 Qanday foydalanish" },
   needStart: "Avval ro‘yxatdan o‘tishni yakunlaylik — bir necha bosish xolos. /start",
   banned: "Botdan foydalanish cheklangan. Agar bu xato bo‘lsa — administratorga yozing.",
   docMissing: "Matn hozircha mavjud emas.",
@@ -828,6 +833,8 @@ Endi o‘z videongizni yuboring — bitta yoki bir nechta. Shu uslubda montaj qi
     kinds: { montage: "montaj", highlights: "xaylaytlar", reference: "namunadek", make: "mavzu bo‘yicha", revise: "tuzatish", avatar: "avatar", dub: "ovoz berish" },
     criteria: { hook: "hook", visual_relevance: "rasmlar", dynamics: "dinamika", captions: "subtitrlar", audio: "ovoz", text_accuracy: "matn", overall: "umumiy" },
   },
+  s31: { promo: "🎬 Promo / tushuntirish (YouTube)" },
+  cp: CP_UZ,
   s30: {
     testerNotice: (id: number, name: string, username: string, slot: number, slots: number) => `👤 Yangi testchi: ${name}${username ? ` @${username}` : ""} · id ${id} (o‘rin ${slot}/${slots})`,
     btnRevoke: "🚫 Bekor qilish",
@@ -890,7 +897,7 @@ const en: Strings = {
   welcome: (credits: number, std: number, long: number, longMinutes: number) =>
     `You’re all set! Trial credits: ${credits}. Free every day: ${std} standard jobs and ${long} long one (video over ${longMinutes} minutes or game highlights).\nPick what to do — buttons below.`,
   menuText: "Main menu — what shall we make?",
-  menu: { montage: "🎬 Edit my videos", ref: "🎯 Edit like an example", make: "✨ Video on a topic", highlights: "🏀 Game highlights", avatar: "🧑 Avatar", settings: "⚙️ Settings", balance: "💳 Balance", help: "❓ Help", guide: "📘 How to use" },
+  menu: { montage: "🎬 Edit my videos", ref: "🎯 Edit like an example", make: "✨ Video on a topic", highlights: "🏀 Game highlights", plan: "🗓 Content plan", avatar: "🧑 Avatar", settings: "⚙️ Settings", balance: "💳 Balance", help: "❓ Help", guide: "📘 How to use" },
   needStart: "Let’s finish signing up first — just a couple of taps. /start",
   banned: "Your access to the bot is restricted. If this is a mistake, contact the administrator.",
   docMissing: "This text is not available yet.",
@@ -1219,6 +1226,8 @@ Now send your own video — one or several. I’ll edit it in this style.`,
     kinds: { montage: "montage", highlights: "highlights", reference: "like example", make: "topic video", revise: "revision", avatar: "avatar", dub: "voice-over" },
     criteria: { hook: "hook", visual_relevance: "pictures", dynamics: "pace", captions: "captions", audio: "sound", text_accuracy: "text", overall: "overall" },
   },
+  s31: { promo: "🎬 Promo / explainer (YouTube)" },
+  cp: CP_EN,
   s30: {
     testerNotice: (id: number, name: string, username: string, slot: number, slots: number) => `👤 New tester: ${name}${username ? ` @${username}` : ""} · id ${id} (slot ${slot}/${slots})`,
     btnRevoke: "🚫 Revoke",

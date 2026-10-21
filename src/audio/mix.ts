@@ -9,7 +9,7 @@ import { sfxFile, thinCues, type SfxCue, type SfxKind } from "./sfx.ts";
  */
 
 /** relative levels per effect (dB), tuned so a whoosh is felt, not heard over the music */
-const SFX_GAIN: Record<SfxKind, number> = { whoosh: 3, pop: -7, tick: -9, impact: -3, riser: -1, ding: -5, swipe: -3, swish: 0 };
+export const SFX_GAIN: Record<SfxKind, number> = { whoosh: 3, pop: -7, tick: -9, impact: -3, riser: -1, ding: -5, swipe: -3, swish: 0, key: -12, click: -8, chime: -8 };
 /** effects sit this much lower under a voiceover (before the ducking) */
 export const SFX_UNDER_VOICE_DB = -5;
 

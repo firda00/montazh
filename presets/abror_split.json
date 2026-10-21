@@ -1,0 +1,95 @@
+{
+  "name": "abror_split",
+  "description": "Формат Аброра A (docs/abror-format.md): селфи-голова снизу, верх 42 % на всю ширину — статья с выделенной строкой, сайт, логотип, UI, число ровно на словах; синяя хук-плашка на шве 3–5 с и уход влево со смазом; строчные субтитры 1–3 слова в синей полупрозрачной плашке на шве; последние 25 % — голова на весь кадр, субтитры на груди, CTA «\"MAN\" soʻzini yozib qoldiring»",
+  "pace": "dynamic",
+  "clip_seconds": { "min": 2, "max": 8 },
+  "caption_style": "abror_seam_box",
+  "title_style": "card",
+  "default_aspect": "9:16",
+  "music_default": true,
+  "music": "plan",
+  "asr": { "language": "uz", "engine": "gemini" },
+  "notes": [
+    "хук 0–3 с: число/деньги + кто + контраст; титр ≤ 6 слов капсом",
+    "верх меняется каждые 2–3 с на существительном, которое звучит; голову почти не резать (3–8 склеек на рилс)",
+    "последние 20–25 % — голова на весь кадр: вывод для узбекских фаундеров + CTA",
+    "никаких ИИ-изображений реальных людей и логотипов; реальные фото/скрины/UI с источником",
+    "субтитры строчными как сказано, узбекская латиница, oʻ/gʻ через U+02BB"
+  ],
+  "design": {
+    "font": { "family": "Montserrat", "file": "assets/fonts/Montserrat-Variable.ttf", "weight": 400 },
+    "colors": {
+      "text": "#FFFFFF",
+      "highlight": "#FFFFFF",
+      "stroke": "rgba(0,0,0,0)",
+      "title": "#FFFFFF",
+      "title_bg": "linear-gradient(180deg,#2F55D6 0%,#1D3DB8 100%)"
+    },
+    "captions": {
+      "anchor_y": 0.435,
+      "anchor_y_full": 0.73,
+      "max_words": 3,
+      "max_chars": 22,
+      "font_size": 64,
+      "line_height": 1.1,
+      "uppercase": false,
+      "letter_case": "lower",
+      "stroke_width": 0,
+      "shadow_opacity": 0,
+      "word_animation": "none",
+      "page_animation": "none",
+      "numbers_font": "same",
+      "avoid_face": false,
+      "backing": { "enabled": true, "color": "rgba(0,82,255,0.40)", "padding": 9, "radius": 6 },
+      "shade": { "enabled": false }
+    },
+    "titles": {
+      "anchor_y": 0.4,
+      "font_size": 60,
+      "max_lines": 2,
+      "animation": "fade",
+      "padding": 24,
+      "radius": 18,
+      "avoid_face": false,
+      "face_zone": 0.42,
+      "accent_color": ""
+    },
+    "hook_plate": {
+      "enabled": true,
+      "background": "linear-gradient(180deg,#2F55D6 0%,#1D3DB8 100%)",
+      "border": 4,
+      "border_bottom": 7,
+      "radius": 18,
+      "width": 0.72,
+      "font_size": 62,
+      "line2_scale": 0.8,
+      "anchor_y": 0.4,
+      "anchor_y_full": 0.74,
+      "hold": 4,
+      "max_words": 6
+    },
+    "safe_area": { "x": 0.06, "y": 0.08 },
+    "layout": "split",
+    "split": {
+      "seam": 0.42,
+      "panel_bg": "#0E0F14",
+      "accent": "#3D6BFF",
+      "image_style": "documentary editorial photo, natural light, anonymous people seen from behind or far away, objects and places only, no recognisable faces, no logos, no text",
+      "cutout": "off",
+      "pop_out": 0,
+      "full_from": 0.75,
+      "hook": "plate",
+      "panel_frame": "edge"
+    },
+    "inserts": { "enabled": true, "density": "high", "site_capture": true, "pip": false, "chips": false, "sfx": true },
+    "overlays": { "progress_bar": false },
+    "outro": {
+      "enabled": true,
+      "duration": 4,
+      "kind": "keyword",
+      "keyword": "",
+      "label": "soʻzini yozib qoldiring",
+      "anchor_y": 0.6
+    }
+  }
+}

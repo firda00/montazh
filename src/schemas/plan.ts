@@ -208,6 +208,11 @@ export const DesignSpecSchema = z.object({
   captions: z.object({
     /** vertical anchor as a fraction of the frame height (centre of the caption block) */
     anchor_y: z.number().default(0.72),
+    /**
+     * stage 33 (format A of docs/abror-format.md): centre of the caption block over the parts where the speaker fills
+     * the whole frame (the split preset's final quarter, full-frame inserts); absent = anchor_y everywhere
+     */
+    anchor_y_full: z.number().min(0).max(1).optional(),
     max_words: z.number().int().default(4),
     max_chars: z.number().int().default(22),
     font_size: z.number().default(72), // px at 1080 wide; scaled by width/1080
@@ -244,6 +249,8 @@ export const DesignSpecSchema = z.object({
       /** px at 1080 wide, vertical / horizontal */
       padding: z.number().default(10),
       radius: z.number().default(18),
+      /** stage 33 (variant A2): one strip across the whole width (the white band on the seam) instead of a box per line */
+      full_width: z.boolean().default(false),
     }).prefault({}),
     /**
      * stage 23: keep every caption page (and titles, callouts) off the faces: a face track of the rough cut
@@ -294,6 +301,42 @@ export const DesignSpecSchema = z.object({
     cutout: z.enum(["off", "on", "auto"]).default("off"),
     /** how far the cut-out head may break above the seam, fraction of the height */
     pop_out: z.number().min(0).max(0.15).default(0.06),
+    /**
+     * stage 33 — per-section layout: from this share of the runtime on, the speaker fills the whole frame (moral + CTA,
+     * docs/abror-format.md format A: the last ~25 %); 1 = split to the end. The switch lands on the nearest phrase start.
+     */
+    full_from: z.number().min(0).max(1).default(1),
+    /** stage 33: the hook on the seam — "magazine" (three display lines, stage 13) or "plate" (design.hook_plate) */
+    hook: z.enum(["magazine", "plate"]).default("magazine"),
+    /** stage 33: the top panel — "card" (a framed card on a grid, stage 13) or "edge" (edge to edge, cover crop, no frame) */
+    panel_frame: z.enum(["card", "edge"]).default("card"),
+  }).prefault({}),
+  /**
+   * stage 33: the blue hook plate (H1 of docs/abror-format.md §2.1): a gradient box with a white border (thicker at the
+   * bottom), 2 lines in caps, the first larger; it holds 3–5 s and leaves to the left with a motion blur
+   */
+  hook_plate: z.object({
+    enabled: z.boolean().default(false),
+    background: z.string().default("linear-gradient(180deg,#2F55D6 0%,#1D3DB8 100%)"),
+    border_color: z.string().default("#FFFFFF"),
+    /** px at 1080 wide; the bottom edge is thicker (the «plate on a plate» look) */
+    border: z.number().default(4),
+    border_bottom: z.number().default(7),
+    radius: z.number().default(18),
+    /** share of the frame width the plate may take */
+    width: z.number().min(0.3).max(0.95).default(0.72),
+    padding: z.number().default(24),
+    /** first line, px at 1080; the second line is line2_scale of it */
+    font_size: z.number().default(62),
+    line2_scale: z.number().min(0.5).max(1).default(0.8),
+    weight: z.number().default(800),
+    color: z.string().default("#FFFFFF"),
+    /** centre: over the seam in a split; under the face when the speaker (or an insert) fills the frame */
+    anchor_y: z.number().min(0).max(1).default(0.4),
+    anchor_y_full: z.number().min(0).max(1).default(0.74),
+    /** seconds on screen before the exit (clamped to 3–5) */
+    hold: z.number().default(4),
+    max_words: z.number().int().default(6),
   }).prefault({}),
   /**
    * stage 27: B-roll inserts for a talking head (src/design/inserts.ts): named things and numbers of the speech →
@@ -325,6 +368,19 @@ export const DesignSpecSchema = z.object({
     text_by_lang: z.record(z.string(), z.string()).default({}),
     font_size: z.number().default(80),
     backdrop: z.string().default("rgba(0,0,0,0.45)"),
+    /**
+     * stage 33 CTA overlays (docs/abror-format.md §2.3): "card" (the text above, centred), "keyword" (a comment word in
+     * quotes, huge caps over the captions: «"MAN"» + «… so'zini yozib qoldiring»), "phone" (a Telegram / phone number card)
+     */
+    kind: z.enum(["card", "keyword", "phone"]).default("card"),
+    /** keyword: the word to comment; phone: the number or @handle */
+    keyword: z.string().default(""),
+    phone: z.string().default(""),
+    /** the small line under the keyword / number ("so'zini yozib qoldiring", "Telegram"); per language, falls back to `label` */
+    label: z.string().default(""),
+    label_by_lang: z.record(z.string(), z.string()).default({}),
+    /** keyword / phone: vertical centre */
+    anchor_y: z.number().min(0).max(1).default(0.62),
   }).prefault({}),
 });
 export type DesignSpec = z.infer<typeof DesignSpecSchema>;
@@ -343,6 +399,11 @@ export const PresetSchema = z.object({
    * (reels #14, #15) — only an explicit --music overrides it
    */
   music: z.enum(["plan", "off"]).default("plan"),
+  /**
+   * stage 33: speech recognition for this style — a forced language (Uzbek with Russian loanwords drifts to ru/kk/tr in
+   * auto-detection) and the engine: "gemini" = Gemini audio transcription first, whisper as the fallback
+   */
+  asr: z.object({ language: z.string().optional(), engine: z.enum(["auto", "gemini", "whisper"]).default("auto") }).optional(),
   notes: z.array(z.string()).default([]),
   design: DesignSpecSchema.prefault({}),
 });

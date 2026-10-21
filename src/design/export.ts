@@ -23,6 +23,7 @@ import { writeJson } from "../lib/workspace.ts";
 import { styledPreset } from "../style/profile.ts";
 import type { DesignSpec } from "../schemas/index.ts";
 import { buildInserts, type BuildInsertsOptions, type InsertsTrack } from "./inserts.ts";
+import { splitSections, type Section } from "./abror.ts";
 
 export interface DesignJob {
   job_id: string;
@@ -53,6 +54,8 @@ export interface DesignJob {
   faces?: FaceTrack;
   /** stage 27: B-roll inserts over the talking head (src/design/inserts.ts) */
   inserts?: InsertsTrack;
+  /** stage 33 (abror_split): per-section layout (split → full-frame speaker for the moral and CTA, full-frame inserts) */
+  sections?: Section[];
 }
 
 export interface ExportOptions {
@@ -121,8 +124,14 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
   }
 
   const pages = timeline.phrases.flatMap((p) => paginate(p, design.captions.max_words, design.captions.max_chars).map((words) => ({ start: words[0].start, end: words[words.length - 1].end, words })));
+  if (design.outro.enabled && design.outro.kind === "keyword" && !design.outro.keyword.trim()) {
+    const tail = timeline.phrases.slice(-2).map((p) => p.text).join(" ");
+    const m = /["«“”']\s*([\p{L}\p{N}]{2,16})\s*["»“”']\s*so[ʻʼ'‘’`]?zini|\b([\p{L}\p{N}]{2,16})\s+so[ʻʼ'‘’`]?zini\s+yozib/iu.exec(tail);
+    const kw = (m?.[1] ?? m?.[2] ?? process.env.VEDIT_ABROR_KEYWORD ?? "").trim();
+    if (kw) design.outro.keyword = kw;
+  }
   // split layout: the director decides what the top half shows; images via Antigravity (cached per output)
-  let split: { panels?: Panels; panel_images?: Record<number, string>; panel_credits?: PhotoCredit[]; cutout?: DesignJob["cutout"] } = {};
+  let split: { panels?: Panels; panel_images?: Record<number, string>; panel_credits?: PhotoCredit[]; cutout?: DesignJob["cutout"]; sections?: Section[] } = {};
   if (design.layout === "split") {
     const panelsFile = path.join(dir, "design", `${outputId}.panels.json`);
     const imgDir = path.join(dir, "design", `${outputId}-panels`);
@@ -153,7 +162,7 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
     const frame = { ...FRAMES["9:16"], w: box.w, h: box.h };
     const photoTodo: { beat: number; query: string }[] = [];
     for (const [i, p] of panels.panels.entries()) {
-      if (p.source !== "photo") continue;
+      if (p.pane || p.source !== "photo") continue;
       const f = path.join(imgDir, `scene_${i}.jpg`);
       if ((await exists(f)) && credits.some((c) => c.beat === i)) images[i] = f;
       else photoTodo.push({ beat: i, query: p.photo_query });
@@ -174,7 +183,7 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
     // 2) AI images only for panels the director left as "ai" (documentary prompts that passed the filter)
     const todo: { beat: number; prompt: string }[] = [];
     for (const [i, p] of panels.panels.entries()) {
-      if (p.source !== "ai") continue;
+      if (p.pane || p.source !== "ai") continue;
       const f = path.join(imgDir, `scene_${i}.jpg`);
       if (await exists(f)) images[i] = f;
       else todo.push({ beat: i, prompt: p.image_prompt });
@@ -191,7 +200,9 @@ export async function exportDesignJob(jobId: string, outputId: string, opts: Exp
     }
     // 3) everything else (and any missing picture) is a code-rendered graphic
     const usedCredits = credits.filter((c) => images[c.beat] && panels.panels[c.beat]?.source === "photo");
-    split = { panels, panel_images: images, panel_credits: usedCredits };
+    const fullInserts = panels.panels.filter((p) => p.layout === "full").map((p) => ({ start: p.start, end: p.end }));
+    const sections = design.split.full_from < 1 || fullInserts.length ? splitSections(timeline.duration, design.split.full_from, timeline.phrases.map((p) => p.start), fullInserts) : undefined;
+    split = { panels, panel_images: images, panel_credits: usedCredits, ...(sections ? { sections } : {}) };
     // 4) the speaker cut out over a designed background (MediaPipe matte, cached per rough cut)
     const mode = opts.cutout ?? design.split.cutout;
     if (mode !== "off") {

@@ -2,8 +2,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { addCost } from "../lib/cost.ts";
-import { jobDir, writeJson } from "../lib/workspace.ts";
+import { jobDir, loadJob, writeJson } from "../lib/workspace.ts";
 import { HighlightsSchema, ScenesSchema, TranscriptSchema, type Highlights, type Media, type Scenes, type Transcript } from "../schemas/index.ts";
+import { loadPreset } from "../plan/presets.ts";
+import { geminiApiKey } from "../voice/gemini.ts";
+import { transcribeAudio } from "./gemini-audio.ts";
 import { loudnessTimeline, type LoudnessPoint } from "./loudness.ts";
 import { detectShots, extractShotFrames, type Shot } from "./shots.ts";
 import { selectVisionProvider, type AnalysisChunk, type VisionChoice } from "./vision/index.ts";
@@ -11,6 +14,22 @@ import { transcribe, type TimestampMethod } from "./whisper.ts";
 import { findAsrPython, labelSpeakers, transcribeFaster, type AsrChoice } from "./asr.ts";
 import { loadImportedAsr } from "./asr-import.ts";
 import { asrFixEnabled, detectLanguage, fixTranscript, tidyTranscript } from "./asrfix.ts";
+
+/** Proportional word timestamps inside [start, end] for segment-level transcribers (Gemini audio). */
+function segmentWords(text: string, start: number, end: number): { w: string; start: number; end: number }[] {
+  const tokens = text.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return [];
+  const dur = Math.max(0.05, end - start);
+  const weights = tokens.map((x) => x.replace(/[^\p{L}\p{N}]/gu, "").length + 1.5);
+  const total = weights.reduce((a, b) => a + b, 0) || 1;
+  let t = start;
+  return tokens.map((w, i) => {
+    const d = (dur * weights[i]) / total;
+    const out = { w, start: Math.round(t * 1000) / 1000, end: Math.round((t + d) * 1000) / 1000 };
+    t += d;
+    return out;
+  });
+}
 
 export const UnderstandReportSchema = z.object({
   transcriber: z
@@ -129,6 +148,9 @@ export async function understand(jobId: string, media: Media, opts: UnderstandOp
   const dir = jobDir(jobId);
   const warnings: string[] = [];
   const t0 = Date.now();
+  const jobMeta = await loadJob(jobId).catch(() => null);
+  const presetAsr = jobMeta?.preset ? (await loadPreset(jobMeta.preset).catch(() => null))?.preset.asr : undefined;
+  const language = opts.language ?? presetAsr?.language;
 
   // 1. speech → words with timestamps
   let transcript: Transcript = { language: "unknown", segments: [] };
@@ -152,34 +174,85 @@ export async function understand(jobId: string, media: Media, opts: UnderstandOp
     opts.onLog?.(`speech: imported (${imported.marker.model} on ${imported.marker.device}, ${imported.marker.wall_seconds}s remote)`);
     await addCost(jobId, { step: "understand", provider: "faster-whisper (remote GPU, imported)", model: imported.marker.model, units: { audio_seconds: media.duration, wall_seconds: imported.marker.wall_seconds }, usd: 0 });
   } else if (media.audio_path) {
+    let doneByGemini = false;
+    if (presetAsr?.engine === "gemini" && (!opts.asr || opts.asr === "auto") && geminiApiKey() && media.duration <= 600) {
+      const tg = Date.now();
+      opts.onLog?.(`speech: gemini-audio (preset ${jobMeta?.preset}, language ${language ?? "auto"})`);
+      try {
+        const g = await transcribeAudio(media.audio_path, { hint: opts.hint, onLog: opts.onLog });
+        if (g.segments.length) {
+          const lang = language ?? g.segments[0]?.language ?? "uz";
+          transcript = {
+            language: lang,
+            segments: g.segments.map((s) => ({ start: s.start, end: s.end, text: s.text, lang: language ?? s.language, words: segmentWords(s.text, s.start, s.end) })).filter((s) => s.words.length > 0),
+          };
+          const wall = Math.round(((Date.now() - tg) / 1000) * 100) / 100;
+          transcriber = { engine: "gemini-audio", reason: `preset ${jobMeta?.preset}`, model: g.model, method: "proportional", language: transcript.language, languages: [...new Set(transcript.segments.map((s) => s.lang ?? transcript.language))], speech_chunks: 1, wall_seconds: wall };
+          await addCost(jobId, { step: "understand", provider: "gemini (audio asr)", model: g.model, units: { audio_seconds: media.duration, wall_seconds: wall }, usd: g.usd });
+          doneByGemini = true;
+        }
+      } catch (err) {
+        warnings.push(`gemini-audio transcription failed, falling back to whisper: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      }
+    }
     const asr = await selectAsr(opts.asr, process.env, {}, media.duration);
-    opts.onLog?.(`speech: ${asr.engine} (${asr.reason})`);
-    try {
-      const r =
-        asr.engine === "faster-whisper"
-          ? await transcribeFaster(media.audio_path, media.duration, dir, { threads: opts.threads, language: opts.language, python: asr.python!, onLog: opts.onLog })
-          : await transcribe(media.audio_path, media.duration, dir, { threads: opts.threads, language: opts.language, method: opts.method, prompt: process.env.VEDIT_WHISPER_PROMPT?.trim().toLowerCase() === "on" || process.env.VEDIT_WHISPER_PROMPT?.trim().toLowerCase() === "carry" ? opts.hint : undefined });
-      transcript = r.transcript;
-      transcriber = {
-        engine: asr.engine,
-        reason: asr.reason,
-        model: r.model,
-        method: r.method,
-        language: transcript.language,
-        languages: [...new Set(r.chunks.map((c) => c.language))],
-        speech_chunks: r.chunks.length,
-        wall_seconds: r.wall_seconds,
-      };
-      warnings.push(...r.warnings);
-      await addCost(jobId, {
-        step: "understand",
-        provider: `${asr.engine} (local)`,
-        model: r.model,
-        units: { audio_seconds: media.duration, wall_seconds: r.wall_seconds },
-        usd: 0,
-      });
-    } catch (err) {
-      warnings.push(`transcription failed: ${err instanceof Error ? err.message : String(err)}`);
+    if (!doneByGemini) {
+      opts.onLog?.(`speech: ${asr.engine} (${asr.reason})`);
+      try {
+        const r =
+          asr.engine === "faster-whisper"
+            ? await transcribeFaster(media.audio_path, media.duration, dir, { threads: opts.threads, language, python: asr.python!, onLog: opts.onLog })
+            : await transcribe(media.audio_path, media.duration, dir, { threads: opts.threads, language, method: opts.method, prompt: process.env.VEDIT_WHISPER_PROMPT?.trim().toLowerCase() === "on" || process.env.VEDIT_WHISPER_PROMPT?.trim().toLowerCase() === "carry" ? opts.hint : undefined });
+        transcript = r.transcript;
+        const looksMangledUz =
+          !language &&
+          geminiApiKey() &&
+          media.duration <= 600 &&
+          (["fa", "ar", "ur", "ps", "tr", "az", "tk", "kk", "ky", "ug"].includes(transcript.language) ||
+            transcript.segments.some((s) => /[\u0600-\u06FF]/.test(s.text)));
+        if (looksMangledUz) {
+          const tg = Date.now();
+          opts.onLog?.(`speech: whisper returned ${transcript.language} — re-transcribing with gemini-audio`);
+          try {
+            const g = await transcribeAudio(media.audio_path, { hint: opts.hint, onLog: opts.onLog });
+            if (g.segments.length) {
+              const lang = g.segments[0]?.language ?? "uz";
+              transcript = {
+                language: lang,
+                segments: g.segments.map((s) => ({ start: s.start, end: s.end, text: s.text, lang: s.language || lang, words: segmentWords(s.text, s.start, s.end) })).filter((s) => s.words.length > 0),
+              };
+              const wall = Math.round(((Date.now() - tg) / 1000) * 100) / 100;
+              transcriber = { engine: "gemini-audio", reason: `fallback from ${r.transcript.language}`, model: g.model, method: "proportional", language: transcript.language, languages: [...new Set(transcript.segments.map((s) => s.lang ?? transcript.language))], speech_chunks: 1, wall_seconds: wall };
+              await addCost(jobId, { step: "understand", provider: "gemini (audio asr)", model: g.model, units: { audio_seconds: media.duration, wall_seconds: wall }, usd: g.usd });
+              doneByGemini = true;
+            }
+          } catch (err) {
+            warnings.push(`gemini-audio fallback failed: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+          }
+        }
+        if (!doneByGemini) {
+          transcriber = {
+            engine: asr.engine,
+            reason: asr.reason,
+            model: r.model,
+            method: r.method,
+            language: transcript.language,
+            languages: [...new Set(r.chunks.map((c) => c.language))],
+            speech_chunks: r.chunks.length,
+            wall_seconds: r.wall_seconds,
+          };
+          warnings.push(...r.warnings);
+          await addCost(jobId, {
+            step: "understand",
+            provider: `${asr.engine} (local)`,
+            model: r.model,
+            units: { audio_seconds: media.duration, wall_seconds: r.wall_seconds },
+            usd: 0,
+          });
+        }
+      } catch (err) {
+        warnings.push(`transcription failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
     // who is talking: needs the sidecar; a failure only costs the speaker labels
     const diarize = opts.diarize ?? process.env.VEDIT_DIARIZE?.trim() !== "0";

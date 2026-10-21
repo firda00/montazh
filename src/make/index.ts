@@ -47,6 +47,8 @@ import { languageCode } from "../voice/catalog.ts";
  */
 
 export const MakeReportSchema = z.object({
+  /** stage 31: "reel" (topic → narrated explainer, default) or "promo" (product promo / explainer in the clean UI format) */
+  format: z.enum(["reel", "promo"]).default("reel"),
   topic: z.string(),
   language: z.string(),
   title: z.string(),
@@ -169,6 +171,19 @@ export interface MakeOptions {
   fakeRender?: (projectDir: string, outFile: string) => Promise<void>;
   onEvent?: (line: string) => void;
   signal?: AbortSignal;
+  /**
+   * stage 31: "promo" — a product promo / explainer in the clean Apple-style UI format (kinetic type, UI drawn in code
+   * with a camera and a cursor, a sound per visual event, no narration unless --voice): src/make/promo/.
+   */
+  format?: "reel" | "promo";
+  /** promo: the product's site (real copy + brand colour) */
+  url?: string;
+  /** promo: render workers (default: planned from free memory) */
+  workers?: number;
+  /** promo: skip the writer (the structural template with the product's name) */
+  noLlm?: boolean;
+  /** promo with fromJob: sound only — re-mix the earlier render with the current effects rules (no render) */
+  remix?: boolean;
 }
 
 export type ImagesMode = "photo" | "ai" | "none";
@@ -250,7 +265,7 @@ export async function writeDirectorProject(script: Script, design: Design, image
   return { ...composed, entry, overflow: fit.overflow };
 }
 
-async function lintProject(dir: string): Promise<string[]> {
+export async function lintProject(dir: string): Promise<string[]> {
   const lint = await runCli(HF_BIN, ["lint", "--json"], dir);
   const start = lint.stdout.indexOf("{");
   if (start < 0) throw new Error(`hyperframes lint не вернул JSON (exit ${lint.code}): ${(lint.stderr || lint.stdout).slice(-300)}`);
@@ -274,6 +289,33 @@ export async function muxMusic(video: string, music: string, out: string, durati
 }
 
 export async function make(topic: string, opts: MakeOptions = {}): Promise<MakeResult> {
+  if (opts.format === "promo") {
+    const { makePromo } = await import("./promo/index.ts");
+    const voice = opts.voice?.trim();
+    return makePromo(topic, {
+      language: opts.language,
+      seconds: opts.seconds,
+      aspect: opts.aspect,
+      url: opts.url,
+      music: opts.music,
+      sfx: opts.sfx,
+      // the promo carries itself with on-screen words: no narration unless a voice is named explicitly
+      voice: voice && !/^auto$/i.test(voice) ? voice : undefined,
+      voiceSynth: opts.voiceSynth,
+      quality: opts.quality,
+      workers: opts.workers,
+      model: opts.model,
+      llm: opts.llm,
+      promoFile: opts.scriptFile,
+      fromJob: opts.fromJob,
+      noLlm: opts.noLlm,
+      remix: opts.remix,
+      renderer: opts.renderer,
+      fakeRender: opts.fakeRender,
+      onEvent: opts.onEvent,
+      signal: opts.signal,
+    });
+  }
   const t0 = Date.now();
   const asked = topic.replace(/\s+/g, " ").trim();
   if (!asked) throw new Error("тема пустая");

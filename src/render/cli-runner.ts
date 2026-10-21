@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { withCurrent } from "../lib/abort.ts";
 import { chromeEnv } from "../lib/chrome.ts";
 
@@ -16,12 +16,25 @@ export function describeFinding(f: NonNullable<LintJson["findings"]>[number]) {
 /** Runs the pinned local HyperFrames CLI; resolves with the exit code (never rejects on a non-zero exit). */
 export function runCli(bin: string, args: string[], cwd: string, onLine?: (line: string) => void, signal?: AbortSignal): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
+    const sig = withCurrent(signal);
+    // On Windows an aborted spawn only terminates the node process: the render's Chrome tree lived on, held hundreds of
+    // MB and starved the next render (stage 31). There the whole tree is killed with taskkill /T on abort.
+    const win = process.platform === "win32";
     const child = spawn(process.execPath, [bin, ...args], {
       cwd,
       windowsHide: true,
       env: { ...process.env, ...chromeEnv(), HYPERFRAMES_NO_TELEMETRY: "1", HYPERFRAMES_SKIP_SKILLS: "1", FORCE_COLOR: "0", NO_COLOR: "1" },
-      signal: withCurrent(signal),
+      ...(win ? {} : { signal: sig }),
     });
+    if (win && sig) {
+      const killTree = () => {
+        if (child.pid && child.exitCode === null) spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+        reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError", code: "ABORT_ERR" }));
+      };
+      if (sig.aborted) killTree();
+      else sig.addEventListener("abort", killTree, { once: true });
+      child.on("close", () => sig.removeEventListener("abort", killTree));
+    }
     let stdout = "";
     let stderr = "";
     let buf = "";

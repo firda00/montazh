@@ -1,5 +1,6 @@
 import type { DesignJob } from "../export.ts";
 import { buildSplitLayer } from "./split.ts";
+import { ctaLayer, hookPlateLayer, hookPlateLines, upperUz } from "../abror.ts";
 
 /** "фото: Gage Skidmore · CC BY-SA… · wikimedia" — the on-frame credit line of a panel photo */
 export function shortPhotoCredit(c: { creator: string; license: string; license_version: string; source: string }): string {
@@ -23,6 +24,8 @@ export interface ComposeAssets {
   serifNumFamily?: string;
   /** stage 27: the B-roll insert track (src/design/inserts-layer.ts) */
   inserts?: { css: string; sections: string[]; tweens: string[] };
+  /** stage 33: insert-pane files of the split panels (absolute → project-relative) */
+  paneRel?: Record<string, string>;
 }
 
 export const COMPOSE_VERSION = "hf-compose/1";
@@ -144,6 +147,7 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
   });
 
   const ttlHtml: string[] = [];
+  const ttlPlate: string[] = [];
   // the cutout files are cut to their boxes at 1080 px wide: scale them to this frame
   const cutoutBox =
     D.layout === "split" && job.cutout && assets.cutoutRel
@@ -152,11 +156,22 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
   // split layout: the hook title replaces the EDL titles (they would collide with the top panels)
   const split =
     D.layout === "split" && job.panels
-      ? buildSplitLayer({ W, H, duration: DUR, design: D, panels: job.panels, images: assets.panelRel ?? {}, credits: Object.fromEntries((job.panel_credits ?? []).map((c) => [c.beat, shortPhotoCredit(c)])), faceY: job.face_y, serifFamily: `'VPlayfairItalic', serif`, monoFamily: `'VMono', monospace`, displayFamily: `'${layout.font.family.replace(/['"<>]/g, "")}', sans-serif`, cutout: cutoutBox })
+      ? buildSplitLayer({ W, H, duration: DUR, design: D, panels: job.panels, images: assets.panelRel ?? {}, credits: Object.fromEntries((job.panel_credits ?? []).map((c) => [c.beat, shortPhotoCredit(c)])), faceY: job.face_y, serifFamily: `'VPlayfairItalic', serif`, monoFamily: `'VMono', monospace`, displayFamily: `'${layout.font.family.replace(/['"<>]/g, "")}', sans-serif`, cutout: cutoutBox, ...(job.sections?.length ? { sections: job.sections } : {}), ...(assets.paneRel ? { paneRel: assets.paneRel } : {}) })
       : null;
   if (split) tw.push(...split.tweens);
   if (assets.inserts) tw.push(...assets.inserts.tweens);
+  // stage 33: in a full-frame layout the hook title (the first one, at the start) is drawn as the blue plate
+  const fontStack = `'${layout.font.family.replace(/['"<>]/g, "")}', sans-serif`;
+  const plateTitle = !split && D.hook_plate.enabled ? layout.titlesOut.find((t) => t.at < 0.5 && t.style !== "lower" && t.style !== "callout") : undefined;
+  let plateCss = "";
+  if (plateTitle) {
+    const plate = hookPlateLayer({ W, H, spec: D.hook_plate, lines: hookPlateLines(plateTitle.lines.join(" / "), D.hook_plate.max_words), anchorY: D.hook_plate.anchor_y_full, start: plateTitle.at, duration: DUR, font: fontStack, id: "hook-plate", trackIndex: 2 });
+    ttlPlate.push(plate.html);
+    tw.push(...plate.tweens);
+    plateCss = plate.css;
+  }
   if (!split) layout.titlesOut.forEach((t) => {
+    if (t === plateTitle) return;
     const id = `ttl-${t.index}`;
     if (t.style === "lower") {
       // a line under a people moment (what is said / happens) where the speech itself cannot be captioned
@@ -202,7 +217,18 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
   // outro: a CTA card over the last seconds — the cut and its audio are untouched
   const outroHtml: string[] = [];
   const O = D.outro;
-  if (O.enabled && DUR > O.duration + 1) {
+  let ctaCss = "";
+  if (O.enabled && O.kind !== "card" && DUR > O.duration + 1) {
+    // stage 33: the comment-word card («"MAN"» + «… soʻzini yozib qoldiring») or the Telegram / phone card
+    const value = O.kind === "keyword" ? O.keyword : O.phone;
+    if (value.trim()) {
+      const label = O.label_by_lang[lang] ?? O.label;
+      const cta = ctaLayer({ W, H, kind: O.kind, value, label: O.kind === "keyword" ? upperUz(label) : label, start: r3(DUR - O.duration), end: DUR, anchorY: O.anchor_y, font: fontStack, id: "cta", trackIndex: 3 });
+      outroHtml.push(cta.html);
+      tw.push(...cta.tweens);
+      ctaCss = cta.css;
+    }
+  } else if (O.enabled && DUR > O.duration + 1) {
     // balanced lines at a conservative size (0.62 em per character), shared with the layout's placement
     const ot = outroText(D, lang, W, H);
     if (ot) {
@@ -304,7 +330,13 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       .outro-text { position: relative; display: block; text-align: center; font-weight: ${layout.font.weight}; line-height: 1.1; letter-spacing: -0.01em; color: ${C.title}; -webkit-text-stroke: ${r3(strokeVisible * 2)}px ${C.stroke}; paint-order: stroke fill; text-shadow: 0 ${r3(3 * scale)}px ${r3(14 * scale)}px rgba(0, 0, 0, 0.55); }
       .outro-line { display: block; white-space: nowrap; }
       .progress { position: absolute; left: 0; top: 0; width: 100%; height: ${r3(Math.max(6, 10 * scale))}px; display: block; pointer-events: none; background: rgba(255,255,255,0.18); }
-      .progress-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; display: block; background: ${C.highlight}; }${assets.inserts?.css ?? ""}
+      .progress-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; display: block; background: ${C.highlight}; }${assets.inserts?.css ?? ""}${plateCss}${ctaCss}${
+        D.captions.backing.enabled && D.captions.backing.full_width
+          ? `
+      .cap { padding-left: 0 !important; padding-right: 0 !important; }
+      .cap-line { display: block; width: 100%; border-radius: 0; margin: 0; }`
+          : ""
+      }
     </style>
   </head>
   <body>
@@ -317,9 +349,13 @@ export function composeHyperframes(job: DesignJob, layout: Layout, assets: Compo
       data-duration="${DUR}"
       data-fps="${FPS}"
     >
-      <video id="a-roll" src="${cutoutBox ? assets.cutoutRel!.plate : assets.videoRel}" data-start="0" data-duration="${DUR}" data-track-index="0" muted playsinline></video>${cutoutBox?.popHeight ? `\n      <video id="a-pop" src="${assets.cutoutRel!.pop}" data-start="0" data-duration="${DUR}" data-track-index="8" muted playsinline></video>` : ""}
+      ${
+        split?.videos
+          ? split.videos.map((v) => `<video id="${v.id}" src="${assets.videoRel}" data-start="${fmt(v.start)}" data-duration="${fmt(Math.min(DUR, v.end) - v.start)}"${v.start > 0 ? ` data-media-start="${fmt(v.start)}"` : ""} data-track-index="0" muted playsinline></video>`).join("\n      ")
+          : `<video id="a-roll" src="${cutoutBox ? assets.cutoutRel!.plate : assets.videoRel}" data-start="0" data-duration="${DUR}" data-track-index="0" muted playsinline></video>`
+      }${cutoutBox?.popHeight ? `\n      <video id="a-pop" src="${assets.cutoutRel!.pop}" data-start="0" data-duration="${DUR}" data-track-index="8" muted playsinline></video>` : ""}
 ${assets.inserts?.sections.length ? `${assets.inserts.sections.join("\n")}\n` : ""}${D.captions.shade.enabled && layout.pages.length ? `      <section id="shade" class="clip shade" data-start="0" data-duration="${DUR}" data-track-index="1"></section>\n` : ""}${capHtml.join("\n")}
-${ttlHtml.join("\n")}${split ? `\n${split.sections.join("\n")}` : ""}
+${[...ttlHtml, ...ttlPlate].join("\n")}${split ? `\n${split.sections.join("\n")}` : ""}
 ${outroHtml.join("\n")}${progressHtml.length ? `\n${progressHtml.join("\n")}` : ""}
     </div>
     <script>

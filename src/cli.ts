@@ -725,7 +725,12 @@ program
   .description("ролик по теме из ничего: тренды (Antigravity) → сценарий (Claude) → иконки и моушн-графика (HyperFrames) → MP4")
   .argument("<topic>", "тема ролика")
   .option("--lang <code>", "язык: ru | uz | en", "ru")
-  .option("--seconds <n>", "целевая длина, с (по умолчанию 40: рилс 35–45 с)", (v) => Number(v), 40)
+  .option("--seconds <n>", "целевая длина, с (по умолчанию 40: рилс 35–45 с; промо — 60)", (v) => Number(v))
+  .option("--format <f>", "reel (рилс-объяснялка с голосом, по умолчанию) | promo (промо продукта / объяснялка в чистом UI-стиле: кинетический текст, интерфейс кодом, курсор, камера; 16:9 по умолчанию)", "reel")
+  .option("--url <url>", "promo: сайт продукта — настоящие тексты и фирменный цвет")
+  .option("--workers <n>", "воркеров рендера (по умолчанию — по свободной памяти)", (v) => Number(v))
+  .option("--no-llm", "promo: без сценариста — шаблон структуры с названием продукта")
+  .option("--remix", "promo с --from: только звук — тот же рендер, эффекты и музыка сводятся заново")
   .option("--audience <text>", "для кого ролик")
   .option("--no-trends", "без исследования трендов")
   .option("--music <m>", "музыка: auto (по настроению от арт-директора) | upbeat|chill|dramatic|inspiring|tech|funky|emotional | файл | none", "auto")
@@ -745,10 +750,29 @@ program
   .option("--presenter-video <file>", "готовый ведущий из Colab (avatar_result.zip или avatar.mp4) в нижнем углу; вместе с --from")
   .option("--no-visuals", "без картинок по смыслу (этап 26: фото названных компаний/мест/людей из Commons, знаки, UI, смена кадра на каждом названии)")
   .option("--keep-design", "с --from: оставить сохранённый дизайн, даже если он сделан без вариантов картинок")
-  .action(async (topic: string, opts: { visuals: boolean; keepDesign?: boolean; lang: string; seconds: number; audience?: string; trends: boolean; music?: string; sfx: boolean; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: string | boolean; aspect: string; voice: string; voiceCaptions?: boolean; voiceSpeed?: number; presenter?: boolean | string; presenterVideo?: string }) => {
+  .option("--preset <name>", "пресет: abror_split | abror_full — сценарий в формате Аброра (телесуфлёр + раскадровка или --faceless демо)")
+  .option("--teleprompter", "abror: только сценарий, телесуфлёр и список кадров (без рендера)")
+  .option("--faceless", "abror: срендерить фейслесс-демо без говорящей головы")
+  .option("--keyword <word>", "abror: кодовое слово CTA в комментариях (по умолчанию MAN)")
+  .option("--promise <text>", "abror: что получит зритель за комментарий")
+  .option("--out-name <name>", "abror: скопировать результат в workspace/<name>.mp4 / _script.txt / _description.txt")
+  .action(async (topic: string, opts: { format: string; url?: string; workers?: number; llm: boolean; remix?: boolean; visuals: boolean; keepDesign?: boolean; lang: string; seconds?: number; audience?: string; trends: boolean; music?: string; sfx: boolean; quality: "draft" | "looks" | "delivery"; model?: string; script?: string; from?: string; director: boolean; images: string | boolean; aspect: string; voice: string; voiceCaptions?: boolean; voiceSpeed?: number; presenter?: boolean | string; presenterVideo?: string; preset?: string; teleprompter?: boolean; faceless?: boolean; keyword?: string; promise?: string; outName?: string }) => {
     try {
+      if ((opts.preset && /^abror_(split|full)$/i.test(opts.preset)) || opts.teleprompter || opts.faceless) {
+        const { makeAbror } = await import("./make/abror/index.ts");
+        const r = await makeAbror(topic, { preset: opts.preset, teleprompter: opts.teleprompter, faceless: opts.faceless, seconds: opts.seconds ?? 60, keyword: opts.keyword, promise: opts.promise, voice: opts.voice === "auto" ? undefined : opts.voice, music: opts.music === "auto" ? undefined : opts.music, research: opts.trends, fromJob: opts.from, outName: opts.outName, model: opts.model, workers: opts.workers, onEvent: (l) => console.log(l) });
+        console.log(`\n✔ job ${r.jobId} · «${r.script.title}» (${r.script.lines.length} строк, ${r.duration.toFixed(1)} с${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""})`);
+        for (const [k, f] of Object.entries(r.files)) console.log(`  ${k}: ${f}`);
+        for (const w of r.warnings) console.log(`  ⚠ ${w}`);
+        return;
+      }
       if (!["draft", "looks", "delivery"].includes(opts.quality)) throw new Error("--quality: ожидается draft | looks | delivery");
+      if (opts.format !== "reel" && opts.format !== "promo") throw new Error("--format: ожидается reel | promo");
+      const promo = opts.format === "promo";
+      opts.seconds ??= promo ? 60 : 40;
       if (!Number.isFinite(opts.seconds) || opts.seconds < 15 || opts.seconds > 90) throw new Error("--seconds: ожидается 15–90");
+      if (opts.workers !== undefined && !(Number.isInteger(opts.workers) && opts.workers >= 1 && opts.workers <= 16)) throw new Error("--workers: ожидается 1–16");
+      if (opts.url && !promo) throw new Error("--url работает с --format promo");
       if (opts.voiceSpeed !== undefined && !(opts.voiceSpeed >= 0.5 && opts.voiceSpeed <= 2)) throw new Error("--voice-speed: ожидается 0.5–2");
       if (typeof opts.images === "string" && !["photo", "ai", "none"].includes(opts.images)) throw new Error("--images: ожидается photo | ai | none");
       const { isAspect } = await import("./lib/aspect.ts");
@@ -756,8 +780,10 @@ program
       const { requireVoice, NO_VOICE, AUTO_VOICE } = await import("./voice/catalog.ts");
       if (!NO_VOICE.test(opts.voice) && !AUTO_VOICE.test(opts.voice)) requireVoice(opts.voice);
       const { make, creditsText } = await import("./make/index.ts");
-      const r = await make(topic, { language: opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, sfx: opts.sfx, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images as boolean | "photo" | "ai" | "none", aspect: isAspect(opts.aspect) ? opts.aspect : undefined, voice: opts.voice, voiceCaptions: opts.voiceCaptions, voiceLengthScale: opts.voiceSpeed, presenter: opts.presenter, presenterVideo: opts.presenterVideo, visuals: opts.visuals === false ? false : undefined, keepDesign: opts.keepDesign, onEvent: (l) => console.log(l) });
-      console.log(`\n✔ ${r.output} (${r.aspect} ${r.width}×${r.height}, ${r.duration.toFixed(1)} с, ${r.beats} битов${r.voice ? `, голос ${r.voice}` : ""}, рендер ${r.render_seconds.toFixed(0)} с${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""})`);
+      // promo: the language follows the words of the input unless --lang is given explicitly
+      const langGiven = process.argv.some((x) => x === "--lang" || x.startsWith("--lang="));
+      const r = await make(topic, { format: promo ? "promo" : "reel", url: opts.url, workers: opts.workers, noLlm: promo && opts.llm === false, remix: promo && !!opts.remix, language: promo && !langGiven ? undefined : opts.lang, seconds: opts.seconds, audience: opts.audience, trends: opts.trends, music: opts.music, sfx: opts.sfx, quality: opts.quality, model: opts.model, scriptFile: opts.script, fromJob: opts.from, director: opts.director, images: opts.images as boolean | "photo" | "ai" | "none", aspect: isAspect(opts.aspect) ? opts.aspect : undefined, voice: opts.voice, voiceCaptions: opts.voiceCaptions, voiceLengthScale: opts.voiceSpeed, presenter: opts.presenter, presenterVideo: opts.presenterVideo, visuals: opts.visuals === false ? false : undefined, keepDesign: opts.keepDesign, onEvent: (l) => console.log(l) });
+      console.log(`\n✔ ${r.output} (${r.format === "promo" ? "промо, " : ""}${r.aspect} ${r.width}×${r.height}, ${r.duration.toFixed(1)} с, ${r.beats} ${r.format === "promo" ? "сцен" : "битов"}${r.voice ? `, голос ${r.voice}` : ""}, рендер ${r.render_seconds.toFixed(0)} с${r.usd ? `, ≈$${r.usd.toFixed(3)}` : ""})`);
       if (r.script.hashtags.length) console.log(`  #${r.script.hashtags.join(" #")}`);
       const credits = creditsText(r);
       if (credits) console.log(`  ${credits.split("\n").join("\n  ")}`);

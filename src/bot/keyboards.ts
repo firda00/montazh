@@ -38,6 +38,8 @@ export interface MakeDraft {
   aspect: string;
   /** a catalogue id, "auto" or "off" */
   voice: string;
+  /** stage 31: "promo" — the clean-UI promo / explainer (no voice by default) */
+  format?: "reel" | "promo";
 }
 
 export const COUNTS = [1, 3, 5];
@@ -58,6 +60,8 @@ export function mainMenu(L: Strings): InlineKeyboard {
       [btn(m.montage, "H:montage")],
       [btn(m.ref, "H:ref")],
       [btn(m.make, "H:make"), btn(m.highlights, "H:highlights")],
+      // stage 32: ideas on a schedule → video → publish
+      [btn(m.plan, "H:plan")],
       [btn(m.avatar, "H:avatar"), btn(m.settings, "H:settings")],
       [btn(m.balance, "H:balance"), btn(m.help, "H:help")],
       [btn(m.guide, "H:guide")],
@@ -125,6 +129,8 @@ export function makeKb(L: Strings, lang: Lang, d: MakeDraft): InlineKeyboard {
     if (!v) continue;
     rows.push([btn(mark(d.voice === id, voiceLabel(v, lang)), `K:v:${id}`), btn("▶️", `K:p:${id}`)]);
   }
+  // stage 31: the promo / explainer format (clean UI, no voice by default)
+  rows.push([btn(mark(d.format === "promo", L.s31.promo), "K:f:promo")]);
   rows.push([btn(L.btnStart, "K:go")]);
   return { inline_keyboard: rows };
 }

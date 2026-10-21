@@ -32,6 +32,16 @@ export interface TgUser {
 export interface TgChat {
   id: number;
   type: string;
+  /** stage 32: channels and groups (getChat) */
+  title?: string;
+  username?: string;
+}
+/** stage 32: getChatMember — who someone is in a chat (the bot in the user's channel, the user himself) */
+export interface TgChatMember {
+  status: "creator" | "administrator" | "member" | "restricted" | "left" | "kicked";
+  user?: TgUser;
+  /** administrators of a channel: may post (creators always may) */
+  can_post_messages?: boolean;
 }
 export interface TgVideo {
   file_id: string;
@@ -291,6 +301,11 @@ export interface BotApi {
   /** a picture (PNG / JPEG ≤ 10 MB) */
   sendPhoto(chatId: number, filePath: string, caption?: string): Promise<TgMessage>;
   sendChatAction(chatId: number, action: ChatAction): Promise<void>;
+  /** stage 32: the bot itself (its id for getChatMember) — optional so hand-made test doubles stay valid */
+  getMe?(): Promise<TgUser>;
+  /** stage 32: a chat by id or "@username" (connecting the user's channel) */
+  getChat?(chatId: number | string): Promise<TgChat>;
+  getChatMember?(chatId: number | string, userId: number): Promise<TgChatMember>;
 }
 
 export interface DocumentOptions {
@@ -387,5 +402,8 @@ export function makeBotApi(token: string, o: BotApiOptions = {}): BotApi {
     sendChatAction: async (chatId, action) => {
       await call<boolean>(token, "sendChatAction", { chat_id: chatId, action }, base);
     },
+    getMe: () => call<TgUser>(token, "getMe", {}, base),
+    getChat: (chatId) => call<TgChat>(token, "getChat", { chat_id: chatId }, base),
+    getChatMember: (chatId, userId) => call<TgChatMember>(token, "getChatMember", { chat_id: chatId, user_id: userId }, base),
   };
 }

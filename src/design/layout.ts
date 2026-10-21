@@ -55,6 +55,7 @@ import type { DesignJob } from "./export.ts";
 import type { OutPhrase, OutWord } from "./timeline.ts";
 import type { FontMetrics, Layout, LayoutLine, LayoutOptions, LayoutPage, LayoutTitle, LayoutWord } from "./layout-types.ts";
 import { hookExtent } from "./hyperframes/split.ts";
+import { hookPlateTiming, sectionAt } from "./abror.ts";
 import type { FaceTrack } from "./faces.ts";
 import { placeBlock, placeSequence, safeAreaFor, type BlockRequest, type Obstacle, type PlaceOptions } from "./placement.ts";
 
@@ -777,7 +778,7 @@ export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOp
   const capBlock = (p: Pick<LayoutPage, "lines" | "fontSize" | "width">) => captionBlock(D, p, W, H);
   const extra: Obstacle[] = [];
   if (D.layout === "split" && job.panels) {
-    const hk = hookExtent(W, H, D, job.panels, duration);
+    const hk = hookExtent(W, H, D, job.panels, duration, job.sections);
     if (hk) extra.push({ ...hk, lo: hk.lo - 0.01, hi: hk.hi + 0.01 });
   }
   // a split speaker's face fills the bottom box: the hair above the face box sits higher than in a full frame
@@ -864,15 +865,44 @@ export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOp
     }
   }
 
+  // stage 33 (format A): over the full-frame parts the captions move from the seam to the chest
+  if (job.sections?.length && D.captions.anchor_y_full !== undefined) {
+    for (const p of pages) if (sectionAt(job.sections, p.dispStart + 0.01) !== "split") p.anchorY = D.captions.anchor_y_full;
+  }
+  // stage 33: the hook plate carries the hook's words — captions start when it leaves (his editors: plate, then captions)
+  const plate = hookPlateWindow(D, job, duration);
+  let shown = pages;
+  if (plate) {
+    shown = pages.filter((p) => p.dispEnd > plate.end + 0.05);
+    for (const p of shown) if (p.dispStart < plate.end) p.dispStart = r6(plate.end);
+  }
+
   return {
     frame: { width: W, height: H, fps, duration },
     captions: { anchorY: D.captions.anchor_y, maxWidth: r2(capMax), baseFontSize: r2(capBase), strokeWidth: r2(D.captions.stroke_width * scale), uppercase: D.captions.uppercase, language },
     titles: { anchorY: titleAnchor(D, job.face_y), maxWidth: r2(ttlMax), baseFontSize: r2(ttlBase) },
     ...(avoid ? { faces: { source: faces?.source ?? "none", avoid, moved, compact, least_overlap: leastOverlap, safe: { top: r2(safe.top), bottom: r2(safe.bottom) } } } : {}),
-    pages,
+    pages: shown,
     titlesOut,
     ...(outroAnchorY !== undefined ? { outroAnchorY } : {}),
     font: { family: metrics.family, file: metrics.file, weight: D.font.weight, source: metrics.source },
     version: LAYOUT_VERSION,
   };
+}
+
+/**
+ * stage 33: when the blue hook plate is on screen (start → end of its exit), or null: a split reel with
+ * design.split.hook "plate" and a hook title, or a full-frame reel whose first title (at the start) becomes the plate.
+ */
+export function hookPlateWindow(D: DesignSpec, job: Pick<DesignJob, "panels" | "timeline">, duration: number): { start: number; end: number } | null {
+  if (!D.hook_plate.enabled) return null;
+  if (D.layout === "split") {
+    if (D.split.hook !== "plate" || !job.panels?.hook_title.length) return null;
+    const t = hookPlateTiming(D.hook_plate.hold, duration, 0);
+    return { start: t.start, end: t.end };
+  }
+  const first = job.timeline.titles.find((t) => t.at < 0.5 && t.style !== "lower" && t.style !== "callout");
+  if (!first) return null;
+  const t = hookPlateTiming(D.hook_plate.hold, duration, first.at);
+  return { start: t.start, end: t.end };
 }

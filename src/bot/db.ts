@@ -294,7 +294,154 @@ const MIGRATIONS: string[] = [
     created_at TEXT NOT NULL
   );
   `,
+  // 6: stage 32 — «🗓 Контент-план»: the user's plan (niche, frequency, brand profile), idea → video → publish items,
+  // connected accounts (tokens sealed with VEDIT_TOKEN_KEY, see src/bot/secrets.ts) and the log of every publish attempt
+  `
+  CREATE TABLE content_plans (
+    user INTEGER PRIMARY KEY,
+    niche TEXT NOT NULL,
+    topics TEXT NOT NULL DEFAULT '[]',
+    per_week INTEGER NOT NULL DEFAULT 3 CHECK (per_week BETWEEN 1 AND 14),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    profile TEXT NOT NULL DEFAULT '{}',
+    next_ideas_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE content_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user INTEGER NOT NULL,
+    idea TEXT NOT NULL,
+    angle TEXT,
+    hook TEXT,
+    source TEXT,
+    status TEXT NOT NULL CHECK (status IN ('pending','proposed','accepted','ready','scheduled','publishing','published','skipped','failed')),
+    propose_at TEXT,
+    card_msg_id INTEGER,
+    job TEXT,
+    title TEXT,
+    output_file TEXT,
+    caption TEXT,
+    scheduled_at TEXT,
+    targets TEXT NOT NULL DEFAULT '[]',
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX content_items_user ON content_items (user, status);
+  CREATE INDEX content_items_due ON content_items (status, scheduled_at);
+  CREATE INDEX content_items_job ON content_items (job);
+  CREATE TABLE connected_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user INTEGER NOT NULL,
+    platform TEXT NOT NULL CHECK (platform IN ('telegram','instagram','youtube','tiktok','vk')),
+    label TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active','pending','revoked','error')),
+    token_enc TEXT,
+    refresh_enc TEXT,
+    token_expires_at TEXT,
+    scopes TEXT,
+    auto_publish INTEGER NOT NULL DEFAULT 0,
+    profile TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (user, platform, external_id)
+  );
+  CREATE TABLE publish_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item INTEGER,
+    account INTEGER,
+    user INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    trigger TEXT NOT NULL CHECK (trigger IN ('now','schedule','manual')),
+    status TEXT NOT NULL CHECK (status IN ('ok','failed','skipped')),
+    external_id TEXT,
+    url TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX publish_log_account ON publish_log (account, created_at);
+  `,
 ];
+
+export type ContentStatus = "pending" | "proposed" | "accepted" | "ready" | "scheduled" | "publishing" | "published" | "skipped" | "failed";
+export type Platform = "telegram" | "instagram" | "youtube" | "tiktok" | "vk";
+
+export interface ContentPlanRow {
+  user: number;
+  niche: string;
+  /** JSON array of strings */
+  topics: string;
+  per_week: number;
+  enabled: number;
+  /** JSON: the brand profile (src/bot/contentplan.ts BrandProfile) */
+  profile: string;
+  next_ideas_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContentItemRow {
+  id: number;
+  user: number;
+  idea: string;
+  angle: string | null;
+  hook: string | null;
+  source: string | null;
+  status: ContentStatus;
+  /** when the idea card is shown (pending → proposed) */
+  propose_at: string | null;
+  card_msg_id: number | null;
+  /** the bot job (jobs.id) making the video */
+  job: string | null;
+  title: string | null;
+  output_file: string | null;
+  caption: string | null;
+  scheduled_at: string | null;
+  /** JSON array of connected_accounts ids */
+  targets: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AccountRow {
+  id: number;
+  user: number;
+  platform: Platform;
+  /** "@channel", "Channel title", "youtube: My channel" */
+  label: string;
+  /** the platform's id (Telegram chat id, IG user id, YouTube channel id…) */
+  external_id: string;
+  status: "active" | "pending" | "revoked" | "error";
+  /** sealed with VEDIT_TOKEN_KEY (never plaintext) */
+  token_enc: string | null;
+  refresh_enc: string | null;
+  token_expires_at: string | null;
+  scopes: string | null;
+  /** 1 = posts scheduled items without asking again; off by default, never set by the bot itself */
+  auto_publish: number;
+  profile: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PublishLogRow {
+  id: number;
+  item: number | null;
+  account: number | null;
+  user: number;
+  platform: string;
+  trigger: "now" | "schedule" | "manual";
+  status: "ok" | "failed" | "skipped";
+  external_id: string | null;
+  url: string | null;
+  error: string | null;
+  created_at: string;
+}
 
 export interface TesterRow {
   tg_id: number;
@@ -321,6 +468,33 @@ export interface BlockedRow {
   job: string | null;
   reason: string | null;
   by: number | null;
+  created_at: string;
+}
+
+export type PaymentStatus = "pending" | "paid" | "rejected";
+
+export interface PaymentRow {
+  id: number;
+  user: number;
+  pkg: string;
+  credits: number;
+  vip_days: number;
+  price_uzs: number;
+  status: PaymentStatus;
+  receipt_file_id: string | null;
+  receipt_kind: string | null;
+  reviewed_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PromoRow {
+  code: string;
+  credits: number;
+  vip_days: number;
+  max_uses: number;
+  used_count: number;
+  created_by: number | null;
   created_at: string;
 }
 
@@ -361,6 +535,39 @@ export class BotDb {
         throw err;
       }
     });
+    // stage 34: monetization tables (payments, promocodes, promo_uses)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user INTEGER NOT NULL,
+        pkg TEXT NOT NULL,
+        credits INTEGER NOT NULL DEFAULT 0,
+        vip_days INTEGER NOT NULL DEFAULT 0,
+        price_uzs INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','paid','rejected')),
+        receipt_file_id TEXT,
+        receipt_kind TEXT,
+        reviewed_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS payments_user ON payments (user, status);
+      CREATE TABLE IF NOT EXISTS promocodes (
+        code TEXT PRIMARY KEY,
+        credits INTEGER NOT NULL DEFAULT 0,
+        vip_days INTEGER NOT NULL DEFAULT 0,
+        max_uses INTEGER NOT NULL DEFAULT 1,
+        used_count INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS promo_uses (
+        code TEXT NOT NULL,
+        user INTEGER NOT NULL,
+        used_at TEXT NOT NULL,
+        PRIMARY KEY (code, user)
+      );
+    `);
   }
 
   close() {
@@ -736,5 +943,239 @@ export class BotDb {
 
   selfReviewsSince(sinceIso?: string): SelfReviewRow[] {
     return sinceIso ? this.all<SelfReviewRow>("SELECT * FROM self_review WHERE created_at >= ? ORDER BY created_at DESC", sinceIso) : this.all<SelfReviewRow>("SELECT * FROM self_review ORDER BY created_at DESC");
+  }
+
+  // ── stage 32: content plan, connected accounts, publish log ─────────────────
+
+  getPlan(user: number): ContentPlanRow | undefined {
+    return this.get<ContentPlanRow>("SELECT * FROM content_plans WHERE user = ?", user);
+  }
+
+  /** creates the plan (niche required) or patches it */
+  upsertPlan(user: number, patch: Partial<Omit<ContentPlanRow, "user" | "created_at" | "updated_at">>): ContentPlanRow {
+    const now = nowIso();
+    const old = this.getPlan(user);
+    if (!old) {
+      const row: ContentPlanRow = { user, niche: "", topics: "[]", per_week: 3, enabled: 1, profile: "{}", next_ideas_at: null, created_at: now, updated_at: now, ...patch };
+      const keys = Object.keys(row) as (keyof ContentPlanRow)[];
+      this.run(`INSERT INTO content_plans (${keys.join(", ")}) VALUES (${keys.map(() => "?").join(", ")})`, ...keys.map((k) => clean(row[k])));
+      return row;
+    }
+    const keys = Object.keys(patch) as (keyof typeof patch)[];
+    if (keys.length) this.run(`UPDATE content_plans SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated_at = ? WHERE user = ?`, ...keys.map((k) => clean(patch[k])), now, user);
+    return { ...old, ...patch, updated_at: now };
+  }
+
+  /** enabled plans whose next idea batch is due */
+  plansDue(nowIsoStr: string): ContentPlanRow[] {
+    return this.all<ContentPlanRow>("SELECT * FROM content_plans WHERE enabled = 1 AND next_ideas_at IS NOT NULL AND next_ideas_at <= ? ORDER BY next_ideas_at", nowIsoStr);
+  }
+
+  insertItem(row: Pick<ContentItemRow, "user" | "idea"> & Partial<Omit<ContentItemRow, "id" | "created_at" | "updated_at">>): ContentItemRow {
+    const now = nowIso();
+    const full = { angle: null, hook: null, source: null, status: "pending" as ContentStatus, propose_at: null, card_msg_id: null, job: null, title: null, output_file: null, caption: null, scheduled_at: null, targets: "[]", error: null, created_at: now, updated_at: now, ...row };
+    const keys = Object.keys(full) as (keyof typeof full)[];
+    const id = Number(this.run(`INSERT INTO content_items (${keys.join(", ")}) VALUES (${keys.map(() => "?").join(", ")})`, ...keys.map((k) => clean(full[k]))).lastInsertRowid);
+    return { id, ...full };
+  }
+
+  getItem(id: number): ContentItemRow | undefined {
+    return this.get<ContentItemRow>("SELECT * FROM content_items WHERE id = ?", id);
+  }
+
+  updateItem(id: number, patch: Partial<Omit<ContentItemRow, "id" | "user" | "created_at" | "updated_at">>) {
+    const keys = Object.keys(patch) as (keyof typeof patch)[];
+    if (!keys.length) return;
+    this.run(`UPDATE content_items SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated_at = ? WHERE id = ?`, ...keys.map((k) => clean(patch[k])), nowIso(), id);
+  }
+
+  /** moves an item from one of `from` to `to` atomically; false when it was not in one of those states (a double tap) */
+  claimItem(id: number, from: ContentStatus[], to: ContentStatus, patch: Partial<Omit<ContentItemRow, "id" | "user" | "status" | "created_at" | "updated_at">> = {}): boolean {
+    const keys = Object.keys(patch) as (keyof typeof patch)[];
+    const set = [`status = ?`, ...keys.map((k) => `${k} = ?`), "updated_at = ?"].join(", ");
+    const r = this.run(`UPDATE content_items SET ${set} WHERE id = ? AND status IN (${from.map(() => "?").join(", ")})`, to, ...keys.map((k) => clean(patch[k])), nowIso(), id, ...from);
+    return Number(r.changes) > 0;
+  }
+
+  itemByJob(job: string): ContentItemRow | undefined {
+    return this.get<ContentItemRow>("SELECT * FROM content_items WHERE job = ? ORDER BY id DESC LIMIT 1", job);
+  }
+
+  itemsOf(user: number, ...statuses: ContentStatus[]): ContentItemRow[] {
+    return statuses.length
+      ? this.all<ContentItemRow>(`SELECT * FROM content_items WHERE user = ? AND status IN (${statuses.map(() => "?").join(", ")}) ORDER BY id`, user, ...statuses)
+      : this.all<ContentItemRow>("SELECT * FROM content_items WHERE user = ? ORDER BY id", user);
+  }
+
+  /** pending ideas whose card is due */
+  itemsToPropose(nowIsoStr: string): ContentItemRow[] {
+    return this.all<ContentItemRow>("SELECT * FROM content_items WHERE status = 'pending' AND (propose_at IS NULL OR propose_at <= ?) ORDER BY propose_at, id", nowIsoStr);
+  }
+
+  /** scheduled items whose time has come */
+  itemsToPublish(nowIsoStr: string): ContentItemRow[] {
+    return this.all<ContentItemRow>("SELECT * FROM content_items WHERE status = 'scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= ? ORDER BY scheduled_at, id", nowIsoStr);
+  }
+
+  itemsByStatus(...statuses: ContentStatus[]): ContentItemRow[] {
+    return this.all<ContentItemRow>(`SELECT * FROM content_items WHERE status IN (${statuses.map(() => "?").join(", ")}) ORDER BY id`, ...statuses);
+  }
+
+  /** adds the account or refreshes an existing one (same user, platform, external id) */
+  upsertAccount(row: Pick<AccountRow, "user" | "platform" | "label" | "external_id"> & Partial<Omit<AccountRow, "id" | "created_at" | "updated_at">>): AccountRow {
+    const now = nowIso();
+    const full = { status: "active" as AccountRow["status"], token_enc: null, refresh_enc: null, token_expires_at: null, scopes: null, auto_publish: 0, profile: "{}", error: null, ...row };
+    const keys = Object.keys(full) as (keyof typeof full)[];
+    // a re-connect refreshes label, status and the tokens it brings (absent ones are kept); auto_publish stays what the user chose
+    const keep = ["token_enc", "refresh_enc", "token_expires_at", "scopes"];
+    const update = keys.filter((k) => !["user", "platform", "external_id", "auto_publish"].includes(k)).map((k) => (keep.includes(k) ? `${k} = COALESCE(excluded.${k}, ${k})` : `${k} = excluded.${k}`));
+    this.run(
+      `INSERT INTO connected_accounts (${keys.join(", ")}, created_at, updated_at) VALUES (${keys.map(() => "?").join(", ")}, ?, ?) ON CONFLICT(user, platform, external_id) DO UPDATE SET ${update.join(", ")}, updated_at = excluded.updated_at`,
+      ...keys.map((k) => clean(full[k])),
+      now,
+      now,
+    );
+    return this.get<AccountRow>("SELECT * FROM connected_accounts WHERE user = ? AND platform = ? AND external_id = ?", row.user, row.platform, row.external_id)!;
+  }
+
+  getAccount(id: number): AccountRow | undefined {
+    return this.get<AccountRow>("SELECT * FROM connected_accounts WHERE id = ?", id);
+  }
+
+  accountsOf(user: number, platform?: Platform, status: AccountRow["status"] = "active"): AccountRow[] {
+    return platform
+      ? this.all<AccountRow>("SELECT * FROM connected_accounts WHERE user = ? AND platform = ? AND status = ? ORDER BY id", user, platform, status)
+      : this.all<AccountRow>("SELECT * FROM connected_accounts WHERE user = ? AND status = ? ORDER BY id", user, status);
+  }
+
+  updateAccount(id: number, patch: Partial<Omit<AccountRow, "id" | "user" | "platform" | "created_at" | "updated_at">>) {
+    const keys = Object.keys(patch) as (keyof typeof patch)[];
+    if (!keys.length) return;
+    this.run(`UPDATE connected_accounts SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated_at = ? WHERE id = ?`, ...keys.map((k) => clean(patch[k])), nowIso(), id);
+  }
+
+  logPublish(row: Omit<PublishLogRow, "id" | "created_at" | "external_id" | "url" | "error"> & Partial<Pick<PublishLogRow, "external_id" | "url" | "error">>): PublishLogRow {
+    const full = { external_id: null, url: null, error: null, ...row, created_at: nowIso() };
+    const keys = Object.keys(full) as (keyof typeof full)[];
+    const id = Number(this.run(`INSERT INTO publish_log (${keys.join(", ")}) VALUES (${keys.map(() => "?").join(", ")})`, ...keys.map((k) => clean(full[k]))).lastInsertRowid);
+    return { id, ...full };
+  }
+
+  /** successful posts to an account since (rate limits) */
+  publishedSince(account: number, sinceIso: string): number {
+    return this.get<{ n: number }>("SELECT COUNT(*) AS n FROM publish_log WHERE account = ? AND status = 'ok' AND created_at >= ?", account, sinceIso)?.n ?? 0;
+  }
+
+  lastPublished(account: number): PublishLogRow | undefined {
+    return this.get<PublishLogRow>("SELECT * FROM publish_log WHERE account = ? AND status = 'ok' ORDER BY id DESC LIMIT 1", account);
+  }
+
+  publishLogOf(item: number): PublishLogRow[] {
+    return this.all<PublishLogRow>("SELECT * FROM publish_log WHERE item = ? ORDER BY id", item);
+  }
+
+  // ── stage 34: payments & promo codes ─────────────────────────────────────────
+
+  insertPayment(row: { user: number; pkg: string; credits: number; vip_days: number; price_uzs: number; receipt_file_id?: string | null; receipt_kind?: string | null }): PaymentRow {
+    const now = nowIso();
+    const full = {
+      user: row.user,
+      pkg: row.pkg,
+      credits: row.credits,
+      vip_days: row.vip_days,
+      price_uzs: row.price_uzs,
+      status: "pending" as PaymentStatus,
+      receipt_file_id: row.receipt_file_id ?? null,
+      receipt_kind: row.receipt_kind ?? null,
+      reviewed_by: null,
+      created_at: now,
+      updated_at: now,
+    };
+    const keys = Object.keys(full) as (keyof typeof full)[];
+    const id = Number(this.run(`INSERT INTO payments (${keys.join(", ")}) VALUES (${keys.map(() => "?").join(", ")})`, ...keys.map((k) => clean(full[k]))).lastInsertRowid);
+    return { id, ...full };
+  }
+
+  getPayment(id: number): PaymentRow | undefined {
+    return this.get<PaymentRow>("SELECT * FROM payments WHERE id = ?", id);
+  }
+
+  /** atomically approves or rejects a pending payment and grants credits/VIP on approval */
+  claimPayment(id: number, to: "paid" | "rejected", by: number): PaymentRow | undefined {
+    return this.transaction(() => {
+      const now = nowIso();
+      const r = this.run("UPDATE payments SET status = ?, reviewed_by = ?, updated_at = ? WHERE id = ? AND status = 'pending'", to, by, now, id);
+      if (!Number(r.changes)) return undefined;
+      const p = this.getPayment(id)!;
+      if (to === "paid") {
+        if (p.credits > 0) {
+          this.addCredits(p.user, p.credits);
+          this.addUsage({ user: p.user, kind: `credits:buy:${p.pkg}`, units: -p.credits, cost_usd: 0 });
+        }
+        if (p.vip_days > 0) {
+          this.updateUser(p.user, { plan: "vip" });
+          this.allow(p.user, by);
+          const curUntil = this.getKv(`vip.until.${p.user}`);
+          const baseMs = curUntil && Date.parse(curUntil) > Date.now() ? Date.parse(curUntil) : Date.now();
+          this.setKv(`vip.until.${p.user}`, new Date(baseMs + p.vip_days * 86_400_000).toISOString());
+        }
+      }
+      return p;
+    });
+  }
+
+  paymentsOf(user: number): PaymentRow[] {
+    return this.all<PaymentRow>("SELECT * FROM payments WHERE user = ? ORDER BY id DESC", user);
+  }
+
+  pendingPayments(): PaymentRow[] {
+    return this.all<PaymentRow>("SELECT * FROM payments WHERE status = 'pending' ORDER BY id");
+  }
+
+  revenueStats(sinceIso?: string): { count: number; total_uzs: number; pending: number } {
+    const paid = sinceIso
+      ? this.get<{ n: number; s: number }>("SELECT COUNT(*) AS n, COALESCE(SUM(price_uzs), 0) AS s FROM payments WHERE status = 'paid' AND updated_at >= ?", sinceIso)!
+      : this.get<{ n: number; s: number }>("SELECT COUNT(*) AS n, COALESCE(SUM(price_uzs), 0) AS s FROM payments WHERE status = 'paid'")!;
+    const pending = this.get<{ n: number }>("SELECT COUNT(*) AS n FROM payments WHERE status = 'pending'")!.n;
+    return { count: paid.n ?? 0, total_uzs: paid.s ?? 0, pending: pending ?? 0 };
+  }
+
+  upsertPromo(row: { code: string; credits: number; vip_days?: number; max_uses?: number; created_by?: number }): PromoRow {
+    const code = row.code.trim().toUpperCase();
+    const now = nowIso();
+    this.run(
+      "INSERT INTO promocodes (code, credits, vip_days, max_uses, used_count, created_by, created_at) VALUES (?, ?, ?, ?, 0, ?, ?) ON CONFLICT(code) DO UPDATE SET credits = excluded.credits, vip_days = excluded.vip_days, max_uses = excluded.max_uses",
+      code,
+      Math.max(0, Math.round(row.credits)),
+      Math.max(0, Math.round(row.vip_days ?? 0)),
+      Math.max(1, Math.round(row.max_uses ?? 1)),
+      row.created_by ?? null,
+      now,
+    );
+    return this.get<PromoRow>("SELECT * FROM promocodes WHERE code = ?", code)!;
+  }
+
+  redeemPromo(user: number, rawCode: string): { ok: true; credits: number; vip_days: number; balance: number } | { ok: false; reason: "not_found" | "exhausted" | "already_used" } {
+    const code = rawCode.trim().toUpperCase();
+    return this.transaction(() => {
+      const p = this.get<PromoRow>("SELECT * FROM promocodes WHERE code = ?", code);
+      if (!p) return { ok: false as const, reason: "not_found" as const };
+      if (this.get<{ code: string }>("SELECT code FROM promo_uses WHERE code = ? AND user = ?", code, user)) {
+        return { ok: false as const, reason: "already_used" as const };
+      }
+      if (p.used_count >= p.max_uses) return { ok: false as const, reason: "exhausted" as const };
+      this.run("UPDATE promocodes SET used_count = used_count + 1 WHERE code = ?", code);
+      this.run("INSERT INTO promo_uses (code, user, used_at) VALUES (?, ?, ?)", code, user, nowIso());
+      const balance = p.credits > 0 ? this.addCredits(user, p.credits) : (this.getUser(user)?.credits ?? 0);
+      if (p.credits > 0) this.addUsage({ user, kind: `credits:promo:${code}`, units: -p.credits, cost_usd: 0 });
+      if (p.vip_days > 0) {
+        this.updateUser(user, { plan: "vip" });
+        this.allow(user);
+        const curUntil = this.getKv(`vip.until.${user}`);
+        const baseMs = curUntil && Date.parse(curUntil) > Date.now() ? Date.parse(curUntil) : Date.now();
+        this.setKv(`vip.until.${user}`, new Date(baseMs + p.vip_days * 86_400_000).toISOString());
+      }
+      return { ok: true as const, credits: p.credits, vip_days: p.vip_days, balance };
+    });
   }
 }

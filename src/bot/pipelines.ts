@@ -83,6 +83,8 @@ export interface MakeArgs {
   aspect?: Aspect;
   /** reuse the script of an earlier make job (📐 another format: same script, new frame) */
   fromJob?: string;
+  /** stage 31: "promo" — product promo / explainer in the clean UI format */
+  format?: "reel" | "promo";
   progress: (text: string) => Promise<void>;
   onJob: (jobId: string) => void;
   signal: AbortSignal;
@@ -153,13 +155,14 @@ export const runAvatarImport: AvatarImportFn = async ({ jobId, result, instructi
 };
 
 /** /make: topic → video from nothing (trends → script → motion graphics → render). */
-export const runMakePipeline: MakeFn = async ({ topic, voice, aspect, fromJob, progress, onJob, signal, log }) => {
+export const runMakePipeline: MakeFn = async ({ topic, voice, aspect, fromJob, format, progress, onJob, signal, log }) => {
   const { make, creditsText } = await import("../make/index.ts");
   const r = await make(topic, {
     signal,
     voice,
     aspect,
     fromJob,
+    format,
     onEvent: (l) => {
       if (/^job /.test(l)) onJob(l.slice(4).trim());
       else if (/^▸/.test(l)) void progress(l);

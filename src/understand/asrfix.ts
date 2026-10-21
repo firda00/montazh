@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { WORKSPACE_ROOT } from "../lib/workspace.ts";
 import type { Transcript } from "../schemas/index.ts";
+import { normalizeUz } from "../design/abror.ts";
 import { geminiApiKey } from "../voice/gemini.ts";
 import { GeminiClient } from "./gemini-client.ts";
 import { priceUsage } from "./vision/gemini.ts";
@@ -85,8 +86,10 @@ export function detectLanguage(text: string, fallback: string): string {
 /** A capital letter at the start of every phrase, no doubled punctuation, no stray spaces; words keep their times. */
 export function tidyTranscript(t: Transcript): Transcript {
   const segments = t.segments.map((s) => {
+    const uz = (s.lang ?? t.language) === "uz";
     const words = s.words.map((w, k) => {
       let x = w.w.replace(/\s+/g, " ").trim().replace(/([,.!?;:])\1+/g, "$1").replace(/^[-–—]+(?=\p{L})/u, "");
+      if (uz) x = normalizeUz(x);
       if (k === 0) x = x.replace(/^([«"(]?)(\p{Ll})/u, (_m, q: string, c: string) => q + c.toUpperCase());
       return { ...w, w: x || w.w };
     });

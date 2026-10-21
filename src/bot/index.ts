@@ -27,6 +27,8 @@ import type { ExtractInput, ExtractResult } from "../style/extract.ts";
 import { mapStyle, styleSummary } from "../style/map.ts";
 import { StyleProfileSchema } from "../style/profile.ts";
 import { runRetention, type RetentionReport } from "./retention.ts";
+import { contentPlanHandlers, defaultIdeas, type IdeasFn } from "./contentplan.ts";
+import { stubPublisher, telegramPublisher } from "./publishers.ts";
 import { commentKb, COMMENT_WINDOW_MS, feedbackKb, feedbackMeta, isLow, parseReasons, reasonsFor, reviewContext, transcribeNote, VOICE_NOTE_MAX_S } from "./feedback.ts";
 import { likelyIssue, parseReview, type SelfReviewFn } from "../review/self-review.ts";
 import { GUIDE_ACTIONS, GUIDE_DIR, guideCard, guideImageName, renderGuideImage } from "./guide.ts";
@@ -112,7 +114,7 @@ export const SessionSchema = z.object({
   draft: z.object({ mode: z.enum(["reels", "viral", "hl", "pp"]), count: z.number(), seconds: z.number(), aspect: z.string(), style: z.string(), dub: z.string().optional() }).optional(),
   /** the option card of the open batch: more uploads edit it instead of sending a new card */
   card: z.number().optional(),
-  make: z.object({ topic: z.string(), aspect: z.string(), voice: z.string() }).optional(),
+  make: z.object({ topic: z.string(), aspect: z.string(), voice: z.string(), format: z.enum(["reel", "promo"]).optional() }).optional(),
   /** «🎯 Монтаж как в примере»: the style profile of the reference (workspace/_cache/style/<key>.json) */
   ref: z.string().optional(),
   /** the analysis was just made and is not yet billed to a job */
@@ -447,6 +449,12 @@ export interface BotOptions {
   guideDir?: string;
   /** legal texts (terms|privacy).<lang>.md (default docs/legal) */
   docsDir?: string;
+  /**
+   * stage 32: «🗓 Контент-план». `ideas` — the idea source (default: the trends research, src/make/trends.ts; tests
+   * inject a stub); `tickMs` — how often the persisted scheduler runs (default 60 s; 0 = never, call bot.contentPlanTick());
+   * per connected account at most `dailyPosts` posts in 24 h (VEDIT_PUBLISH_DAILY_MAX, 10) and `minGapMs` between two (60 s)
+   */
+  contentPlan?: { ideas?: IdeasFn; tickMs?: number; dailyPosts?: number; minGapMs?: number; now?: () => number };
   env?: NodeJS.ProcessEnv;
 }
 
@@ -468,6 +476,8 @@ export interface Bot {
   user(userId: number): UserRow | undefined;
   /** deletes old uploads and job folders now */
   retention(now?: number): Promise<RetentionReport>;
+  /** stage 32: one pass of the content-plan scheduler (idea batches, idea cards, scheduled posts) */
+  contentPlanTick(): Promise<void>;
   /** kept for the stage-7 API: everything is already in the DB */
   save(): Promise<void>;
   /** stops timers and closes the DB (running jobs are not waited for) */
@@ -769,6 +779,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       db.updateJob(jobId, { status, finished_at: new Date().toISOString(), ...patch });
       await pushCard(jobId, true);
       cards.delete(jobId);
+      // stage 32: a content-plan video that did not come out
+      if (status !== "done") await contentPlan.onJobEnded(jobId).catch((err) => log(`⚠ контент-план: ${errMsg(err)}`));
     };
     try {
       const result = await withJobSignal(signal, () => execute(job.kind, payload, { progress, onJob, signal, log: ulog, uid }));
@@ -779,6 +791,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       card.pct = Math.max(card.pct, 97);
       await pushCard(jobId, true);
       await deliver(uid, chatId, jobId, result);
+      // stage 32: a content-plan video → its caption and the publish card
+      await contentPlan.onDelivered(jobId, result).catch((err) => log(`⚠ контент-план: ${errMsg(err)}`));
       const cost = await jobCost(result.jobId);
       db.addUsage({ user: uid, kind: job.kind, units: job.paid_credits, cost_usd: cost, job_id: jobId });
       await finish("done", { vedit_job: result.jobId, cost_usd: cost, percent: 100, stage: "done" });
@@ -833,7 +847,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         return { ...r, reasoning: r.reasoning?.startsWith(label) ? r.reasoning : [label, r.reasoning].filter(Boolean).join("\n") };
       }
       case "make":
-        return makeFn({ topic: s("topic")!, voice: s("voice"), aspect: (s("aspect") as Aspect | undefined) ?? "9:16", fromJob: s("fromJob"), progress: x.progress, onJob: x.onJob, signal: x.signal, log: x.log });
+        return makeFn({ topic: s("topic")!, voice: s("voice"), aspect: (s("aspect") as Aspect | undefined) ?? "9:16", fromJob: s("fromJob"), format: s("format") === "promo" ? "promo" : undefined, progress: x.progress, onJob: x.onJob, signal: x.signal, log: x.log });
       case "revise":
         return reviseFn({ jobId: s("jobId")!, edit: s("edit")!, progress: x.progress, signal: x.signal, log: x.log });
       case "avatar":
@@ -1141,13 +1155,13 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     return job;
   }
 
-  async function startMake(uid: number, chatId: number, topic: string, aspect: string, voiceChoice?: string, fromJob?: string): Promise<JobRow | undefined> {
+  async function startMake(uid: number, chatId: number, topic: string, aspect: string, voiceChoice?: string, fromJob?: string, format?: "reel" | "promo"): Promise<JobRow | undefined> {
     if (!topic) return void (await say(chatId, T(uid).makeUsage));
     patchSess(uid, { prompt: topic, awaiting: undefined, make: undefined });
     // no choice → "auto" (Gemini with a key, else Piper); "off" → silent
     const chosen = voiceChoice ?? voiceOf(uid);
     const voice = chosen === "off" ? undefined : chosen && chosen !== "auto" ? chosen : "auto";
-    return submit(uid, chatId, "make", { topic, voice, aspect, fromJob }, "standard");
+    return submit(uid, chatId, "make", { topic, voice, aspect, fromJob, ...(format === "promo" ? { format } : {}) }, "standard");
   }
 
   async function startRevise(uid: number, chatId: number, editText: string, veditJob?: string) {
@@ -1870,6 +1884,8 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         const g = guideCard(L, 0);
         return void (await say(chatId, g.text, encodeKb(g.kb)));
       }
+      case "plan":
+        return contentPlan.menu(uid, chatId);
     }
   }
 
@@ -1935,6 +1951,34 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     broadcastDelayMs: o.broadcastDelayMs ?? 50,
     closedBeta: !!allowed,
     log,
+  });
+
+  // ── stage 32: «🗓 Контент-план» ──
+  const cpOpts = o.contentPlan ?? {};
+  const contentPlan = contentPlanHandlers({
+    db,
+    api,
+    T,
+    langOf,
+    say: (chatId, text, kb) => say(chatId, text, kb ? encodeKb(kb) : undefined),
+    edit: (chatId, msgId, text, kb) => edit(chatId, msgId, text, kb ? encodeKb(kb) : undefined),
+    editMarkup: (chatId, msgId, kb) => editMarkup(chatId, msgId, kb ? encodeKb(kb) : undefined),
+    setAwaiting: (uid, v) => patchSess(uid, { awaiting: v }),
+    submitMake: (uid, chatId, a) => {
+      const chosen = a.voice ?? voiceOf(uid);
+      const voice = chosen === "off" ? undefined : chosen && chosen !== "auto" ? chosen : "auto";
+      return submit(uid, chatId, "make", { topic: a.topic, voice, aspect: a.aspect, ...(a.format === "promo" ? { format: "promo" } : {}), cp_item: a.cpItem }, "standard");
+    },
+    publishers: { telegram: telegramPublisher(api, { shrink: shrinkFn }), instagram: stubPublisher("instagram"), youtube: stubPublisher("youtube"), tiktok: stubPublisher("tiktok"), vk: stubPublisher("vk") },
+    ideas: cpOpts.ideas ?? defaultIdeas,
+    tz,
+    // a scheduled file must outlive the retention cleanup
+    maxAheadDays: Math.max(1, Math.min(7, retentionDays - 1)),
+    dailyPosts: cpOpts.dailyPosts ?? (Number(env.VEDIT_PUBLISH_DAILY_MAX) > 0 ? Number(env.VEDIT_PUBLISH_DAILY_MAX) : 10),
+    minGapMs: cpOpts.minGapMs ?? 60_000,
+    log,
+    track,
+    now: cpOpts.now,
   });
 
   // ── messages ──
@@ -2048,6 +2092,11 @@ export async function createBot(o: BotOptions): Promise<Bot> {
           return takedownCommand(uid, chatId, arg);
         case "guide":
           return onMenu(uid, chatId, "guide");
+        // stage 32
+        case "plan":
+          return onMenu(uid, chatId, "plan");
+        case "connect_channel":
+          return contentPlan.connectChannel(uid, chatId, arg);
         default:
           return void (await say(chatId, L.unknownCommand));
       }
@@ -2070,6 +2119,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       if (url) return onReference(uid, chatId, { url });
       return void (await say(chatId, L.refNeedFileOrLink));
     }
+    if (awaiting?.startsWith("cp_")) return contentPlan.text(uid, chatId, awaiting, text);
     if (awaiting === "topic") return makeCardFor(uid, chatId, text);
     if (awaiting === "avatar") return startAvatar(uid, chatId, text);
     if (awaiting?.startsWith("edit:")) return applyEdit(uid, chatId, awaiting.slice(5), text);
@@ -2089,7 +2139,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const job = db.getJob(botJob);
     if (!job || job.user !== uid) return void (await say(chatId, T(uid).jobGone));
     const p = JSON.parse(job.payload) as Record<string, string>;
-    if (job.kind === "make") return startMake(uid, chatId, `${p.topic}. Учти правку: ${text}`, p.aspect ?? aspectOf(uid), p.voice ?? "off");
+    if (job.kind === "make") return startMake(uid, chatId, `${p.topic}. Учти правку: ${text}`, p.aspect ?? aspectOf(uid), p.voice ?? "off", undefined, p.format === "promo" ? "promo" : undefined);
     if (!job.vedit_job) return void (await say(chatId, T(uid).jobGone));
     return startRevise(uid, chatId, text, job.vedit_job);
   }
@@ -2190,6 +2240,10 @@ export async function createBot(o: BotOptions): Promise<Bot> {
           toast = dl ? L.linkCancelled : L.nothingToCancel;
           break;
         }
+        // stage 32: «🗓 Контент-план»
+        case "CP":
+          toast = await contentPlan.callback(uid, chatId, msgId, data);
+          break;
         case "K":
           toast = await makeCallback(uid, chatId, msgId, a, [b, c].filter(Boolean).join(":"));
           break;
@@ -2368,7 +2422,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const d = sess(uid).make;
     if (!d) return L.jobGone;
     if (op === "go") {
-      const job = await startMake(uid, chatId, d.topic, d.aspect, d.voice);
+      const job = await startMake(uid, chatId, d.topic, d.aspect, d.voice, undefined, d.format);
       if (job && msgId) await editMarkup(chatId, msgId, undefined);
       else if (!job) patchSess(uid, { make: d });
       return undefined;
@@ -2380,6 +2434,11 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     }
     if (op === "a" && isAspect(val)) d.aspect = val;
     else if (op === "v" && (val === "auto" || val === "off" || getVoice(val))) d.voice = val;
+    else if (op === "f" && val === "promo") {
+      // stage 31: the promo is made for YouTube (16:9) and carries itself without a narrator; a second tap turns it off
+      if (d.format === "promo") d.format = undefined;
+      else Object.assign(d, { format: "promo", aspect: d.aspect === "9:16" ? "16:9" : d.aspect, voice: "off" });
+    }
     patchSess(uid, { make: d });
     if (msgId) await editMarkup(chatId, msgId, encodeKb(makeKb(L, langOf(uid), d)));
     return undefined;
@@ -2421,7 +2480,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
       if (job.kind === "run") {
         if (!(await exists(str("source") ?? ""))) return L.needVideo;
         await submit(uid, chatId, "run", { ...p, instruction: `${str("instruction")} ${note}`, resultAspect: undefined, resultText: undefined }, job.class);
-      } else if (job.kind === "make") await submit(uid, chatId, "make", { topic: str("topic"), voice: str("voice"), aspect: str("aspect") }, "standard");
+      } else if (job.kind === "make") await submit(uid, chatId, "make", { topic: str("topic"), voice: str("voice"), aspect: str("aspect"), ...(str("format") ? { format: str("format") } : {}) }, "standard");
       else if (job.vedit_job) await startRevise(uid, chatId, note, job.vedit_job);
       return undefined;
     }
@@ -2429,7 +2488,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const cur = str("resultAspect") ?? str("aspect") ?? aspectOf(uid);
     const other = cur === "16:9" ? "9:16" : "16:9";
     if (job.kind === "make") {
-      await submit(uid, chatId, "make", { topic: str("topic"), voice: str("voice"), aspect: other, fromJob: job.vedit_job ?? undefined }, "standard");
+      await submit(uid, chatId, "make", { topic: str("topic"), voice: str("voice"), aspect: other, fromJob: job.vedit_job ?? undefined, ...(str("format") ? { format: str("format") } : {}) }, "standard");
       return undefined;
     }
     if (!job.vedit_job) return L.jobGone;
@@ -2528,6 +2587,27 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     timers.push(first, every);
   }
 
+  // ── stage 32: the content-plan scheduler (state in the DB; a publish cut by a restart is reported, not repeated) ──
+  track(contentPlan.recover().catch((err) => log(`⚠ контент-план: ${errMsg(err)}`)));
+  let cpBusy = false;
+  const cpTick = async () => {
+    if (cpBusy) return;
+    cpBusy = true;
+    try {
+      await contentPlan.tick();
+    } catch (err) {
+      log(`⚠ контент-план: ${errMsg(err)}`);
+    } finally {
+      cpBusy = false;
+    }
+  };
+  const cpEvery = cpOpts.tickMs ?? 60_000;
+  if (cpEvery > 0) {
+    const every = setInterval(() => void cpTick(), cpEvery);
+    every.unref?.();
+    timers.push(every);
+  }
+
   return {
     api,
     db,
@@ -2549,6 +2629,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     settings: (uid) => settingsOf(uid),
     user: (uid) => db.getUser(uid),
     retention,
+    contentPlanTick: cpTick,
     save: async () => {},
     async idle() {
       for (;;) {
@@ -2584,9 +2665,9 @@ export interface RunningBot {
 /** the Telegram command menu, per language */
 async function setCommands(api: BotApi, log: (l: string) => void) {
   const sets: Record<Lang, [string, string][]> = {
-    ru: [["start", "Меню"], ["make", "Ролик по теме"], ["viral", "Один вирусный ролик из видео"], ["settings", "Настройки"], ["balance", "Баланс и лимиты"], ["status", "Что сейчас делается"], ["cancel", "Отменить"], ["guide", "Как пользоваться"], ["help", "Помощь"]],
-    uz: [["start", "Menyu"], ["make", "Mavzu bo‘yicha rolik"], ["viral", "Videolardan bitta virusli rolik"], ["settings", "Sozlamalar"], ["balance", "Balans va limitlar"], ["status", "Hozir nima bajarilmoqda"], ["cancel", "Bekor qilish"], ["guide", "Qanday foydalanish"], ["help", "Yordam"]],
-    en: [["start", "Menu"], ["make", "Video on a topic"], ["viral", "One viral clip from videos"], ["settings", "Settings"], ["balance", "Balance and limits"], ["status", "What is running"], ["cancel", "Cancel"], ["guide", "How to use"], ["help", "Help"]],
+    ru: [["start", "Меню"], ["make", "Ролик по теме"], ["viral", "Один вирусный ролик из видео"], ["settings", "Настройки"], ["balance", "Баланс и лимиты"], ["status", "Что сейчас делается"], ["cancel", "Отменить"], ["plan", "Контент-план"], ["guide", "Как пользоваться"], ["help", "Помощь"]],
+    uz: [["start", "Menyu"], ["make", "Mavzu bo‘yicha rolik"], ["viral", "Videolardan bitta virusli rolik"], ["settings", "Sozlamalar"], ["balance", "Balans va limitlar"], ["status", "Hozir nima bajarilmoqda"], ["cancel", "Bekor qilish"], ["plan", "Kontent-reja"], ["guide", "Qanday foydalanish"], ["help", "Yordam"]],
+    en: [["start", "Menu"], ["make", "Video on a topic"], ["viral", "One viral clip from videos"], ["settings", "Settings"], ["balance", "Balance and limits"], ["status", "What is running"], ["cancel", "Cancel"], ["plan", "Content plan"], ["guide", "How to use"], ["help", "Help"]],
   };
   for (const [lang, cmds] of Object.entries(sets) as [Lang, [string, string][]][]) {
     try {

@@ -29,7 +29,7 @@ async function boot(extra: Partial<BotOptions> = {}) {
 
 test("db (migration 5): testers with auto slots and revocation, pending @usernames (case-insensitive)", async () => {
   const db = new BotDb(path.join(await tmp(), "vedit.db"));
-  assert.deepEqual(db.migrations(), [1, 2, 3, 4, 5]);
+  assert.deepEqual(db.migrations(), [1, 2, 3, 4, 5, 6]);
   db.addTester(10, "auto", "a");
   db.addTester(11, "auto", null);
   db.addTester(12, "pending", "c");

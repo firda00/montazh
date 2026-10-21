@@ -44,7 +44,7 @@ async function boot(extra: Partial<BotOptions> = {}) {
 
 test("migration 4: the allowlist", async () => {
   const db = new BotDb(path.join(await tmp(), "vedit.db"));
-  assert.deepEqual(db.migrations(), [1, 2, 3, 4, 5]);
+  assert.deepEqual(db.migrations(), [1, 2, 3, 4, 5, 6]);
   db.allow(7, 1);
   db.allow(7, 2);
   db.allow(3);

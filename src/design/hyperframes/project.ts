@@ -5,6 +5,7 @@ import type { DesignJob } from "../export.ts";
 import type { Layout } from "../layout-types.ts";
 import { composeHyperframes } from "./compose.ts";
 import { captionTopOf, insertFiles, insertsLayer } from "./inserts-layer.ts";
+import { paneFiles } from "./split.ts";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 export const HF_VERSION = "0.8.145";
@@ -50,6 +51,7 @@ export async function writeHyperframesProject(job: DesignJob, layout: Layout, di
   }
 
   let panelRel: Record<number, string> | undefined;
+  let paneRel: Record<string, string> | undefined;
   let cutoutRel: { plate: string; pop?: string } | undefined;
   let extraFontFaces: string | undefined;
   if (job.design.layout === "split") {
@@ -58,6 +60,17 @@ export async function writeHyperframesProject(job: DesignJob, layout: Layout, di
       const rel = `assets/panels/${path.basename(f)}`;
       await linkOrCopy(f, path.join(dir, rel));
       panelRel[Number(i)] = rel;
+    }
+    if (job.panels) {
+      const files = paneFiles(job.panels);
+      if (files.length) {
+        paneRel = {};
+        for (const f of files) {
+          const rel = `assets/panes/${path.basename(f)}`;
+          await linkOrCopy(f, path.join(dir, rel));
+          paneRel[f] = rel;
+        }
+      }
     }
     if (job.cutout) {
       cutoutRel = { plate: `assets/${path.basename(job.cutout.plate)}` };
@@ -91,7 +104,7 @@ export async function writeHyperframesProject(job: DesignJob, layout: Layout, di
     }
     inserts = insertsLayer(job.inserts, { W: layout.frame.width, H: layout.frame.height, duration: layout.frame.duration, rel, display: `'${layout.font.family.replace(/['"<>]/g, "")}', sans-serif`, mono: `'VMono', monospace`, captionTop: captionTopOf(layout) });
   }
-  const html = composeHyperframes(job, layout, { videoRel, fontRel, gsapRel: "assets/gsap.min.js", panelRel, extraFontFaces, cutoutRel, serifNumFamily, inserts });
+  const html = composeHyperframes(job, layout, { videoRel, fontRel, gsapRel: "assets/gsap.min.js", panelRel, ...(paneRel ? { paneRel } : {}), extraFontFaces, cutoutRel, serifNumFamily, inserts });
   const entry = path.join(dir, "index.html");
   await fs.writeFile(entry, html);
   const name = `${job.job_id}-${job.timeline.output_id}`;
