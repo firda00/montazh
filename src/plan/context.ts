@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Highlights, Media, Preset, Scenes, Speakers, Transcript } from "../schemas/index.ts";
 import type { Window } from "./shortlist.ts";
-import type { StyleMapping } from "../style/map.ts";
+import { PRONIN_STYLE_MAPPING, type StyleMapping } from "../style/map.ts";
 
 type Word = Transcript["segments"][number]["words"][number];
 
@@ -156,7 +156,8 @@ export function buildPlanContext(input: ContextInput): PlanContext {
     mode = "compact";
     packText = renderPack({ ...partial, mode });
   }
-  return { ...partial, ...(input.style ? { style: input.style } : {}), mode, packText, packHash: createHash("sha256").update(packText).digest("hex"), tokenEstimate: estimateTokens(packText) };
+  const effectiveStyle = input.style ?? (input.preset.name === "pronin_style" ? PRONIN_STYLE_MAPPING : undefined);
+  return { ...partial, ...(effectiveStyle ? { style: effectiveStyle } : {}), mode, packText, packHash: createHash("sha256").update(packText).digest("hex"), tokenEstimate: estimateTokens(packText) };
 }
 
 const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);

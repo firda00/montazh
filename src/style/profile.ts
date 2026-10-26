@@ -3,7 +3,7 @@ import { z } from "zod";
 import { exists, jobDir, readJson, writeJson } from "../lib/workspace.ts";
 import type { Preset } from "../schemas/index.ts";
 import { StyleDNASchema } from "./dna.ts";
-import { applyStyleToPreset, mapStyle, type StyleMapping } from "./map.ts";
+import { applyStyleToPreset, mapStyle, PRONIN_STYLE_MAPPING, type StyleMapping } from "./map.ts";
 
 /** What was measured locally on the reference (ffmpeg scene cuts, whisper words, loudness, signalstats). */
 export const MeasuredSchema = z.object({
@@ -112,8 +112,11 @@ export async function writeJobStyle(jobId: string, profile: StyleProfile): Promi
 /** The preset a stage should use: the job's preset, with the reference style on top when the job has one. */
 export async function styledPreset(jobId: string, preset: Preset): Promise<{ preset: Preset; mapping: StyleMapping | null }> {
   const s = await loadJobStyle(jobId);
-  if (!s) return { preset, mapping: null };
-  return { preset: applyStyleToPreset(preset, s.mapping), mapping: s.mapping };
+  if (s) return { preset: applyStyleToPreset(preset, s.mapping), mapping: s.mapping };
+  if (preset.name === "pronin_style") {
+    return { preset, mapping: PRONIN_STYLE_MAPPING };
+  }
+  return { preset, mapping: null };
 }
 
 /**

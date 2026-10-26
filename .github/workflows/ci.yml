@@ -39,6 +39,7 @@ jobs:
       - name: Run test suite
         run: |
           node --import tsx --test \
+            tests/pronin-style.test.ts \
             tests/sfx-and-eta.test.ts \
             tests/stage1.test.ts \
             tests/stage2.test.ts \

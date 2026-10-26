@@ -407,3 +407,40 @@ export function styleSummary(dna: StyleDNA, lang: SummaryLang = "ru"): string {
 }
 
 export const styleSummaryRu = (dna: StyleDNA) => styleSummary(dna, "ru");
+
+/**
+ * Built-in style mapping for Pronin Media / Retention Pro style (pronin_style).
+ * Applies aggressive jump-cut cleanup, fast punch-in zooms, high-contrast warm color grade,
+ * impact/whoosh SFX, and ducked rhythm music bed.
+ */
+export const PRONIN_STYLE_MAPPING: StyleMapping = {
+  basePreset: "bold_pop",
+  pace: "dynamic",
+  clipSeconds: { min: 1.0, max: 3.5 },
+  captionsEnabled: true,
+  titleFirst3s: true,
+  design: {},
+  plannerRules: [
+    "СТИЛЬ PRONIN MEDIA / RETENTION PRO (динамичный коммерческий рилс-монтаж):",
+    "- Темп: очень быстрый (агрессивный). Первые 3 с — взрывной хук, самая сильная интригующая фраза, склейка каждые 1–1.5 с.",
+    "- Тело: быстрая нарезка каждые 1.5–2.5 с (клипы 1.0–3.5 с). Никаких долгих статичных пауз.",
+    "- Паузы и вздохи длиннее 200 мс монтаж вырезает автоматически (ультра-плотный джамп-кат).",
+    "- Слова-паразиты (э, ммм, ну, короче, типа) вырезаются автоматически.",
+    "- Наезды камерой: чередование планов на склейках (punch-in 1.14x), первый клип хука обязательно с наездом.",
+    "- Титр-хук: обязательный заголовок at 0 на 2–3 с с акцентным словом.",
+    "- Субтитры: включены (по 2 слова капсом, активное слово неоново-жёлтым вспыхивает с зумом).",
+    "- Звук: мощный SFX (impact на хуке, whoosh на переходах и зумах, pop на ключевых словах) + фоновая ритмичная музыка под речью.",
+  ].join("\n"),
+  cleanup: { enabled: true, silenceMs: 200, removeFillers: true, handleMs: 30, maxPiece: 2.2 },
+  zoom: { frequency: "every_cut_aggressive", mode: "ease", scale: 1.14, ease: 0.2, onHook: true },
+  grade: { contrast: 1.08, saturation: 1.14, brightness: 0.01, tint: "colorbalance=rs=0.04:gs=0.01:bs=-0.04:rm=0.03:bm=-0.03" },
+  audio: {
+    music: true,
+    duckDb: -16,
+    sfx: { enabled: true, kind: "whoosh", gain: -4, everyCuts: 2, hookImpact: true },
+  },
+  captionLook: null,
+  unsupported: [],
+  table: [],
+};
+

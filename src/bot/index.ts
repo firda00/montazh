@@ -162,6 +162,10 @@ export const SEND_MODES: Record<string, SendMode> = { file: "file", document: "f
 
 /** /style names → presets */
 export const STYLES: Record<string, string> = {
+  pronin: "pronin_style",
+  pronin_style: "pronin_style",
+  retention: "pronin_style",
+  пронин: "pronin_style",
   pop: "bold_pop",
   bold: "bold_pop",
   bold_pop: "bold_pop",
@@ -185,6 +189,7 @@ export const STYLES: Record<string, string> = {
 
 /** a style named in the instruction itself ("в стиле сплит", "как у aleko", "в стиле аброра") */
 export function styleFromText(text: string): string | undefined {
+  if (/(pronin|пронин|retention|как\s+у\s+пронин|стил\w*\s+пронин|commercial\s+reel)/i.test(text)) return "pronin_style";
   if (/(abror[_\s-]?full|аброр\w*\s+(?:полн|весь\s+кадр|со\s+вставк|без\s+сплит))/i.test(text)) return "abror_full";
   if (/(аброр|abror)/i.test(text)) return "abror_split";
   if (/(explainer|эксплейнер|генералов|generalov|светл\w*\s+(?:студ|инфограф|карточк)|инфографик)/i.test(text)) return "explainer";

@@ -1,0 +1,109 @@
+{
+  "name": "pronin_style",
+  "description": "Стиль Pronin Media / Retention Pro: агрессивный динамичный монтаж, ультра-плотные джамп-каты без пауз, кинетическая типографика по 2 слова с неоновым хайлайтером, наезды камеры (punch-in), B-roll карточки и мощный саунд-дизайн",
+  "pace": "dynamic",
+  "clip_seconds": {
+    "min": 1,
+    "max": 4
+  },
+  "caption_style": "pronin_kinetic",
+  "title_style": "card",
+  "default_aspect": "9:16",
+  "music_default": true,
+  "notes": [
+    "хук в первые 2.5 секунды: интригующий вопрос или шок-факт",
+    "ультра-плотный монтаж: вырезать все паузы и слова-паразиты",
+    "камера меняет крупность (1.14x punch-in) каждые 1.5–2.5 секунды",
+    "субтитры по 2 слова капсом, активное слово вспыхивает неоново-жёлтым",
+    "B-roll вставки и плашки на ключевых терминах",
+    "мощные звуковые акценты: whoosh на склейках, impact на хуке, pop на словах"
+  ],
+  "sfx": {
+    "enabled": true,
+    "intensity": "heavy",
+    "hook_impact": true,
+    "transitions": true,
+    "title_pop": true,
+    "outro_chime": true
+  },
+  "design": {
+    "font": {
+      "family": "Montserrat",
+      "file": "assets/fonts/Montserrat-Variable.ttf",
+      "weight": 900
+    },
+    "colors": {
+      "text": "#FFFFFF",
+      "highlight": "#FFE600",
+      "stroke": "rgba(0,0,0,0.92)",
+      "title": "#FFFFFF",
+      "title_bg": "linear-gradient(135deg, rgba(20,20,25,0.95) 0%, rgba(10,10,14,0.98) 100%)"
+    },
+    "captions": {
+      "anchor_y": 0.68,
+      "max_words": 2,
+      "max_chars": 16,
+      "font_size": 76,
+      "line_height": 1.08,
+      "uppercase": true,
+      "letter_case": "upper",
+      "stroke_width": 6,
+      "shadow_opacity": 0.85,
+      "shadow_y": 4,
+      "shadow_blur": 18,
+      "avoid_face": true,
+      "word_animation": "pop",
+      "pop_scale": 1.18,
+      "page_animation": "fade_up",
+      "backing": {
+        "enabled": true,
+        "color": "rgba(10,10,14,0.65)",
+        "padding": 12,
+        "radius": 20
+      },
+      "shade": {
+        "enabled": true,
+        "strength": 0.55,
+        "from": 0.5
+      }
+    },
+    "titles": {
+      "anchor_y": 0.16,
+      "font_size": 74,
+      "max_lines": 2,
+      "animation": "slide_up",
+      "padding": 24,
+      "radius": 20,
+      "avoid_face": true,
+      "face_zone": 0.42,
+      "accent_color": "#FFE600"
+    },
+    "safe_area": {
+      "x": 0.06,
+      "y": 0.08
+    },
+    "inserts": {
+      "enabled": true,
+      "density": "high",
+      "site_capture": true,
+      "pip": true,
+      "chips": true,
+      "sfx": true
+    },
+    "overlays": {
+      "progress_bar": true
+    },
+    "outro": {
+      "enabled": true,
+      "duration": 2.0,
+      "text": "Подпишись — больше пользы в профиле",
+      "text_by_lang": {
+        "ru": "Подпишись — больше пользы в профиле",
+        "uz": "Obuna boʻling — profilda yanada koʻproq foyda",
+        "en": "Follow for more in profile"
+      },
+      "font_size": 78,
+      "backdrop": "rgba(0,0,0,0.55)"
+    }
+  }
+}

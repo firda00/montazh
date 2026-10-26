@@ -166,7 +166,7 @@ const ru = {
   mode: { reels: "Рилсы из лучших моментов", viral: "Один вирусный ролик", hl: "Хайлайты", pp: "По отдельности на каждого" },
   countLabel: (n: number) => `${n} шт`,
   secondsLabel: (n: number) => `${n} с`,
-  styleNames: { bold_pop: "Динамичный", clean_min: "Чистые (как у экспертов)", box_reveal: "Плашка с подсветкой", split_news: "Сплит", explainer: "Эксплейнер (светлая студия)", abror_split: "Аброр (сплит)", abror_full: "Аброр (весь кадр)", calm: "Спокойный" } as Record<string, string>,
+  styleNames: { pronin_style: "🔥 Pronin (Retention)", bold_pop: "Динамичный", clean_min: "Чистые (как у экспертов)", box_reveal: "Плашка с подсветкой", split_news: "Сплит", explainer: "Эксплейнер (светлая студия)", abror_split: "Аброр (сплит)", abror_full: "Аброр (весь кадр)", calm: "Спокойный" } as Record<string, string>,
   btnStart: "▶️ Начать",
 
   makeAskTopic: "Напишите тему ролика — например «почему кофе дорожает в 2026».",
@@ -573,7 +573,7 @@ Endi o‘z videongizni yuboring — bitta yoki bir nechta. Shu uslubda montaj qi
   mode: { reels: "Eng yaxshi lahzalardan rilslar", viral: "Bitta virusli rolik", hl: "Xaylaytlar", pp: "Har biriga alohida" },
   countLabel: (n: number) => `${n} ta`,
   secondsLabel: (n: number) => `${n} s`,
-  styleNames: { bold_pop: "Dinamik", clean_min: "Toza (ekspertlardek)", box_reveal: "Plashka bilan yoritish", split_news: "Split", explainer: "Ekspleyner (yorug‘ studiya)", abror_split: "Abror (split)", abror_full: "Abror (to‘liq kadr)", calm: "Sokin" },
+  styleNames: { pronin_style: "🔥 Pronin (Retention)", bold_pop: "Dinamik", clean_min: "Toza (ekspertlardek)", box_reveal: "Plashka bilan yoritish", split_news: "Split", explainer: "Ekspleyner (yorug‘ studiya)", abror_split: "Abror (split)", abror_full: "Abror (to‘liq kadr)", calm: "Sokin" },
   btnStart: "▶️ Boshlash",
 
   makeAskTopic: "Rolik mavzusini yozing — masalan, «nega 2026-yilda qahva qimmatlashmoqda».",
@@ -966,7 +966,7 @@ Now send your own video — one or several. I’ll edit it in this style.`,
   mode: { reels: "Reels from the best moments", viral: "One viral clip", hl: "Highlights", pp: "One per person" },
   countLabel: (n: number) => `${n} pcs`,
   secondsLabel: (n: number) => `${n} s`,
-  styleNames: { bold_pop: "Dynamic", clean_min: "Clean (expert style)", box_reveal: "Box with highlight", split_news: "Split", explainer: "Explainer (light studio)", abror_split: "Abror (split)", abror_full: "Abror (full frame)", calm: "Calm" },
+  styleNames: { pronin_style: "🔥 Pronin (Retention)", bold_pop: "Dynamic", clean_min: "Clean (expert style)", box_reveal: "Box with highlight", split_news: "Split", explainer: "Explainer (light studio)", abror_split: "Abror (split)", abror_full: "Abror (full frame)", calm: "Calm" },
   btnStart: "▶️ Start",
 
   makeAskTopic: "Type the topic — e.g. “why coffee is getting more expensive in 2026”.",
