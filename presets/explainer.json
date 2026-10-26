@@ -1,0 +1,104 @@
+{
+  "name": "explainer",
+  "description": "Инфографика с аватаром (как у @al_generalov_): тёплый светлый фон #F5F1E9 на весь кадр, вырезанный спикер/аватар снизу на хуке и в финале (на основной части уходит вниз, освобождая экран под карточки), белые студийные карточки инфографики и UI, двухстрочные заголовки (чёрный + терракотовый акцент #A64432), плашки шагов «Трюк 1 из 3» и чистые белые субтитры с тёмной обводкой",
+  "pace": "dynamic",
+  "clip_seconds": {
+    "min": 2,
+    "max": 7
+  },
+  "caption_style": "bold_pop",
+  "title_style": "card",
+  "default_aspect": "9:16",
+  "music_default": true,
+  "notes": [
+    "хук 0–5 с: вырезанный спикер снизу + карточка интерфейса/проблемы сверху",
+    "основная часть: пошаговая инфографика (Трюк 1 из 3, сравнения, цифры, схемы) на тёплом кремовом фоне #F5F1E9",
+    "финал: возврат спикера снизу + карточка подписки / вывода",
+    "субтитры по 2–3 слова, белые с чёткой тёмной обводкой под визуальной карточкой"
+  ],
+  "sfx": {
+    "enabled": true,
+    "intensity": "dynamic",
+    "hook_impact": true,
+    "transitions": true,
+    "title_pop": true,
+    "outro_chime": true
+  },
+  "design": {
+    "font": {
+      "family": "Montserrat",
+      "file": "assets/fonts/Montserrat-Variable.ttf",
+      "weight": 800
+    },
+    "colors": {
+      "text": "#FFFFFF",
+      "highlight": "#FFFFFF",
+      "stroke": "#181715",
+      "title": "#181715",
+      "title_bg": "rgba(255,255,255,0.92)"
+    },
+    "captions": {
+      "anchor_y": 0.53,
+      "anchor_y_full": 0.74,
+      "max_words": 3,
+      "max_chars": 22,
+      "font_size": 56,
+      "line_height": 1.14,
+      "uppercase": false,
+      "letter_case": "as_spoken",
+      "stroke_width": 6,
+      "shadow_opacity": 0.45,
+      "avoid_face": true,
+      "word_animation": "pop",
+      "pop_scale": 1.08,
+      "page_animation": "fade_up",
+      "backing": {
+        "enabled": false,
+        "color": "rgba(0,0,0,0)",
+        "padding": 8,
+        "radius": 14
+      },
+      "shade": {
+        "enabled": false,
+        "strength": 0.3,
+        "from": 0.6
+      }
+    },
+    "titles": {
+      "anchor_y": 0.14,
+      "font_size": 64,
+      "max_lines": 2,
+      "animation": "slide_up",
+      "padding": 18,
+      "radius": 20,
+      "avoid_face": true,
+      "face_zone": 0.42,
+      "accent_color": "#A64432"
+    },
+    "safe_area": {
+      "x": 0.06,
+      "y": 0.08
+    },
+    "outro": {
+      "enabled": false,
+      "duration": 1.8,
+      "text": "Подпишись — дальше ещё интереснее",
+      "text_by_lang": {
+        "ru": "Подпишись — дальше ещё интереснее",
+        "uz": "Obuna boʻling — davomi yanada qiziq",
+        "en": "Follow for more"
+      },
+      "font_size": 72,
+      "backdrop": "rgba(24,23,21,0.12)"
+    },
+    "layout": "split",
+    "split": {
+      "seam": 0.55,
+      "panel_bg": "#F5F1E9",
+      "accent": "#A64432",
+      "image_style": "clean isometric 3D illustration and minimal UI diagram on a warm off-white background #F5F1E9, soft studio shadows, no text, no dark backgrounds",
+      "cutout": "auto",
+      "pop_out": 0.06
+    }
+  }
+}

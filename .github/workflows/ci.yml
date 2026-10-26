@@ -1,0 +1,50 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Typecheck & Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup FFmpeg
+        uses: FedericoCarboni/setup-ffmpeg@v3
+        with:
+          ffmpeg-version: release
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Doctor check
+        run: npm run doctor
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Run test suite
+        run: |
+          node --import tsx --test \
+            tests/sfx-and-eta.test.ts \
+            tests/stage1.test.ts \
+            tests/stage2.test.ts \
+            tests/stage3.test.ts \
+            tests/stage7-bot.test.ts \
+            tests/stage11-audio.test.ts \
+            tests/stage19-queue.test.ts \
+            tests/stage22-reference.test.ts \
+            tests/stage34-monetization.test.ts

@@ -21,6 +21,7 @@ import { isFileTooBig, makeBotApi, TelegramError, type BotApi, type CallMethod, 
 import { BotDb, isLang, type FeedbackRow, type JobKind, type JobRow, type Lang, type OutputRow, type UserRow } from "./db.ts";
 import { hasGoogleTtsKey, menuAction, STRINGS, t, voiceLabel, type MenuAction, type SendMode, type Strings } from "./i18n.ts";
 import { adminHandlers } from "./admin.ts";
+import { billingHandlers, buyKb, defaultWatermarkVideo, tb } from "./billing.ts";
 import { JobQueue, type JobOutcome } from "./queue.ts";
 import { canonicalUrl, findUrl, StyleCache, tgAlias } from "../style/cache.ts";
 import type { ExtractInput, ExtractResult } from "../style/extract.ts";
@@ -32,6 +33,7 @@ import { stubPublisher, telegramPublisher } from "./publishers.ts";
 import { commentKb, COMMENT_WINDOW_MS, feedbackKb, feedbackMeta, isLow, parseReasons, reasonsFor, reviewContext, transcribeNote, VOICE_NOTE_MAX_S } from "./feedback.ts";
 import { likelyIssue, parseReview, type SelfReviewFn } from "../review/self-review.ts";
 import { GUIDE_ACTIONS, GUIDE_DIR, guideCard, guideImageName, renderGuideImage } from "./guide.ts";
+import { formatRunningEta, formatQueuedEta } from "../lib/eta.ts";
 import { dailyBudgetUsdFromEnv, dayStart, freePlanFromEnv, maxJobsFromEnv, retentionDaysFromEnv, tzOffsetFromEnv, userDailyJobsFromEnv, type JobClass, type PlanLimits } from "./plans.ts";
 import {
   cancelKb,
@@ -159,13 +161,39 @@ export type BotState = z.infer<typeof BotStateSchema>;
 export const SEND_MODES: Record<string, SendMode> = { file: "file", document: "file", doc: "file", файл: "file", файлом: "file", fayl: "file", video: "video", видео: "video", both: "both", оба: "both", все: "both", ikkalasi: "both" };
 
 /** /style names → presets */
-export const STYLES: Record<string, string> = { pop: "bold_pop", bold: "bold_pop", bold_pop: "bold_pop", clean: "clean_min", clean_min: "clean_min", expert: "clean_min", box: "box_reveal", box_reveal: "box_reveal", karaoke: "box_reveal", split: "split_news", news: "split_news", split_news: "split_news", calm: "calm" };
+export const STYLES: Record<string, string> = {
+  pop: "bold_pop",
+  bold: "bold_pop",
+  bold_pop: "bold_pop",
+  clean: "clean_min",
+  clean_min: "clean_min",
+  expert: "clean_min",
+  box: "box_reveal",
+  box_reveal: "box_reveal",
+  karaoke: "box_reveal",
+  split: "split_news",
+  news: "split_news",
+  split_news: "split_news",
+  abror: "abror_split",
+  abror_split: "abror_split",
+  abror_full: "abror_full",
+  explainer: "explainer",
+  generalov: "explainer",
+  studio: "explainer",
+  calm: "calm",
+};
 
-/** a style named in the instruction itself ("в стиле сплит", "как у aleko") */
+/** a style named in the instruction itself ("в стиле сплит", "как у aleko", "в стиле аброра") */
 export function styleFromText(text: string): string | undefined {
+  if (/(abror[_\s-]?full|аброр\w*\s+(?:полн|весь\s+кадр|со\s+вставк|без\s+сплит))/i.test(text)) return "abror_full";
+  if (/(аброр|abror)/i.test(text)) return "abror_split";
+  if (/(explainer|эксплейнер|генералов|generalov|светл\w*\s+(?:студ|инфограф|карточк)|инфографик)/i.test(text)) return "explainer";
   if (/(сплит|split|как у aleko|как aleko|новостн\w* сплит|карточк\w* сверху)/i.test(text)) return "split_news";
   if (/(как у эксперт\w*|экспертн\w* стил\w*|как у маргулан\w*|чист\w* субтитр\w*)/i.test(text)) return "clean_min";
   if (/(плашк\w* с подсветк\w*|караоке|как у таневск\w*)/i.test(text)) return "box_reveal";
+  if (/(?:в\s+стиле\s+)?(?:спорт\w*|хайлайт\w*|игры?|баскет\w*|футбол\w*|sport_highlights)/i.test(text)) return "sport_highlights";
+  if (/(?:стил\w*\s+)?(?:спокойн\w*|подкаст\w*|интервью|лекци\w*|calm)/i.test(text) && !/рилс|шортс|динамич/i.test(text)) return "calm";
+  if (/(bold[_\s-]?pop|в\s+стиле\s+поп|поп[_\s-]стил\w*|вирусн\w*\s+стил\w*)/i.test(text)) return "bold_pop";
   return undefined;
 }
 
@@ -455,6 +483,8 @@ export interface BotOptions {
    * per connected account at most `dailyPosts` posts in 24 h (VEDIT_PUBLISH_DAILY_MAX, 10) and `minGapMs` between two (60 s)
    */
   contentPlan?: { ideas?: IdeasFn; tickMs?: number; dailyPosts?: number; minGapMs?: number; now?: () => number };
+  /** stage 34: watermark free-trial videos (true uses defaultWatermarkVideo; tests can pass a custom fn) */
+  watermarkFree?: boolean | ((file: string) => Promise<string>);
   env?: NodeJS.ProcessEnv;
 }
 
@@ -526,6 +556,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
   const reviewMax = o.selfReviewMax ?? (Number(env.VEDIT_SELF_REVIEW_MAX) > 0 ? Number(env.VEDIT_SELF_REVIEW_MAX) : 3);
   const transcribeFn = o.transcribeNote ?? transcribeNote;
   const guideDir = o.guideDir ?? GUIDE_DIR;
+  const watermarkFn = typeof o.watermarkFree === "function" ? o.watermarkFree : o.watermarkFree ? defaultWatermarkVideo : undefined;
 
   await fs.mkdir(botDir, { recursive: true });
   const db = new BotDb(path.join(botDir, "vedit.db"));
@@ -540,8 +571,18 @@ export async function createBot(o: BotOptions): Promise<Bot> {
 
   // ── users, sessions, settings ──
   const isAdmin = (uid: number) => envAdmins.has(uid) || db.getUser(uid)?.role === "admin";
-  /** VIP testers: no daily limits, no credit charges, every feature; still in the shared queue and under the global budget */
-  const isVip = (uid: number) => db.getUser(uid)?.plan === "vip";
+  /** VIP testers & PRO subscribers: no daily limits, no credit charges, every feature; checks vip.until.<uid> expiry if set */
+  const isVip = (uid: number) => {
+    const u = db.getUser(uid);
+    if (u?.plan !== "vip") return false;
+    const until = db.getKv(`vip.until.${uid}`);
+    if (until && Date.parse(until) <= Date.now()) {
+      db.updateUser(uid, { plan: "free" });
+      db.setKv(`vip.until.${uid}`, undefined);
+      return false;
+    }
+    return true;
+  };
   const unlimited = (uid: number) => isAdmin(uid) || isVip(uid);
   /** closed beta: TELEGRAM_ALLOWED_USERS + the env admins + the DB allowlist (/allow, /vip, «✅ Пустить (VIP)») */
   const allowedIn = (uid: number) => !allowed || allowed.has(uid) || envAdmins.has(uid) || db.isAllowed(uid);
@@ -637,11 +678,13 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const started = job.started_at ? Date.parse(job.started_at) : Date.now();
     if (job.status === "queued") {
       lines.push(L.stage.queued(Math.max(1, queue.position(job.id))));
+      lines.push(formatQueuedEta(Math.max(1, queue.position(job.id)), job.kind, lang));
     } else if (job.status === "running") {
       if (lang === "ru" && c.detail) lines.push(c.detail.length > 900 ? `${c.detail.slice(0, 899)}…` : c.detail);
       const label = c.stage === "render" ? L.stage.render(c.renderPct) : L.stage[c.stage];
       lines.push(`${bar(c.pct)} ${c.pct}% · ${label}`);
       lines.push(`⏱ ${mmss(Date.now() - started)}`);
+      lines.push(formatRunningEta({ startedAt: started, pct: c.pct, kind: job.kind }, lang));
     } else if (job.status === "done") lines.push(`${L.stage.done} · ⏱ ${mmss((job.finished_at ? Date.parse(job.finished_at) : Date.now()) - started)}`);
     else if (job.status === "cancelled") lines.push(L.stage.cancelled);
     else lines.push(L.stage.failed);
@@ -723,7 +766,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         const cost = cls === "long" ? p.creditsLong : p.creditsStandard;
         const have = db.getUser(uid)?.credits ?? 0;
         if (have < cost) {
-          await say(chatId, L.quotaExceeded(cls === "long", cost, have));
+          await say(chatId, L.quotaExceeded(cls === "long", cost, have), encodeKb(buyKb(langOf(uid))));
           return undefined;
         }
         paid = cost;
@@ -882,6 +925,10 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const notes: string[] = [];
     // stage 28: what was delivered (feedback and the self-review refer to these)
     if (result.outputs.length) db.putOutputs(jobId, result.outputs);
+    // stage 34: free-trial watermark for pure free users (no credits, not paid, not VIP/admin)
+    const jobRow = db.getJob(jobId);
+    const applyWm = !!watermarkFn && !unlimited(uid) && (jobRow?.paid_credits ?? 0) === 0 && (db.getUser(uid)?.credits ?? 0) === 0;
+    let watermarked = false;
     for (const out of result.outputs) {
       const caption = videoCaption(out, result.reasoning);
       let size = 0;
@@ -892,11 +939,20 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         continue;
       }
       let file = out.file;
+      if (applyWm) {
+        try {
+          file = await watermarkFn!(file);
+          size = (await fs.stat(file)).size;
+          watermarked = true;
+        } catch (err) {
+          log(`⚠ водяной знак ${out.id}: ${errMsg(err)}`);
+        }
+      }
       if (size > api.limits.uploadBytes) {
         const mb = (n: number) => `${(n / 1024 / 1024).toFixed(0)} МБ`;
         try {
           await action(chatId, "upload_document");
-          file = await shrinkFn(out.file, api.limits.uploadBytes);
+          file = await shrinkFn(file, api.limits.uploadBytes);
           notes.push(`${out.id}: оригинал ${mb(size)} больше лимита отправки ботом (${mb(api.limits.uploadBytes)}) — отправил сжатую копию; оригинал на сервере: ${out.file}`);
         } catch (err) {
           log(`⚠ сжатие ${out.id}: ${errMsg(err)}`);
@@ -931,6 +987,7 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const lines: string[] = [];
     for (const f of result.failed ?? []) lines.push(tech ? `✖ ${f.id}: ${f.error.split("\n")[0]}` : `✖ ${f.id}`);
     if (tech) for (const n of [...notes, ...(result.notes ?? [])]) lines.push(`⚠ ${n}`);
+    if (watermarked) lines.push(tb(langOf(uid)).watermarkNotice);
     if (result.credit) lines.unshift(result.credit);
     if (result.avatar) {
       await say(chatId, [L.avatarInstructions(result.jobId, result.avatar.lines, result.avatar.warnings), ...lines].join("\n"));
@@ -942,7 +999,12 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     }
     const head = result.outputs.length ? L.done(result.outputs.length, result.jobId) : L.noNew(result.jobId);
     const text = [head, ...lines, result.outputs.length ? `${L.reviseHint}\n${L.rateAsk}` : ""].filter(Boolean).join("\n");
-    const msgId = await say(chatId, text, result.outputs.length ? encodeKb(resultKb(L, jobId)) : undefined);
+    const baseKb = result.outputs.length ? resultKb(L, jobId) : undefined;
+    const finalKb =
+      baseKb && watermarked
+        ? { inline_keyboard: [[{ text: tb(langOf(uid)).btnUnwatermark(1), callback_data: `B:unwm:${jobId}` }], ...baseKb.inline_keyboard] }
+        : baseKb;
+    const msgId = await say(chatId, text, finalKb ? encodeKb(finalKb) : undefined);
     if (msgId) db.updateJob(jobId, { result_msg_id: msgId });
     // the format of the result, for «📐 Другой формат»; the text of the result message, restored after the feedback
     const aspect = result.outputs.find((x) => x.aspect)?.aspect;
@@ -1847,7 +1909,12 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const L = T(uid);
     const p = plan();
     const u = db.getUser(uid);
-    await say(chatId, L.balance({ plan: u?.plan ?? "free", credits: u?.credits ?? 0, usedStd: freeLeft(uid, "standard").used, std: p.standardPerDay, usedLong: freeLeft(uid, "long").used, long: p.longPerDay, cs: p.creditsStandard, cl: p.creditsLong, longMinutes: p.longMinutes, admin: isAdmin(uid) || !quotasOn }));
+    const userPlan = isVip(uid) ? "vip" : (u?.plan ?? "free");
+    await say(
+      chatId,
+      L.balance({ plan: userPlan, credits: u?.credits ?? 0, usedStd: freeLeft(uid, "standard").used, std: p.standardPerDay, usedLong: freeLeft(uid, "long").used, long: p.longPerDay, cs: p.creditsStandard, cl: p.creditsLong, longMinutes: p.longMinutes, admin: isAdmin(uid) || !quotasOn }),
+      encodeKb(buyKb(langOf(uid))),
+    );
     // (a VIP sees «Тариф: VIP (без лимитов и списаний)» from the plan field)
   }
 
@@ -1981,6 +2048,22 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     now: cpOpts.now,
   });
 
+  // ── stage 34: billing, tariffs, card receipts, promo codes ──
+  const billing = billingHandlers({
+    db,
+    api,
+    usersDir,
+    envAdmins,
+    isAdmin,
+    isVip,
+    langOf,
+    say: (chatId, text, kb) => say(chatId, text, kb ? encodeKb(kb) : undefined),
+    edit: (chatId, msgId, text, kb) => edit(chatId, msgId, text, kb ? encodeKb(kb) : undefined),
+    setAwaiting: (uid, v) => patchSess(uid, { awaiting: v }),
+    env,
+    log,
+  });
+
   // ── messages ──
   /** background work of an update: awaited only without debounce (tests), the polling loop does not wait for it */
   const bg = (p: Promise<void>) => (albumDelayMs <= 0 ? p : undefined);
@@ -1990,6 +2073,11 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     const chatId = m.chat.id;
     const L = t(user.lang);
     const s = sess(uid);
+    // stage 34: receipt screenshot / PDF while waiting for card payment
+    if (s.awaiting?.startsWith("pay:") && (m.photo?.length || m.document) && !m.text?.startsWith("/")) {
+      await billing.onReceipt(uid, m, s.awaiting.slice(4));
+      return;
+    }
     // avatar_result.zip before the video check (an octet-stream zip is not a video)
     if (m.document && isAvatarResult(m.document.file_name)) return uploadsPending(uid) ? bg(afterUploads(uid, () => onAvatarResult(uid, m, m.document!))) : onAvatarResult(uid, m, m.document);
     const video = isVideoMessage(m);
@@ -2097,6 +2185,22 @@ export async function createBot(o: BotOptions): Promise<Bot> {
           return onMenu(uid, chatId, "plan");
         case "connect_channel":
           return contentPlan.connectChannel(uid, chatId, arg);
+        // stage 34: monetization commands
+        case "buy":
+        case "tariffs":
+        case "pro":
+          return billing.shop(uid, chatId);
+        case "promo":
+          return billing.promoCommand(uid, chatId, arg);
+        case "addpromo":
+          if (!isAdmin(uid)) return void (await say(chatId, L.unknownCommand));
+          return billing.addPromoCommand(uid, chatId, arg);
+        case "setcard":
+          if (!isAdmin(uid)) return void (await say(chatId, L.unknownCommand));
+          return billing.setCardCommand(uid, chatId, arg);
+        case "payments":
+          if (!isAdmin(uid)) return void (await say(chatId, L.unknownCommand));
+          return billing.paymentsCommand(uid, chatId);
         default:
           return void (await say(chatId, L.unknownCommand));
       }
@@ -2105,6 +2209,14 @@ export async function createBot(o: BotOptions): Promise<Bot> {
     if (menu) return onMenu(uid, chatId, menu);
 
     const awaiting = sess(uid).awaiting;
+    if (awaiting === "promo") {
+      patchSess(uid, { awaiting: undefined });
+      return billing.promoCommand(uid, chatId, text);
+    }
+    if (awaiting?.startsWith("pay:")) {
+      await billing.onReceipt(uid, m, awaiting.slice(4));
+      return;
+    }
     if (awaiting?.startsWith("admin_")) {
       if (isAdmin(uid) && (await admin.text(uid, chatId, text))) return;
       patchSess(uid, { awaiting: undefined });
@@ -2243,6 +2355,11 @@ export async function createBot(o: BotOptions): Promise<Bot> {
         // stage 32: «🗓 Контент-план»
         case "CP":
           toast = await contentPlan.callback(uid, chatId, msgId, data);
+          break;
+        // stage 34: billing, tariffs, card receipts, watermark removal
+        case "B":
+          await answer();
+          toast = await billing.callback(uid, chatId, msgId, data);
           break;
         case "K":
           toast = await makeCallback(uid, chatId, msgId, a, [b, c].filter(Boolean).join(":"));

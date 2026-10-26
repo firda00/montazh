@@ -16,6 +16,14 @@
     "никаких ИИ-изображений реальных людей и логотипов; реальные фото/скрины/UI с источником",
     "субтитры строчными как сказано, узбекская латиница, oʻ/gʻ через U+02BB"
   ],
+  "sfx": {
+    "enabled": true,
+    "intensity": "dynamic",
+    "hook_impact": true,
+    "transitions": true,
+    "title_pop": true,
+    "outro_chime": true
+  },
   "design": {
     "font": { "family": "Montserrat", "file": "assets/fonts/Montserrat-Variable.ttf", "weight": 400 },
     "colors": {

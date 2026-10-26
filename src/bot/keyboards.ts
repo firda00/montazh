@@ -45,8 +45,8 @@ export interface MakeDraft {
 export const COUNTS = [1, 3, 5];
 export const SECONDS = [30, 60, 90];
 export const STYLE_CODES = ["pop", "clean", "box", "split", "calm"] as const;
-export const STYLE_PRESET: Record<string, string> = { pop: "bold_pop", clean: "clean_min", box: "box_reveal", split: "split_news", calm: "calm" };
-export const PRESET_STYLE: Record<string, string> = { bold_pop: "pop", clean_min: "clean", box_reveal: "box", split_news: "split", calm: "calm" };
+export const STYLE_PRESET: Record<string, string> = { pop: "bold_pop", clean: "clean_min", box: "box_reveal", split: "split_news", explainer: "explainer", calm: "calm", abror: "abror_split", abror_full: "abror_full" };
+export const PRESET_STYLE: Record<string, string> = { bold_pop: "pop", clean_min: "clean", box_reveal: "box", split_news: "split", explainer: "explainer", calm: "calm", abror_split: "abror", abror_full: "abror_full" };
 /** stage 27: the caption styles in rows of two (long names: «Чистые (как у экспертов)») */
 const styleRows = <T>(xs: T[]): T[][] => xs.reduce<T[][]>((rows, x, i) => (i % 2 ? rows[rows.length - 1].push(x) : rows.push([x]), rows), []);
 /** voices offered on the make card (cloud voices first; avatar-only Chatterbox voices are not offered) */

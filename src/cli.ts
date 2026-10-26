@@ -290,9 +290,11 @@ withRenderOptions(
       .option("--speakers <n>", "сколько говорящих ожидать (по умолчанию определяется)", (v) => Number(v))
       .option("--mode <m>", "auto | highlights | normal — highlights: нарезка спорта/экшена без речи (auto — по инструкции)", "auto")
       .option("--target <s>", "highlights: длина ролика, с", (v) => Number(v))
-      .option("--no-editor", "highlights: без вызова Claude (титр и порядок по правилам)"),
+      .option("--no-editor", "highlights: без вызова Claude (титр и порядок по правилам)")
+      .option("--sfx", "включить звуковые эффекты (хук-импакт, вжихи на склейках, поп на титрах)")
+      .option("--no-sfx", "отключить звуковые эффекты"),
   ),
-).action(async (videos: string[], opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; render: boolean; language?: string; vision: VisionChoice; asr: AsrChoice; diarize: boolean; speakers?: number; mode: string; target?: number; editor: boolean; like?: string; forceStyle?: boolean } & PlannerCliOpts & RenderCliOpts) => {
+).action(async (videos: string[], opts: { prompt?: string; preset: string; edl?: string; skipUnderstand?: boolean; snap: boolean; render: boolean; language?: string; vision: VisionChoice; asr: AsrChoice; diarize: boolean; speakers?: number; mode: string; target?: number; editor: boolean; like?: string; forceStyle?: boolean; sfx?: boolean } & PlannerCliOpts & RenderCliOpts) => {
   try {
     const video = videos[0];
     if (!["auto", "highlights", "normal"].includes(opts.mode)) throw new Error("--mode: ожидается auto | highlights | normal");
@@ -344,6 +346,11 @@ withRenderOptions(
     console.log("▸ ingest");
     const media = await runStep(job.id, "ingest", () => ingest(job.id, input));
     console.log(`  ${media.width}x${media.height} @ ${media.fps}fps, ${media.duration.toFixed(2)}s, audio: ${media.has_audio}`);
+    const { calculateEta } = await import("./lib/eta.ts");
+    const initEta = calculateEta({ startedAt: t0, pct: 10, durationSeconds: media.duration, kind: "run" });
+    console.log(`  ⏱ ожидаемое время готовности: ~${initEta.durationStr} (в ~${initEta.timeStr})`);
+    if (opts.sfx === false && opts.prompt) opts.prompt = `${opts.prompt} [без звуковых эффектов]`;
+    else if (opts.sfx === true && opts.prompt) opts.prompt = `${opts.prompt} [со звуковыми эффектами]`;
 
     let transcript: Transcript | undefined;
     let scenes: Scenes | undefined;
@@ -645,6 +652,13 @@ program
       for (const [step, s] of Object.entries(job.steps)) {
         const took = s.started_at && s.finished_at ? ` ${((+new Date(s.finished_at) - +new Date(s.started_at)) / 1000).toFixed(1)}s` : "";
         console.log(`  ${step.padEnd(10)} ${s.status}${took}${s.error ? `\n    ${s.error.split("\n")[0]}` : ""}`);
+      }
+      const isRunning = Object.values(job.steps).some((s) => s.status === "running");
+      if (isRunning) {
+        const { calculateEta } = await import("./lib/eta.ts");
+        const started = +new Date(job.created_at);
+        const eta = calculateEta({ startedAt: started, pct: 40, kind: "run" });
+        console.log(`  ⏱ ожидаемое время готовности: ~${eta.durationStr} (в ~${eta.timeStr})`);
       }
       const uFile = path.join(dir, "understand.json");
       if (await exists(uFile)) {

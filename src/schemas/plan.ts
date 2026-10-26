@@ -37,6 +37,7 @@ export const DraftOutputSchema = z.object({
   }),
   titles: z.array(DraftTitleSchema),
   music: z.object({ enabled: z.boolean() }),
+  sfx: z.object({ enabled: z.boolean() }).optional().describe("sound effects (impact, whoosh, pop)"),
   inserts: z.array(z.string()).optional().describe("optional: named things (companies, products, people, places, objects) said in this output that deserve a B-roll insert, as spoken; the editor decides timing"),
 });
 
@@ -406,5 +407,15 @@ export const PresetSchema = z.object({
   asr: z.object({ language: z.string().optional(), engine: z.enum(["auto", "gemini", "whisper"]).default("auto") }).optional(),
   notes: z.array(z.string()).default([]),
   design: DesignSpecSchema.prefault({}),
+  sfx: z
+    .object({
+      enabled: z.boolean().default(true),
+      intensity: z.enum(["none", "subtle", "dynamic", "heavy"]).default("dynamic"),
+      hook_impact: z.boolean().default(true),
+      transitions: z.boolean().default(true),
+      title_pop: z.boolean().default(true),
+      outro_chime: z.boolean().default(true),
+    })
+    .optional(),
 });
 export type Preset = z.infer<typeof PresetSchema>;

@@ -355,9 +355,13 @@ def hex_rgb(c: str) -> np.ndarray:
 def make_background(w: int, h: int, bg: str, accent: str) -> np.ndarray:
     """The bottom box behind the speaker, drawn like the split CSS draws the top half (RGB uint8, h×w):
     panel colour · 1 px grid every 60 px (white 4.5 %) · darker floor (55 % → 100 %: black 0 → 55 %) ·
-    accent glow behind the head (ellipse, accent 55 % → 20 % at 0.55 → 0)."""
+    accent glow behind the head (ellipse, accent 55 % → 20 % at 0.55 → 0).
+    For light studio backgrounds (mean RGB > 160, e.g. #F5F1E9 explainer), keeps the flat studio paper colour."""
+    base = hex_rgb(bg)
     img = np.empty((h, w, 3), np.float32)
-    img[...] = hex_rgb(bg)
+    img[...] = base
+    if float(base.mean()) > 160.0:
+        return np.clip(img + 0.5, 0, 255).astype(np.uint8)
     white = np.array([255, 255, 255], np.float32)
     rows = np.arange(h) % 60 == 0
     cols = np.arange(w) % 60 == 0

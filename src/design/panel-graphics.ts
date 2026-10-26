@@ -430,70 +430,93 @@ function wrap(c: GraphicContext, id: string, title: string, body: string, tw: st
   return { html: `<span class="gx" id="${id}"><span class="gx-grid" id="${id}-grid"></span>${title}${body}</span>`, tweens: tw };
 }
 
+export function isLightHex(hex: string): boolean {
+  const h = hex.replace("#", "").trim();
+  if (h.length < 6) return false;
+  const r = parseInt(h.slice(0, 2), 16) || 0;
+  const g = parseInt(h.slice(2, 4), 16) || 0;
+  const b = parseInt(h.slice(4, 6), 16) || 0;
+  return (r + g + b) / 3 > 160;
+}
+
 /** Styles for every graphic kind (scoped under .gx, sized to the panel frame). */
 export function graphicsCss(o: { w: number; h: number; accent: string; bg: string; displayFamily: string; monoFamily: string }): string {
   const A = o.accent;
+  const L = isLightHex(o.bg);
+  const ink = L ? "#181715" : "#FFFFFF";
+  const ink92 = L ? "rgba(24,23,21,0.94)" : "rgba(255,255,255,0.92)";
+  const ink88 = L ? "rgba(24,23,21,0.88)" : "rgba(255,255,255,0.88)";
+  const ink80 = L ? "rgba(24,23,21,0.78)" : "rgba(255,255,255,0.8)";
+  const ink75 = L ? "rgba(24,23,21,0.68)" : "rgba(255,255,255,0.75)";
+  const ink70 = L ? "rgba(24,23,21,0.62)" : "rgba(255,255,255,0.7)";
+  const trackBg = L ? "rgba(24,23,21,0.07)" : "rgba(255,255,255,0.07)";
+  const cardBg = L ? "rgba(24,23,21,0.04)" : "rgba(255,255,255,0.06)";
+  const cardBorder = L ? "rgba(24,23,21,0.10)" : "rgba(255,255,255,0.14)";
+  const gridLine = L ? "rgba(24,23,21,0.04)" : "rgba(255,255,255,0.05)";
+  const gxBg = L
+    ? `radial-gradient(120% 90% at 20% 0%, ${A}14, transparent 60%), linear-gradient(180deg, #FFFFFF, #FAF8F3)`
+    : `radial-gradient(120% 90% at 20% 0%, ${A}40, transparent 60%), linear-gradient(160deg, #17122E, ${o.bg})`;
   return `
-      .gx { position: absolute; inset: 0; display: block; overflow: hidden; background: radial-gradient(120% 90% at 20% 0%, ${A}40, transparent 60%), linear-gradient(160deg, #17122E, ${o.bg}); color: #FFFFFF; font-family: ${o.displayFamily}; }
-      .gx-grid { position: absolute; left: 0; top: 0; width: ${o.w}px; height: ${o.h + 120}px; display: block; background-image: linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px); background-size: 54px 54px; }
-      .gx-title { position: absolute; left: 56px; top: 44px; right: 56px; display: block; font-weight: 900; font-size: 50px; line-height: 1.1; letter-spacing: 0.01em; color: rgba(255,255,255,0.92); }
-      .gx-note { position: absolute; left: 56px; right: 56px; bottom: 36px; display: block; font-size: 30px; font-weight: 600; color: rgba(255,255,255,0.75); }
+      .gx { position: absolute; inset: 0; display: block; overflow: hidden; background: ${gxBg}; color: ${ink}; font-family: ${o.displayFamily}; }
+      .gx-grid { position: absolute; left: 0; top: 0; width: ${o.w}px; height: ${o.h + 120}px; display: block; background-image: linear-gradient(${gridLine} 1px, transparent 1px), linear-gradient(90deg, ${gridLine} 1px, transparent 1px); background-size: 54px 54px; }
+      .gx-title { position: absolute; left: 56px; top: 44px; right: 56px; display: block; font-weight: 900; font-size: 50px; line-height: 1.1; letter-spacing: 0.01em; color: ${ink92}; }
+      .gx-note { position: absolute; left: 56px; right: 56px; bottom: 36px; display: block; font-size: 30px; font-weight: 600; color: ${ink75}; }
       .gx-mask { display: inline-block; overflow: hidden; vertical-align: bottom; padding-bottom: 0.08em; }
       .gx-word { display: inline-block; }
       .gx-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 0 60px; text-align: center; }
-      .gx-big { display: flex; align-items: flex-start; font-weight: 900; line-height: 1; color: #FFFFFF; letter-spacing: -0.03em; }
+      .gx-big { display: flex; align-items: flex-start; font-weight: 900; line-height: 1; color: ${ink}; letter-spacing: -0.03em; }
       .gx-odo { display: block; height: 1em; overflow: hidden; }
       .gx-strip { display: flex; flex-direction: column; }
       .gx-dg { display: block; height: 1em; line-height: 1; }
       .gx-ch { display: block; height: 1em; line-height: 1; color: ${A}; }
       .gx-rule { display: block; width: 46%; height: 8px; border-radius: 4px; background: ${A}; transform-origin: 0% 50%; }
-      .gx-label { display: block; font-size: 50px; font-weight: 700; line-height: 1.2; color: rgba(255,255,255,0.88); max-width: ${o.w - 140}px; }
+      .gx-label { display: block; font-size: 50px; font-weight: 700; line-height: 1.2; color: ${ink88}; max-width: ${o.w - 140}px; }
       .gx-bars { position: absolute; left: 60px; right: 60px; top: 130px; bottom: 90px; display: flex; flex-direction: column; justify-content: center; gap: 14px; }
       .gx-row { display: flex; align-items: center; gap: 22px; }
-      .gx-rl { display: block; width: 240px; flex: none; font-size: 38px; font-weight: 700; text-align: right; color: rgba(255,255,255,0.88); }
-      .gx-track { position: relative; display: block; flex: 1; height: 58%; border-radius: 14px; background: rgba(255,255,255,0.07); overflow: hidden; }
+      .gx-rl { display: block; width: 240px; flex: none; font-size: 38px; font-weight: 700; text-align: right; color: ${ink88}; }
+      .gx-track { position: relative; display: block; flex: 1; height: 58%; border-radius: 14px; background: ${trackBg}; overflow: hidden; }
       .gx-fill { position: absolute; left: 0; top: 0; bottom: 0; display: block; border-radius: 14px; background: linear-gradient(90deg, ${A}99, ${A}); transform-origin: 0% 50%; }
-      .gx-fill.hot { background: linear-gradient(90deg, ${A}, #FFD166); }
-      .gx-rv { display: block; width: 170px; flex: none; font-size: 46px; font-weight: 900; }
+      .gx-fill.hot { background: linear-gradient(90deg, ${A}, ${L ? "#2E8B57" : "#FFD166"}); }
+      .gx-rv { display: block; width: 170px; flex: none; font-size: 46px; font-weight: 900; color: ${ink}; }
       .gx-chart { position: absolute; left: 70px; top: 150px; display: block; }
       .gx-svg { position: absolute; left: 0; top: 0; display: block; overflow: visible; }
       .gx-dot { position: absolute; display: block; width: 22px; height: 22px; border-radius: 50%; background: #FFFFFF; border: 5px solid ${A}; box-sizing: border-box; }
-      .gx-xl { position: absolute; display: block; width: 160px; text-align: center; font-size: 32px; font-weight: 600; color: rgba(255,255,255,0.7); }
-      .gx-tip { position: absolute; display: block; width: 230px; padding: 14px 0; border-radius: 18px; background: ${A}; text-align: center; font-size: 44px; font-weight: 900; box-shadow: 0 16px 40px rgba(0,0,0,0.45); }
+      .gx-xl { position: absolute; display: block; width: 160px; text-align: center; font-size: 32px; font-weight: 600; color: ${ink70}; }
+      .gx-tip { position: absolute; display: block; width: 230px; padding: 14px 0; border-radius: 18px; background: ${A}; color: #FFFFFF; text-align: center; font-size: 44px; font-weight: 900; box-shadow: 0 16px 40px rgba(0,0,0,0.22); }
       .gx-quote { position: absolute; left: 70px; right: 70px; top: 0; bottom: 0; display: flex; flex-direction: column; justify-content: center; gap: 18px; }
       .gx-qm { display: block; height: 120px; font-size: 220px; line-height: 0.9; color: ${A}; }
-      .gx-qt { display: block; line-height: 1.18; font-style: italic; font-weight: 700; }
+      .gx-qt { display: block; line-height: 1.18; font-style: italic; font-weight: 700; color: ${ink}; }
       .gx-by { display: block; font-family: ${o.monoFamily}; font-size: 32px; letter-spacing: 0.06em; color: ${A}; }
       .gx-tl { position: absolute; left: 80px; right: 80px; top: 50%; height: 0; display: block; }
-      .gx-axis { position: absolute; left: 0; right: 0; top: -3px; display: block; height: 6px; border-radius: 3px; background: linear-gradient(90deg, ${A}, #FFFFFF); transform-origin: 0% 50%; }
-      .gx-node { position: absolute; top: -16px; display: block; width: 32px; height: 32px; border-radius: 50%; background: ${o.bg}; border: 6px solid ${A}; box-sizing: border-box; }
+      .gx-axis { position: absolute; left: 0; right: 0; top: -3px; display: block; height: 6px; border-radius: 3px; background: linear-gradient(90deg, ${A}, ${ink}); transform-origin: 0% 50%; }
+      .gx-node { position: absolute; top: -16px; display: block; width: 32px; height: 32px; border-radius: 50%; background: ${L ? "#FFFFFF" : o.bg}; border: 6px solid ${A}; box-sizing: border-box; }
       .gx-ev { position: absolute; top: 40px; display: flex; flex-direction: column; gap: 6px; width: 190px; text-align: center; }
       .gx-ev.low { top: auto; bottom: 40px; }
       .gx-date { display: block; font-size: 44px; font-weight: 900; color: ${A}; }
-      .gx-what { display: block; font-size: 30px; font-weight: 600; line-height: 1.25; color: rgba(255,255,255,0.88); }
+      .gx-what { display: block; font-size: 30px; font-weight: 600; line-height: 1.25; color: ${ink88}; }
       .gx-cmp { position: absolute; left: 50px; right: 50px; top: 120px; bottom: 100px; display: flex; align-items: stretch; gap: 26px; }
-      .gx-side { display: flex; flex: 1; flex-direction: column; justify-content: center; gap: 16px; padding: 30px; border-radius: 28px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); text-align: center; }
-      .gx-side.right { background: ${A}2E; border-color: ${A}; }
-      .gx-sl { display: block; font-size: 38px; font-weight: 700; color: rgba(255,255,255,0.85); }
-      .gx-sv { display: block; font-weight: 900; line-height: 1.05; }
-      .gx-vs { display: flex; align-self: center; align-items: center; justify-content: center; width: 96px; height: 96px; flex: none; border-radius: 50%; background: #FFFFFF; color: ${o.bg}; font-weight: 900; font-size: 34px; }
+      .gx-side { display: flex; flex: 1; flex-direction: column; justify-content: center; gap: 16px; padding: 30px; border-radius: 28px; background: ${cardBg}; border: 1px solid ${cardBorder}; text-align: center; }
+      .gx-side.right { background: ${A}1F; border-color: ${A}; }
+      .gx-sl { display: block; font-size: 38px; font-weight: 700; color: ${ink88}; }
+      .gx-sv { display: block; font-weight: 900; line-height: 1.05; color: ${ink}; }
+      .gx-vs { display: flex; align-self: center; align-items: center; justify-content: center; width: 96px; height: 96px; flex: none; border-radius: 50%; background: ${ink}; color: ${L ? "#FFFFFF" : o.bg}; font-weight: 900; font-size: 34px; }
       .gx-chat { position: absolute; left: 36px; right: 36px; top: 120px; bottom: 32px; display: flex; flex-direction: column; justify-content: space-evenly; gap: 24px; }
-      .gx-bub { position: relative; display: block; align-self: flex-end; max-width: 94%; padding: 34px 42px; border-radius: 44px 44px 12px 44px; background: ${A}; font-size: 1em; font-weight: 800; line-height: 1.16; box-shadow: 0 18px 50px rgba(0,0,0,0.4); }
-      .gx-bub.ai { align-self: flex-start; border-radius: 36px 36px 36px 10px; background: #F4F2FF; color: #15122A; }
+      .gx-bub { position: relative; display: block; align-self: flex-end; max-width: 94%; padding: 34px 42px; border-radius: 44px 44px 12px 44px; background: ${A}; color: #FFFFFF; font-size: 1em; font-weight: 800; line-height: 1.16; box-shadow: 0 18px 50px rgba(0,0,0,0.2); }
+      .gx-bub.ai { align-self: flex-start; border-radius: 36px 36px 36px 10px; background: ${L ? "#F3EFE6" : "#F4F2FF"}; color: #181715; }
       .gx-btxt { display: block; }
       .gx-who { display: block; margin-bottom: 10px; font-size: 30px; font-weight: 900; letter-spacing: 0.14em; color: ${A}; }
       .gx-dots { position: absolute; left: 42px; top: 50%; margin-top: -12px; display: flex; gap: 16px; }
       .gx-d { display: block; width: 24px; height: 24px; border-radius: 50%; background: ${A}; }
-      .gx-stamp { display: block; align-self: flex-end; max-width: 92%; padding: 16px 26px; border-radius: 16px; border: 6px solid #FF4D6D; color: #FF4D6D; background: rgba(13,10,26,0.9); font-size: 0.75em; font-weight: 900; text-transform: uppercase; letter-spacing: 0.02em; line-height: 1.1; }
+      .gx-stamp { display: block; align-self: flex-end; max-width: 92%; padding: 16px 26px; border-radius: 16px; border: 6px solid #FF4D6D; color: #FF4D6D; background: ${L ? "#FFF5F5" : "rgba(13,10,26,0.9)"}; font-size: 0.75em; font-weight: 900; text-transform: uppercase; letter-spacing: 0.02em; line-height: 1.1; }
       .gx-search { position: absolute; left: 60px; right: 60px; top: 70px; bottom: 60px; display: flex; flex-direction: column; gap: 22px; }
-      .gx-bar { display: flex; align-items: center; gap: 18px; height: 96px; padding: 0 30px; border-radius: 48px; background: #FFFFFF; color: #15122A; }
+      .gx-bar { display: flex; align-items: center; gap: 18px; height: 96px; padding: 0 30px; border-radius: 48px; background: ${L ? "#F3EFE6" : "#FFFFFF"}; color: #15122A; }
       .gx-glass { display: block; width: 30px; height: 30px; flex: none; border-radius: 50%; border: 5px solid #6B6880; box-sizing: border-box; }
       .gx-typed { display: block; font-size: 40px; font-weight: 600; white-space: nowrap; overflow: hidden; }
       .gx-caret { display: block; width: 4px; height: 44px; background: ${A}; }
-      .gx-res { display: flex; flex-direction: column; gap: 8px; padding: 22px 28px; border-radius: 22px; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.12); }
-      .gx-rt { display: block; font-size: 38px; font-weight: 800; color: #B9A8FF; }
-      .gx-rs { display: block; font-size: 30px; line-height: 1.3; color: rgba(255,255,255,0.8); }
-      .gx-post { position: absolute; left: 70px; right: 70px; top: 90px; display: flex; flex-direction: column; gap: 22px; padding: 36px; border-radius: 30px; background: #FFFFFF; color: #15122A; box-shadow: 0 30px 80px rgba(0,0,0,0.5); }
+      .gx-res { display: flex; flex-direction: column; gap: 8px; padding: 22px 28px; border-radius: 22px; background: ${cardBg}; border: 1px solid ${cardBorder}; }
+      .gx-rt { display: block; font-size: 38px; font-weight: 800; color: ${L ? A : "#B9A8FF"}; }
+      .gx-rs { display: block; font-size: 30px; line-height: 1.3; color: ${ink80}; }
+      .gx-post { position: absolute; left: 70px; right: 70px; top: 90px; display: flex; flex-direction: column; gap: 22px; padding: 36px; border-radius: 30px; background: #FFFFFF; color: #15122A; box-shadow: 0 24px 60px rgba(0,0,0,0.16); }
       .gx-ph { display: flex; align-items: center; gap: 18px; }
       .gx-av { display: flex; align-items: center; justify-content: center; width: 76px; height: 76px; border-radius: 50%; background: ${A}; color: #FFFFFF; font-weight: 900; font-size: 30px; }
       .gx-name { display: block; font-size: 38px; font-weight: 800; }
@@ -501,10 +524,10 @@ export function graphicsCss(o: { w: number; h: number; accent: string; bg: strin
       .gx-stats { display: flex; gap: 30px; font-size: 30px; color: #5B5870; }
       .gx-st { display: block; }
       .gx-list { position: absolute; left: 36px; right: 36px; top: 124px; bottom: 32px; display: flex; flex-direction: column; justify-content: stretch; gap: 18px; }
-      .gx-li { display: flex; flex: 1 1 0; max-height: 220px; align-items: center; gap: 30px; padding: 20px 34px; border-radius: 30px; background: rgba(255,255,255,0.09); border-left: 12px solid ${A}; }
+      .gx-li { display: flex; flex: 1 1 0; max-height: 220px; align-items: center; gap: 30px; padding: 20px 34px; border-radius: 30px; background: ${cardBg}; border-left: 12px solid ${A}; }
       .gx-num { display: block; font-family: ${o.monoFamily}; font-size: 52px; font-weight: 700; color: ${A}; }
-      .gx-lt { display: flex; flex-direction: column; gap: 6px; font-size: 56px; font-weight: 900; line-height: 1.06; }
-      .gx-lv { display: block; font-size: 38px; font-weight: 600; color: rgba(255,255,255,0.7); }
+      .gx-lt { display: flex; flex-direction: column; gap: 6px; font-size: 56px; font-weight: 900; line-height: 1.06; color: ${ink}; }
+      .gx-lv { display: block; font-size: 38px; font-weight: 600; color: ${ink70}; }
       .gx-term { position: absolute; left: 0; right: 0; top: 0; min-height: 62%; display: flex; flex-direction: column; border-radius: 30px; overflow: hidden; background: #0E1116; border: 2px solid rgba(255,255,255,0.12); box-shadow: 0 40px 100px rgba(0,0,0,0.55); }
       .gx-tbar { display: flex; align-items: center; gap: 14px; height: 74px; padding: 0 28px; background: #1A1F27; }
       .gx-tdot { display: block; width: 22px; height: 22px; border-radius: 50%; background: #FF5F57; }
@@ -522,24 +545,24 @@ export function graphicsCss(o: { w: number; h: number; accent: string; bg: strin
       .gx-spin { display: inline-block; color: ${A}; }
       .gx-tk { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 34px; }
       .gx-tkh { display: flex; align-items: center; justify-content: space-between; padding: 0 10px; }
-      .gx-tkn { display: block; font-size: 64px; font-weight: 700; letter-spacing: 0.12em; color: #FFFFFF; }
+      .gx-tkn { display: block; font-size: 64px; font-weight: 700; letter-spacing: 0.12em; color: ${ink}; }
       .gx-live { display: flex; align-items: center; gap: 12px; font-size: 30px; font-weight: 800; letter-spacing: 0.14em; color: #FF4D4D; }
       .gx-live i { display: block; width: 20px; height: 20px; border-radius: 50%; background: #FF4D4D; }
-      .gx-tkbig { display: flex; flex-direction: column; gap: 12px; padding: 44px 46px; border-radius: 30px; background: rgba(0,0,0,0.55); border: 3px solid ${A}; box-shadow: 0 0 60px ${A}55; }
-      .gx-tkl { display: block; font-size: 44px; font-weight: 800; color: rgba(255,255,255,0.85); text-transform: uppercase; letter-spacing: 0.04em; }
-      .gx-tkv { display: block; font-size: 112px; font-weight: 900; line-height: 1; color: #3DDC84; transform-origin: 0% 50%; }
-      .gx-tknote { display: block; font-size: 34px; font-weight: 700; color: rgba(255,255,255,0.7); }
-      .gx-tape { display: block; overflow: hidden; white-space: nowrap; padding: 22px 0; border-top: 2px solid rgba(255,255,255,0.15); border-bottom: 2px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.45); }
+      .gx-tkbig { display: flex; flex-direction: column; gap: 12px; padding: 44px 46px; border-radius: 30px; background: ${L ? "#FFFFFF" : "rgba(0,0,0,0.55)"}; border: 3px solid ${A}; box-shadow: 0 0 60px ${A}22; }
+      .gx-tkl { display: block; font-size: 44px; font-weight: 800; color: ${ink88}; text-transform: uppercase; letter-spacing: 0.04em; }
+      .gx-tkv { display: block; font-size: 112px; font-weight: 900; line-height: 1; color: ${L ? "#2E8B57" : "#3DDC84"}; transform-origin: 0% 50%; }
+      .gx-tknote { display: block; font-size: 34px; font-weight: 700; color: ${ink70}; }
+      .gx-tape { display: block; overflow: hidden; white-space: nowrap; padding: 22px 0; border-top: 2px solid ${cardBorder}; border-bottom: 2px solid ${cardBorder}; background: ${cardBg}; }
       .gx-tapein { display: inline-flex; gap: 60px; padding-left: 30px; }
-      .gx-tc { display: inline-block; font-size: 40px; color: #FFFFFF; }
+      .gx-tc { display: inline-block; font-size: 40px; color: ${ink}; }
       .gx-tc b { color: ${A}; }
-      .gx-up { margin-left: 10px; color: #3DDC84; font-style: normal; }
-      .gx-round { position: absolute; left: 0; right: 0; top: 50%; margin-top: -330px; display: flex; flex-direction: column; gap: 22px; padding: 54px 56px; border-radius: 40px; background: #F7F6F2; color: #15122A; box-shadow: 0 40px 100px rgba(0,0,0,0.5); }
+      .gx-up { margin-left: 10px; color: ${L ? "#2E8B57" : "#3DDC84"}; font-style: normal; }
+      .gx-round { position: absolute; left: 0; right: 0; top: 50%; margin-top: -330px; display: flex; flex-direction: column; gap: 22px; padding: 54px 56px; border-radius: 40px; background: #F7F6F2; color: #15122A; box-shadow: 0 40px 100px rgba(0,0,0,0.22); }
       .gx-rk { display: block; font-size: 34px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: #6B6880; }
       .gx-ramt { display: block; font-size: 150px; font-weight: 900; line-height: 0.95; letter-spacing: -0.03em; color: #15122A; transform-origin: 0% 60%; }
       .gx-rlab { display: block; font-size: 40px; font-weight: 700; color: #3B3850; }
       .gx-rrow { display: flex; justify-content: space-between; align-items: baseline; padding-top: 18px; border-top: 2px solid rgba(21,18,42,0.12); font-size: 40px; font-weight: 600; color: #3B3850; }
       .gx-rrow b { font-size: 48px; font-weight: 900; color: #15122A; }
       .gx-chips { display: flex; flex-wrap: wrap; gap: 14px; }
-      .gx-chip { display: block; padding: 12px 24px; border-radius: 40px; background: ${A}; color: #15122A; font-size: 32px; font-weight: 800; }`;
+      .gx-chip { display: block; padding: 12px 24px; border-radius: 40px; background: ${A}; color: #FFFFFF; font-size: 32px; font-weight: 800; }`;
 }

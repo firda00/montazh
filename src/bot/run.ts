@@ -73,7 +73,10 @@ const reviewKey = !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
 log(`самопроверка ИИ: ${reviewOn ? (reviewKey ? `вкл. (${reviewModels().join(" → ")})` : "вкл., но нет GEMINI_API_KEY — будет пропускаться") : "выкл. (VEDIT_SELF_REVIEW=off)"}`);
 const selfReview = reviewOn && reviewKey ? (file: string, ctx: Parameters<typeof runSelfReview>[1]) => runSelfReview(file, ctx, { onLog: (l) => log(`  ${l}`) }) : false;
 
-const running = await startBot({ token, allowedUserIds, adminIds: admins, apiBase, maxJobs, retentionDays, onLog: log, selfReview });
+const watermarkFree = process.env.VEDIT_WATERMARK_FREE !== "0";
+log(`водяной знак на бесплатном тарифе: ${watermarkFree ? "вкл. (платные и VIP — без водяного знака)" : "выкл."}`);
+
+const running = await startBot({ token, allowedUserIds, adminIds: admins, apiBase, maxJobs, retentionDays, onLog: log, selfReview, watermarkFree });
 
 let stopping = false;
 const shutdown = async () => {

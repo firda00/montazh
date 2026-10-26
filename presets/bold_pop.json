@@ -15,6 +15,14 @@
     "заканчивать на законченной фразе",
     "чередовать сцены"
   ],
+  "sfx": {
+    "enabled": true,
+    "intensity": "dynamic",
+    "hook_impact": true,
+    "transitions": true,
+    "title_pop": true,
+    "outro_chime": true
+  },
   "design": {
     "font": {
       "family": "Inter",

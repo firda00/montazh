@@ -1,6 +1,7 @@
 // Stage 34: Monetization & Billing — tariffs, card transfer checkout with receipt verification,
 // 1-click admin approval/rejection, promo codes, free-trial watermark and 1-click watermark removal.
 import fs from "node:fs/promises";
+import path from "node:path";
 import type { BotApi, InlineButton, InlineKeyboard, TgMessage } from "./telegram-api.ts";
 import type { BotDb, Lang, PaymentRow } from "./db.ts";
 
@@ -340,6 +341,7 @@ export async function defaultWatermarkVideo(file: string): Promise<string> {
 export interface BillingDeps {
   db: BotDb;
   api: BotApi;
+  usersDir: string;
   envAdmins: Set<number>;
   isAdmin: (uid: number) => boolean;
   isVip: (uid: number) => boolean;
@@ -352,7 +354,7 @@ export interface BillingDeps {
 }
 
 export function billingHandlers(d: BillingDeps) {
-  const { db, api, envAdmins, isAdmin, isVip, langOf, say, edit, setAwaiting, env, log } = d;
+  const { db, api, usersDir, envAdmins, isAdmin, isVip, langOf, say, edit, setAwaiting, env, log } = d;
 
   const allAdmins = (): number[] => [...new Set([...envAdmins, ...db.adminIds()])];
 
@@ -461,6 +463,16 @@ export function billingHandlers(d: BillingDeps) {
     log(`[${uid}] чек оплаты #${payment.id}: пакет ${pkg.id} (${pkg.priceUzs} сум)`);
     await say(chatId, B.receiptSaved(payment.id, B.pkgTitle[pkg.id]));
 
+    let localFile: string | undefined;
+    try {
+      const f = await api.getFile(fileId);
+      const ext = kind === "photo" ? ".jpg" : (path.extname(doc?.file_name ?? "") || ".pdf");
+      const dest = path.join(usersDir, String(uid), "receipts", `receipt_${payment.id}${ext}`);
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await api.download(f, dest);
+      localFile = dest;
+    } catch {}
+
     const u = db.getUser(uid);
     const userLine = [u?.first_name, u?.username ? `@${u.username}` : null].filter(Boolean).join(" ") || String(uid);
     for (const adminId of allAdmins()) {
@@ -468,12 +480,13 @@ export function billingHandlers(d: BillingDeps) {
       const aB = tb(aLang);
       const caption = aB.adminReceiptCaption(payment, userLine, aB.pkgTitle[pkg.id]);
       const kb = paymentAdminKb(aLang, payment.id);
-      try {
-        if (kind === "photo") await api.sendPhoto(adminId, fileId, caption, kb);
-        else await api.sendDocument(adminId, fileId, caption, { reply_markup: kb });
-      } catch {
-        await say(adminId, caption, kb);
+      if (localFile) {
+        try {
+          if (kind === "photo") await api.sendPhoto(adminId, localFile, `🧾 Чек #${payment.id}`);
+          else await api.sendDocument(adminId, localFile, `🧾 Чек #${payment.id}`);
+        } catch {}
       }
+      await say(adminId, caption, kb);
     }
     return true;
   }
@@ -499,7 +512,7 @@ export function billingHandlers(d: BillingDeps) {
     for (const out of outs) {
       try {
         await fs.stat(out.file);
-        await api.sendDocument(chatId, out.file, B.unwmCaption(out.id || out.output_id), { disableContentTypeDetection: true });
+        await api.sendDocument(chatId, out.file, B.unwmCaption(out.output_id), { disableContentTypeDetection: true });
       } catch {
         await api.sendVideo(chatId, out.file, { caption: B.unwmCaption(out.output_id), duration: out.duration ?? undefined }).catch(() => {});
       }

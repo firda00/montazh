@@ -4,6 +4,7 @@ import { checkClipBoundaries } from "./validate.ts";
 import type { PlanContext } from "./context.ts";
 import { parseRef, resolveRef } from "./refs.ts";
 import { applyMotion, jumpCutClips } from "../style/jumpcut.ts";
+import { thinCues, type SfxCue } from "../audio/sfx.ts";
 
 export interface ResolvedClip {
   /** index of the clip in the model's draft (messages use it, so skipped clips do not shift numbering) */
@@ -228,12 +229,51 @@ export function resolveDraft(draft: PlanDraft, ctx: PlanContext, opts: ResolveOp
     if (errors.length === 0) {
       // reference style: the cleaned pieces with punch-ins, effects on the cuts, the colour grade and the music ducking
       const styled = cleaned && ctx.style ? applyMotion(cleaned.clips, ctx.style.zoom, ctx.style.audio.sfx, (t) => phraseIndexAt(ctx, t)) : null;
+
+      // sound effects (SFX) determination for any montage
+      const sfxWords = (draft.reasoning ?? "") + " " + ((draft.brief.style_words ?? []).join(" "));
+      const explicitNoSfx = /без\s*(?:звук\w*|саунд\w*|эффект\w*|sfx)|no[-_ ]?sfx/i.test(sfxWords);
+      const explicitSfx = /(?:со?\s*|с\s*)(?:звук\w*|саунд\w*|sfx|эффект\w*)|(?:звуков\w*|саунд\w*)\s*эффект\w*|звуки\s*на\s*склейках/i.test(sfxWords);
+      const presetSfx = ctx.preset.sfx?.enabled ?? (ctx.preset.pace === "dynamic");
+      const wantSfx = !explicitNoSfx && (o.sfx?.enabled !== undefined ? o.sfx.enabled : (explicitSfx || presetSfx));
+
+      const collectedSfx: SfxCue[] = [];
+      if (styled && styled.sfx.length) {
+        collectedSfx.push(...(styled.sfx as SfxCue[]));
+      } else if (wantSfx) {
+        let elapsed = 0;
+        for (let i = 0; i < clips.length; i++) {
+          const c = clips[i];
+          const dur = (c.end - c.start) / (c.speed || 1);
+          if (i > 0 && (i % 2 === 1 || i === 1)) {
+            collectedSfx.push({ t: Math.max(0, Number((elapsed - 0.12).toFixed(3))), kind: "whoosh", gain: -6 });
+          }
+          elapsed += dur;
+        }
+        if (duration >= 2 && ctx.preset.sfx?.hook_impact !== false) {
+          collectedSfx.unshift({ t: 0, kind: "impact", gain: -4 });
+        }
+      }
+
+      if (wantSfx && titles.length && ctx.preset.sfx?.title_pop !== false) {
+        for (const t of titles) {
+          collectedSfx.push({ t: Number(t.at.toFixed(3)), kind: "pop", gain: -3 });
+        }
+      }
+
+      if (wantSfx && ctx.preset.design?.outro?.enabled && duration > 3 && ctx.preset.sfx?.outro_chime !== false) {
+        const outroDur = ctx.preset.design.outro.duration ?? 1.8;
+        collectedSfx.push({ t: Math.max(0, Number((duration - outroDur).toFixed(3))), kind: "chime", gain: -4 });
+      }
+
+      const outputSfx = existing && currentOut ? (currentOut.sfx ?? []) : (collectedSfx.length ? thinCues(collectedSfx, { duration, max: 100 }) : []);
+
       out.output = {
         id: o.id,
         aspect: o.aspect,
         target_duration: target ?? undefined,
         clips: styled ? styled.clips : clips.map((c) => ({ src_start: Number(c.start.toFixed(3)), src_end: Number(c.end.toFixed(3)), speed: c.speed, crop: c.crop })),
-        ...(styled && styled.sfx.length ? { sfx: styled.sfx } : {}),
+        ...(outputSfx.length ? { sfx: outputSfx } : {}),
         ...(ctx.style?.grade ? { grade: ctx.style.grade } : {}),
         ...(ctx.style ? { music_duck_db: ctx.style.audio.duckDb } : {}),
         // new output → preset; existing with captions already on → its own style; switched on by the edit → preset; still off → untouched

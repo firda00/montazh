@@ -55,6 +55,7 @@ import type { DesignJob } from "./export.ts";
 import type { OutPhrase, OutWord } from "./timeline.ts";
 import type { FontMetrics, Layout, LayoutLine, LayoutOptions, LayoutPage, LayoutTitle, LayoutWord } from "./layout-types.ts";
 import { hookExtent } from "./hyperframes/split.ts";
+import { isLightHex } from "./panel-graphics.ts";
 import { hookPlateTiming, sectionAt } from "./abror.ts";
 import type { FaceTrack } from "./faces.ts";
 import { placeBlock, placeSequence, safeAreaFor, type BlockRequest, type Obstacle, type PlaceOptions } from "./placement.ts";
@@ -868,6 +869,14 @@ export function buildLayout(job: DesignJob, metrics: FontMetrics, opts: LayoutOp
   // stage 33 (format A): over the full-frame parts the captions move from the seam to the chest
   if (job.sections?.length && D.captions.anchor_y_full !== undefined) {
     for (const p of pages) if (sectionAt(job.sections, p.dispStart + 0.01) !== "split") p.anchorY = D.captions.anchor_y_full;
+  } else if (D.layout === "split" && isLightHex(D.split.panel_bg) && D.split.panel_frame !== "edge" && D.captions.anchor_y_full !== undefined && job.panels && job.panels.panels.length >= 3) {
+    // explainer studio mode: during middle panels (1 .. N-2) the speaker slides down and captions sit at anchor_y_full (0.74) below the large card
+    const tHide = job.panels.panels[1]!.start;
+    const tShow = job.panels.panels[job.panels.panels.length - 1]!.start;
+    for (const p of pages) {
+      const mid = (p.dispStart + p.dispEnd) / 2;
+      if (mid >= tHide && mid < tShow) p.anchorY = D.captions.anchor_y_full;
+    }
   }
   // stage 33: the hook plate carries the hook's words — captions start when it leaves (his editors: plate, then captions)
   const plate = hookPlateWindow(D, job, duration);

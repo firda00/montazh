@@ -18,6 +18,7 @@ export const BUILTIN_PRESETS: Record<string, Preset> = {
     default_aspect: "9:16",
     music_default: false,
     notes: ["хук в первые 3 секунды", "заканчивать на законченной фразе", "чередовать сцены"],
+    sfx: { enabled: true, intensity: "dynamic", hook_impact: true, transitions: true, title_pop: true, outro_chime: true },
     design: {
       // stage 23: smaller, softer captions (thin stroke + soft shadow), 3 words a page, lower third, off the faces
       colors: { stroke: "rgba(0,0,0,0.85)" },
@@ -40,6 +41,7 @@ export const BUILTIN_PRESETS: Record<string, Preset> = {
     default_aspect: "16:9",
     music_default: false,
     notes: ["сохранять исходный порядок", "не ускорять речь"],
+    sfx: { enabled: false, intensity: "none", hook_impact: false, transitions: false, title_pop: false, outro_chime: false },
   }),
 };
 

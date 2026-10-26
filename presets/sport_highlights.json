@@ -15,6 +15,14 @@
     "промахи — не больше двух, только смешные",
     "живой звук только там, где говорят люди"
   ],
+  "sfx": {
+    "enabled": true,
+    "intensity": "heavy",
+    "hook_impact": true,
+    "transitions": true,
+    "title_pop": true,
+    "outro_chime": false
+  },
   "design": {
     "colors": {
       "text": "#FFFFFF",

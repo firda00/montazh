@@ -16,6 +16,14 @@
     "паузы можно оставлять: спокойный экспертный темп",
     "сюжет с цифрами — в первой половине"
   ],
+  "sfx": {
+    "enabled": true,
+    "intensity": "subtle",
+    "hook_impact": false,
+    "transitions": true,
+    "title_pop": true,
+    "outro_chime": false
+  },
   "design": {
     "font": {
       "family": "Inter",

@@ -205,6 +205,8 @@ async function loadTranscript(jobId: string): Promise<Transcript | undefined> {
 async function renderIds(jobId: string, ids: string[], edl: Edl, progress: (t: string) => Promise<void>, log: (l: string) => void) {
   const { HyperFramesRenderer } = await import("../render/hyperframes.ts");
   const { renderOutputs } = await import("../render/index.ts");
+  const meta = await loadJob(jobId).catch(() => null);
+  const wantInserts = meta?.preset !== "calm" && meta?.preset !== "sport_highlights" && meta?.preset !== "split_news" && meta?.preset !== "abror_split" && meta?.preset !== "explainer" ? ("on" as const) : undefined;
   const renderer = new HyperFramesRenderer();
   await renderer.prepare();
   let i = 0;
@@ -216,6 +218,7 @@ async function renderIds(jobId: string, ids: string[], edl: Edl, progress: (t: s
       quality: "looks",
       only: ids,
       edl,
+      ...(wantInserts ? { inserts: wantInserts } : {}),
       onEvent: (line) => {
         log(`  ${line}`);
         const m = /^▸ design (\S+)/.exec(line);
